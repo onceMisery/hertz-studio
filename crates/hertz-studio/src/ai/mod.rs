@@ -38,3 +38,4 @@ pub(crate) mod usage;
 pub(crate) mod wallpaper_artifacts;
 pub(crate) mod wallpaper_jobs;
 pub(crate) mod wallpaper_pairing;
+mod wallpaper_provider;

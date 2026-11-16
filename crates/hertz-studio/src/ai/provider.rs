@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const RESPONSE_BYTES: usize = 256 * 1024;
-const REQUEST_BYTES: usize = 128 * 1024;
+pub(super) const REQUEST_BYTES: usize = 128 * 1024;
 const OUTPUT_TOKENS: u64 = 512;
-const LOCAL_PRICE_VERSION: &str = "ollama-local-zero-usd-v1";
+pub(super) const LOCAL_PRICE_VERSION: &str = "ollama-local-zero-usd-v1";
 const OPENAI_DISABLED: &str = "OpenAI model or bounded request configuration is unsupported";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
@@ -242,7 +242,7 @@ impl Ollama {
         Ok(bytes)
     }
 
-    async fn completion_execute(
+    pub(super) async fn completion_execute(
         &self,
         body: Vec<u8>,
     ) -> Result<super::jobs::CompletionReply, String> {
@@ -294,6 +294,30 @@ impl StageIntentProvider for Ollama {
     }
     fn ready(&self) -> bool {
         true
+    }
+    fn supports_wallpaper_builtin(&self) -> bool {
+        true
+    }
+    fn quote_wallpaper_builtin(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+    ) -> Result<PriceQuote, String> {
+        super::wallpaper_provider::quote(self, request)
+    }
+    fn generate_wallpaper_builtin(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        pricing: PricingSnapshot,
+        _credential: Option<super::credential::ProviderCredential>,
+        cancellation: super::jobs::ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::jobs::WallpaperReply> + Send>>
+    {
+        Box::pin(super::wallpaper_provider::generate(
+            self.clone(),
+            request.clone(),
+            pricing,
+            cancellation,
+        ))
     }
     fn quote(&self, brief: &str) -> Result<PriceQuote, String> {
         self.request(brief).map_err(str::to_owned)?;

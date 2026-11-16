@@ -121,6 +121,15 @@ pub(crate) trait StageIntentProvider: Send + Sync {
         false
     }
 
+    /// Quote the complete wallpaper request with its own output bounds.
+    /// Existing zero-cost fixtures can keep their original quote.
+    fn quote_wallpaper_builtin(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+    ) -> Result<PriceQuote, String> {
+        self.quote(&request.brief)
+    }
+
     fn generate_wallpaper_builtin(
         &self,
         _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -130,7 +139,7 @@ pub(crate) trait StageIntentProvider: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WallpaperReply> + Send>> {
         Box::pin(async {
             WallpaperReply {
-                output: Err("provider does not support wallpaper generation".to_string()),
+                output: Err("provider does not support wallpaper generation".into()),
                 usage: None,
             }
         })
@@ -152,8 +161,31 @@ pub(crate) struct CompletionReply {
 /// 壁纸结构化输出的 provider 回复：raw JSON 由合同层校验，校验失败按
 /// invalid_output 结算，与舞台 intent 的失败语义一致。
 pub(crate) struct WallpaperReply {
-    pub output: Result<Value, String>,
+    pub output: Result<Value, WallpaperOutputError>,
     pub usage: Option<TrustedUsage>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WallpaperOutputError {
+    Provider(String),
+    Rejected,
+}
+
+impl From<&str> for WallpaperOutputError {
+    fn from(reason: &str) -> Self {
+        Self::Provider(reason.into())
+    }
+}
+
+impl std::fmt::Display for WallpaperOutputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Provider(reason) => formatter.write_str(reason),
+            Self::Rejected => {
+                formatter.write_str("wallpaper output violates the generation contract")
+            }
+        }
+    }
 }
 
 /// 生成能力注册项（§19.3）：队列/执行期限、输入上界与计费预留按能力
@@ -196,11 +228,11 @@ pub(crate) enum GenerationInput {
 }
 
 impl GenerationInput {
-    /// 计费引用文本：舞台用 brief，壁纸用请求内的 brief。
-    fn pricing_brief(&self) -> &str {
+    /// 按任务类型核价，壁纸使用完整请求及其独立输出预算。
+    fn price_quote(&self, provider: &dyn StageIntentProvider) -> Result<PriceQuote, String> {
         match self {
-            GenerationInput::Stage(brief) => brief,
-            GenerationInput::Wallpaper(request) => &request.brief,
+            GenerationInput::Stage(brief) => provider.quote(brief),
+            GenerationInput::Wallpaper(request) => provider.quote_wallpaper_builtin(request),
         }
     }
 
@@ -1056,7 +1088,7 @@ async fn submit_owned(
         ));
     }
 
-    let quote = provider.quote(input.pricing_brief()).map_err(|reason| {
+    let quote = input.price_quote(provider.as_ref()).map_err(|reason| {
         ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "pricing_unavailable",
@@ -1596,7 +1628,10 @@ async fn run_job_inner(
         }
     };
     let (raw_output, trusted_usage) = match outcome {
-        ProviderCall::Stage(reply) => (reply.intent, reply.usage),
+        ProviderCall::Stage(reply) => (
+            reply.intent.map_err(WallpaperOutputError::Provider),
+            reply.usage,
+        ),
         ProviderCall::Wallpaper(reply) => (reply.output, reply.usage),
     };
     if let Some(usage) = trusted_usage.as_ref() {
@@ -1768,7 +1803,17 @@ async fn run_job_inner(
                 }
             }
         }
-        Err(reason) => {
+        Err(WallpaperOutputError::Rejected) => {
+            finish_running_with_failure_code(
+                state.clone(),
+                &job_id,
+                "failed",
+                trusted_usage.as_ref(),
+                "invalid_output",
+            )
+            .await;
+        }
+        Err(WallpaperOutputError::Provider(reason)) => {
             tracing::warn!("AI provider 调用失败: {reason}");
             finish_running_with_provider_error(
                 state.clone(),
@@ -2886,13 +2931,15 @@ pub(crate) async fn wallpaper_quote(
             "壁纸生成 provider 当前不可用",
         ));
     }
-    let quote = provider.quote(&request.brief).map_err(|reason| {
-        ApiError::new(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "pricing_unavailable",
-            reason,
-        )
-    })?;
+    let quote = provider
+        .quote_wallpaper_builtin(&request)
+        .map_err(|reason| {
+            ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "pricing_unavailable",
+                reason,
+            )
+        })?;
     quote.validate().map_err(|reason| {
         ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,

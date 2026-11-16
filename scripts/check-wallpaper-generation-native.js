@@ -15,9 +15,10 @@ const output = path.resolve(process.env.HERTZ_GENERATION_OUTPUT || path.join(roo
 const binary = path.resolve(process.env.HERTZ_BIN || path.join(root, 'target/debug/hertz-studio.exe'));
 const desktopBinary = path.resolve(process.env.HERTZ_DESKTOP_BIN || path.join(root, 'target/debug/hertz-desktop.exe'));
 const standalone = process.env.HERTZ_GENERATION_STANDALONE === '1';
+const ollamaFixture = process.env.HERTZ_GENERATION_OLLAMA_FIXTURE === '1';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const checks = [], errors = [];
-let child, desktopChild, browser, mainBrowser, officialBrowser, page;
+let child, desktopChild, browser, mainBrowser, officialBrowser, page, providerFixture;
 async function until(read, label, timeout = 30000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(100); }
@@ -67,6 +68,11 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     try { await nativeRequest(pipe, { command: 'status' }); throw new Error('Existing standalone desktop host; leave it untouched.'); }
     catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error; }
     assert.ok(fs.existsSync(desktopBinary));
+  }
+  if (ollamaFixture) {
+    providerFixture = await require('./wallpaper-ollama-fixture')();
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(path.join(data, 'config.toml'), '[ai]\nprovider = "ollama"\nmodel = "test-local"\norigin = "' + providerFixture.origin + '"\n');
   }
   child = spawn(binary, [...(standalone ? [] : ['--window']), '--bind', '127.0.0.1', '--port', '0', '--data-dir', data], {
     cwd: root, windowsHide: true, stdio: 'ignore', env,
@@ -118,6 +124,10 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       assert.equal(receipt.ok, true, JSON.stringify(receipt.error));
       return receipt.result;
     }, 'native status snapshot');
+    const savedParameters = draftId => page.evaluate(async draftId => {
+      const draft = (await hertzWallpaperSettings.requestManagement('wallpaper.draft.get', { draftId })).result;
+      return (await hertzWallpaperSettings.requestManagement('wallpaper.draft.parameters', { draftId, draftRevision: draft.draftRevision, limit: 32 })).result.params;
+    }, draftId);
     await page.waitForFunction(() => {
       const context = hertzWallpaperSettings.currentAiContext();
       return context.revision != null && !!context.groupId;
@@ -150,7 +160,8 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.waitForSelector('#generation-brief:enabled');
     pass((standalone ? 'independent pipe' : 'embedded HostHandle') + ' real pairing and restricted generation connection');
     await page.locator('#generation-brief').fill('柔和夜色，宁静频谱'); await page.locator('#generation-quote').click();
-    await page.waitForSelector('#generation-confirm:enabled'); assert.match(await page.locator('#generation-price-text').innerText(), /免费/);
+    await page.waitForSelector('#generation-confirm:enabled'); assert.match(await page.locator('#generation-price-text').innerText(), ollamaFixture ? /0 micro-USD/ : /免费/);
+    if (providerFixture) assert.equal(providerFixture.calls(), 0, 'quotation must not call Ollama');
     const before = await api('/v1/ai/jobs');
     await page.evaluate(() => {
       const request = hertzWallpaperSettings.requestManagement;
@@ -168,9 +179,10 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.locator('#generation-confirm').click();
     const denied = JSON.parse((await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', probe, '-TargetPid', String(standalone ? desktopChild.pid : child.pid), '-Button', '7'], { windowsHide: true, timeout: 25000, encoding: 'utf8' })).stdout.trim());
     assert.ok(denied.some(text => text.includes('default=7'))); assert.ok(denied.some(text => text.includes('coast') || text.includes('内置场景')));
-    assert.ok(denied.some(text => text.includes('免费') && text.includes('90 秒')));
+    assert.ok(denied.some(text => text.includes(ollamaFixture ? '0 micro-USD' : '免费') && text.includes('90 秒')));
     await page.waitForFunction(() => window.generationConfirmationReceipt?.error?.code === 'generation_cancelled');
     assert.deepEqual(await api('/v1/ai/jobs'), before); pass('real native confirmation defaults to No and refusal creates no task');
+    if (providerFixture) assert.equal(providerFixture.calls(), 0, 'refusal must not call Ollama');
     assert.equal((await nativeStatus()).job,null);
     // Native dialog visibility can invalidate the first quote. Request a new
     // explicit quote before the separately confirmed Yes operation.
@@ -224,6 +236,12 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await until(async () => (await native('candidates')).result?.candidates?.some(item => item.receiptId === candidate.receiptId && item.state === 'saved'), 'saved immutable package');
     const saved = (await native('candidates')).result.candidates.find(item => item.receiptId === candidate.receiptId);
     assert.ok(saved.workKey); assert.match(saved.packageHash, /^[a-f0-9]{64}$/);
+    if (providerFixture) {
+      const params = await savedParameters(saved.savedDraftId);
+      assert.equal(params.tod, 0.72);
+      assert.equal(params.reduced, true);
+      fs.writeFileSync(path.join(output, 'saved-candidate.json'), JSON.stringify(saved, null, 2));
+    }
     assert.equal((await native('candidate.save', { receiptId: candidate.receiptId, title: 'repeat' })).result.packageHash, saved.packageHash);
     assert.deepEqual(await page.evaluate(() => ({
       context: hertzWallpaperSettings.currentAiContext(),
@@ -234,6 +252,11 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.reload(); await page.waitForSelector('#generation-connect', { state: 'attached' });
     await page.locator('#wallpaper-generation > summary').click();
     await until(async () => (await page.locator('#generation-candidates').innerText()).includes(saved.packageHash.slice(0, 12)), 'saved receipt after reopening native page');
+    if (providerFixture) {
+      const params = await savedParameters(saved.savedDraftId);
+      assert.equal(params.tod, 0.72);
+      assert.equal(params.reduced, true);
+    }
     pass('explicit save and reopen retain the original real package');
     let polling = 0;
     await page.exposeFunction('generationPollObserved', () => { polling++; });
@@ -248,8 +271,12 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     assert.equal((await nativeStatus()).connected, false);
     assert.ok((await api('/v1/ai/grants')).grants.every(row => row.delivery_mode !== 'native_session' || row.revoked));
     pass('explicit disconnect revokes native session');
+    if (providerFixture) {
+      providerFixture.verify();
+      pass('local Ollama schema, independent output limit and one confirmed provider request');
+    }
     assert.deepEqual(errors, []); await page.screenshot({ path: path.join(output, 'generation.png'), fullPage: true });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', checks, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
   } catch (error) {
     if (page && !page.isClosed()) await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
     const diagnostic = page && !page.isClosed() ? await page.evaluate(() => ({ visibility:document.visibilityState, trace:window.generationTrace,
@@ -258,6 +285,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     throw error;
   } finally {
     if (officialBrowser) await officialBrowser.close();if (browser) await browser.close();if(mainBrowser)await mainBrowser.close(); await stopOwned(desktopChild); await stopOwned(child);
+    if (providerFixture) await providerFixture.close();
   }
 }
 main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

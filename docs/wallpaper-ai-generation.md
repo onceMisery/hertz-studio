@@ -10,6 +10,7 @@
 | AI-02 切片 1：生成合同纯数据层 | 2026-11-16 已实施（见下） | 本文档 + `crates/hertz-wallpaper/src/generation.rs` 测试 |
 | AI-02 切片 2：capability snapshot、quote/submit、ai/jobs 注册与路由 | 2026-11-16 已实施（见下） | 本文档 + `crates/hertz-studio/src/ai/{jobs.rs,wallpaper_jobs.rs}` 测试 |
 | AI-02 切片 3：短会话配对（§19.2）与桌面接线 | 2026-11-16 已实施，Windows 内嵌/独立候选各五组真实验收通过 | 下文实现与验证边界 |
+| AI-02 切片 4：本地 Ollama builtin adapter | 2026-11-16 已实施，受控 Ollama HTTP fixture 的 Windows 内嵌/独立各十项通过 | 下文实现与验证边界；实际版本/模型质量未验收 |
 | AI-03 结果交付与入库 | 2026-11-16 builtin 候选链路已完成，Windows 内嵌/独立各九项真实验收通过 | 下文实现与验证边界 |
 | AI-04 图像 adapter 与计费 | 未实施 | 设计 §19.5、§20.5 |
 | AI-05 声明式组合 | 未实施 | 设计 §19.3 |
@@ -119,7 +120,7 @@ desktop SHA-256 `e8dc2781d793d91d2ba614754344e8dd2cd50eb17bb55fd1789b73aba5b373b
 `output/playwright/wallpaper-generation-1794792344202/result.json` 与
 `output/playwright/wallpaper-generation-1794792355677/result.json`。
 
-真实文本 provider 尚未提供壁纸模式，仅免费 fake fixture 可用。这不构成生产
+该切片收口时文本 provider 尚未提供壁纸模式，仅免费 fake fixture 可用。这不构成生产
 provider 资格，也不代表 AI-03 的 artifact 接收、预览或保存已经完成。
 
 ## 2026-11-16 AI-03：不可变候选、预览与明确保存
@@ -162,3 +163,43 @@ store 回归 67 项及设置页浏览器检查通过；关闭按钮统一为右�
 `docs/aegis/work/2026-11-16-ai02-generation-contract/90-evidence.md`。
 真实文本模型、图像、组合及外部助手的资格继续属于 AI-02 后续 adapter
 资格与 AI-04～06，fake 验收不能代替这些资格。
+
+## 2026-11-16 AI-02 切片 4：本地 Ollama builtin 输出模式
+
+显式配置本地 Ollama 后，壁纸生成目录可提供 builtin 模式。配置仍沿
+[本地 Ollama](ai-stage-drafts.md#本地-ollamar5-实验接入)：只允许数字回环
+origin 和已安装的本地型号，操作者须在 Ollama 端设置 `OLLAMA_NO_CLOUD=1`。
+Hertz 不选择、下载或启动模型，配置失败不回落 fake；目录就绪只表示本地
+配置有效，不通过目录/报价请求探测或调用模型。默认 provider 仍为 fake。
+
+`ai/wallpaper_provider.rs` 从原 `hertz-wallpaper` catalog 派生所选场景的
+sceneId/stateVersion 和 number/boolean/select 参数 schema、默认值、范围及
+选项。请求只含本次描述和所选合同，不带 requestId、其它场景、歌曲、歌词、
+音频、历史或密钥。每任务只请求一次 `/api/chat`，不流式、关闭 thinking，
+拒绝非法输出、不 clamp、不修复或换场景。
+
+专用 `quote_wallpaper_builtin` 编码完整壁纸请求，原 admission 经
+`GenerationInput` 按类型重新核价。壁纸输出上限 4096 tokens，舞台保持 512；
+完整请求最多 128 KiB，原受管响应仍最多 256 KiB，领域文本最多 64 KiB。
+本地价格/预留为零，prompt/eval 计数由正式 response 字段独立处理；不能将
+该本地计量标记当作云价或实际模型 tokenizer 保证。
+
+生成直接复用原 Ollama 的 HTTP client、限流、envelope 解码及取消 future，
+不调用 generic completion 或 StageIntent 生成入口。`WallpaperOutputError`
+区分 provider 失败与合同拒绝；后者由原 jobs 终态 owner 记录 `invalid_output`。
+取消、截断、工具调用、错误模型、未知/重复参数与越界输出不产生 artifact；
+已获得的可信 usage 保留，派发后取消且无收据仍为 unknown。本地零金额不
+改变任务派发或费用已知/未知的语义。成功结果继续进入原 AI-03 接收、唯一
+预览、明确保存与来源事务，生成/预览/保存保持桌面配置版本和场景原值。
+
+验证：Rust 1.88.0 新 adapter 八项及完整 `ai::` 207 passed/1 ignored；
+Standard/Full 构建和 Clippy、前端 86 步、API214、ADR414 通过。
+最终 Full Windows 候选在内嵌/独立形态各十项通过，包含报价/No 零请求、
+一次确认后单次模型请求、真实 GL 首帧、重复接收/保存、重开、隐藏停查和
+撤权。原生分页参数在保存后和重开后核对时段 0.72、减少动态 true；只读
+检查原 artifact、已保存工程、真实安装包及 `ai_origins` 的 hash/provider/model
+关联。证据位于 `output/ai02-ollama-20261116/`。
+
+本轮 HTTP 回环响应为无费用 fixture，不连接实际 Ollama 推理进程。实际
+Ollama 版本/型号的单次输出、模型质量/时长、OpenAI/StepFun 壁纸模式与
+AI-04～06 仍未验收；这些边界不由 fixture 通过替代。
