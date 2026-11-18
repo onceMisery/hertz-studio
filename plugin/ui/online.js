@@ -13,6 +13,8 @@
                 // 所以不能在 IIFE 顶层抓，bind() 时（app 启动序列里）再取。
   var H = null; // 宿主：{ ui, state, setStateQueue, applyQueue, paintArt,
                 //       probeImage, fmt, toast, errText }
+  var initialLoad = null;
+  var initialBusy = false;
 
   /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
   /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
@@ -1807,7 +1809,7 @@
       }
     }
   }
-  function initOnline() {
+  function initOnline(opts) {
     if ($('radio-start')) {
       ['start', 'next', 'retry', 'stop'].forEach(function (action) {
         $('radio-' + action).onclick = function () { radioAction(action); };
@@ -1933,8 +1935,22 @@
     }
     renderOnline();
     initSourceSettings();
-    loadSources();
-    loadHistory();
+    var sourceLoad = loadSources();
+    var historyLoad = loadHistory();
+    if (opts && opts.preload) {
+      initialBusy = true;
+      initialLoad = Promise.allSettled([
+        sourceLoad.then(function () {
+          // Browse the supported default category, never invent a keyword or
+          // ask a keyword-only provider for an unsupported anonymous feed.
+          if (!onlineState.q.trim() && !onlineState.cat) return;
+          return search({ silent: true });
+        }),
+        historyLoad,
+      ]).then(function () { initialBusy = false; });
+      return initialLoad;
+    }
+    return Promise.allSettled([sourceLoad, historyLoad]);
   }
 
   // ---- 音质档位（GET /v1/online/quality 描述各音源可选档位与当前选择）----
@@ -2203,13 +2219,14 @@
     // setView 首次进入在线页时按默认分类拉一屏；当前音源只支持关键词
     // 检索（QQ/酷狗）且搜索框为空时不预取——那条请求后端必回 400。
     onViewEnter: function () {
+      if (initialBusy) return initialLoad;
       // 历史与搜索预取互不依赖：每次切回在线视图都刷新，播完一曲再回来
       // 新记录能置顶（下面的早退只针对搜索预取）。
       loadHistory();
       if (onlineState.loading) return;
       if (onlineState.tracks.length && searchSession) return;
       if (!onlineState.q.trim() && !onlineState.cat) return;
-      search({ silent: true });
+      return search({ silent: true });
     },
     search: search,
     cancelSearch: cancelSearch,

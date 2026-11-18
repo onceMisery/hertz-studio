@@ -53,6 +53,7 @@
   /// 覆盖，最后停在先发出的那一份上。
   var topupTimer = null;
   var generation = 0;
+  var pendingLoad = Promise.resolve();
   var fetchedAt = { local: 0, online: 0 };
   // 有 load() 撞在「宿主还没 bind」上被挡下了，bind() 落地时补跑一次。
   // 少了它：那一次 load 的意图会静默丢失，而调用方（app.js 的 setView）
@@ -126,12 +127,12 @@
     if (!H || !T) { loadPending = true; return; }
     loadPending = false;
     // 已经有一轮在飞就不重复发。显式刷新是例外：它要把上一轮整个作废重来。
-    if (dailyState.loading && !opts.force) return;
+    if (dailyState.loading && !opts.force) return pendingLoad;
     if (topupTimer) { clearTimeout(topupTimer); topupTimer = null; }
 
     var wantLocal = !!opts.force || !dailyState.page || stale('local');
     var wantOnline = !!opts.force || !dailyState.online || stale('online');
-    if (!wantLocal && !wantOnline) { render(); return; }
+    if (!wantLocal && !wantOnline) { render(); return Promise.resolve(); }
 
     generation += 1;
     var gen = generation;
@@ -140,12 +141,17 @@
     syncLoading();
     render();
 
-    if (wantLocal) fetchLocal(opts, gen);
-    if (wantOnline) fetchOnline(gen, 0);
+    // Keep each source's first paint independent; the startup screen only
+    // observes completion of this shared round and never issues another fetch.
+    var requests = [];
+    if (wantLocal) requests.push(fetchLocal(opts, gen));
+    if (wantOnline) requests.push(fetchOnline(gen, 0));
+    pendingLoad = Promise.allSettled(requests);
+    return pendingLoad;
   }
 
   function fetchLocal(opts, gen) {
-    T.get('/v1/recommend/daily?limit=12').then(function (p) {
+    return T.get('/v1/recommend/daily?limit=12').then(function (p) {
       if (gen !== generation) return;
       dailyState.page = p;
       dailyState.loaded = true;
@@ -169,7 +175,7 @@
   /// 在线汇总那一路。失败不弹红、也不带 silent 开关：它从头到尾都不是一次
   /// 用户发起的操作，弹红只会让人以为播放器坏了。
   function fetchOnline(gen, attempt) {
-    T.get('/v1/recommend/daily/online?limit=24').then(function (p) {
+    return T.get('/v1/recommend/daily/online?limit=24').then(function (p) {
       if (gen !== generation) return;
       dailyState.online = p;
       dailyState.onlineError = null;

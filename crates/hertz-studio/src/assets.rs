@@ -37,6 +37,7 @@ impl UiBody {
 
 const JS: &str = "application/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
+const HTML: &str = "text/html; charset=utf-8";
 
 macro_rules! ui_assets {
     ($($(#[$attr:meta])* $path:literal, $mime:ident => const $name:ident: &str = edition_ui!($file:literal);)+) => {
@@ -51,6 +52,9 @@ macro_rules! ui_assets {
 }
 
 ui_assets! {
+    "/startup.js", JS => const STARTUP_JS: &str = edition_ui!("startup.js");
+    "/startup.css", CSS => const STARTUP_CSS: &str = edition_ui!("startup.css");
+    "/splash/hertzstudio-splash.html", HTML => const SPLASH_HTML: &str = edition_ui!("splash/hertzstudio-splash.html");
     "/fonts/brand.css", CSS => const BRAND_FONT_CSS: &str = edition_ui!("fonts/brand.css");
     "/volume-controls.js", JS => const VOLUME_CONTROLS_JS: &str = edition_ui!("volume-controls.js");
     "/volume-controls.css", CSS => const VOLUME_CONTROLS_CSS: &str = edition_ui!("volume-controls.css");

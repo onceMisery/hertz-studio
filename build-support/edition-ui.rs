@@ -30,6 +30,22 @@ pub fn render(source: &str, full: bool) -> io::Result<String> {
 }
 
 pub fn generate(source: &Path, dest: &Path, full: bool) -> io::Result<()> {
+    generate_directory(source, dest, full)?;
+    // The player and DBX packages share the authored splash outside plugin/ui.
+    // Copy it only at the player root, never once per recursive subdirectory.
+    if source.join("startup.js").is_file() {
+        let splash = source.join("../../splash/hertzstudio-splash.html");
+        let splash_dest = dest.join("splash");
+        fs::create_dir_all(&splash_dest)?;
+        fs::write(
+            splash_dest.join("hertzstudio-splash.html"),
+            render(&fs::read_to_string(splash)?, full)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn generate_directory(source: &Path, dest: &Path, full: bool) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     // A reused staging directory must not retain pages shipped by an older build.
     for entry in fs::read_dir(dest)? {
@@ -64,7 +80,7 @@ pub fn generate(source: &Path, dest: &Path, full: bool) -> io::Result<()> {
         let input = entry.path();
         let output = dest.join(name.as_ref());
         if input.is_dir() {
-            generate(&input, &output, full)?;
+            generate_directory(&input, &output, full)?;
         } else if matches!(
             input.extension().and_then(|s| s.to_str()),
             Some("html" | "js" | "css")

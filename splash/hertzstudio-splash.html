@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hertz Studio · 开屏动画</title>
+  <style>
+    /* ==========================================================================
+       1. DESIGN TOKENS & RESET (Zero External Dependencies)
+       ========================================================================== */
+    :root {
+      --bg-core: #05060b;
+      --bg-surface: #0d1019;
+      --accent-cyan: #22e6d6;
+      --accent-blue: #3b82f6;
+      --accent-amber: #ff9d3b;
+      --accent-rose: #ff4d6d;
+      --text-primary: #f8fafc;
+      --text-muted: #8a96ad;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-core);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+
+    [hidden] { display: none !important; }
+
+    .a11y-hidden {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* ==========================================================================
+       2. 3D PERSPECTIVE STAGE & VOLUMETRIC ATMOSPHERE
+       ========================================================================== */
+    .splash-stage {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      isolation: isolate;
+      perspective: 1100px;
+      perspective-origin: 50% 46%;
+      transform-origin: 50% 42%;
+      transition: opacity 0.42s ease, transform 0.42s cubic-bezier(0.22, 0.61, 0.36, 1);
+      background:
+        radial-gradient(ellipse 80% 55% at 50% 42%, rgba(34, 230, 214, 0.11) 0%, rgba(59, 130, 246, 0.05) 36%, transparent 70%),
+        radial-gradient(ellipse 65% 45% at 50% 62%, rgba(255, 157, 59, 0.065) 0%, transparent 62%),
+        var(--bg-core);
+    }
+
+    .splash-stage.is-exiting {
+      opacity: 0;
+      transform: scale(1.035);
+      pointer-events: none;
+    }
+
+    /* Atmospheric depth falloff vignette */
+    .depth-vignette {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 50% 48%, transparent 38%, rgba(2, 3, 7, 0.8) 100%);
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    /* Hero separation scrim — keeps the logo readable over additive background layers */
+    .hero-scrim {
+      position: absolute;
+      left: 50%;
+      top: 42%;
+      width: min(78vw, 520px);
+      aspect-ratio: 1;
+      transform: translate(-50%, -50%);
+      background: radial-gradient(circle, rgba(5, 6, 11, 0.78) 0%, rgba(5, 6, 11, 0.48) 40%, transparent 72%);
+      pointer-events: none;
+      opacity: 0;
+      z-index: 3;
+      will-change: opacity;
+    }
+
+    /* One-shot impact bloom at the emblem landing beat */
+    .impact-flash {
+      position: absolute;
+      left: 50%;
+      top: 42%;
+      width: min(60vw, 420px);
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.38) 0%, rgba(34, 230, 214, 0.18) 32%, transparent 70%);
+      transform: translate(-50%, -50%) scale(0.4);
+      pointer-events: none;
+      opacity: 0;
+      z-index: 3;
+      will-change: transform, opacity;
+    }
+
+    /* Volumetric light bloom recessed in Z-space */
+    .ambient-glow {
+      position: absolute;
+      width: min(76vw, 620px);
+      height: min(76vw, 620px);
+      border-radius: 50%;
+      background: conic-gradient(
+        from 180deg at 50% 50%,
+        rgba(34, 230, 214, 0.22),
+        rgba(59, 130, 246, 0.16),
+        rgba(255, 157, 59, 0.14),
+        rgba(34, 230, 214, 0.22)
+      );
+      filter: blur(78px);
+      opacity: 0;
+      transform: scale(0.65);
+      will-change: transform, opacity;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* High-FPS 3D Projection Canvas for Soundstage, Gyro Rings, Ribbons & EQ Pillars */
+    #acoustic-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    /* ==========================================================================
+       3. 3D LAYERED BRAND EMBLEM & EXTRUDED TYPOGRAPHY LOCKUP
+       ========================================================================== */
+    .brand-lockup {
+      position: relative;
+      z-index: 4;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: clamp(20px, 3.2vh, 30px);
+      padding: 24px;
+      text-align: center;
+      transform-style: preserve-3d;
+      will-change: transform;
+    }
+
+    /* 3D Sculpted Glass & Anodized Bevel Emblem Chassis
+       backdrop-filter removed: it was the most expensive per-frame cost on an
+       element that is transformed in 3D every frame, for almost no visual gain. */
+    .emblem-shell {
+      position: relative;
+      width: clamp(96px, 16.5vw, 134px);
+      height: clamp(96px, 16.5vw, 134px);
+      display: grid;
+      place-items: center;
+      border-radius: 30px;
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.14) 0%, rgba(16, 22, 36, 0.72) 48%, rgba(6, 9, 16, 0.92) 100%);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow:
+        0 30px 60px -12px rgba(0, 0, 0, 0.88),
+        0 12px 28px -6px rgba(34, 230, 214, 0.16),
+        inset 0 2px 2px rgba(255, 255, 255, 0.32),
+        inset 0 -6px 14px rgba(0, 0, 0, 0.75);
+      transform-style: preserve-3d;
+      opacity: 1;
+      will-change: transform, opacity;
+    }
+
+    /* Rear extruded chassis depth plate (recessed at -16px Z) */
+    .emblem-depth-plate {
+      position: absolute;
+      inset: 2px;
+      border-radius: 29px;
+      background: linear-gradient(165deg, #1b2438, #060811);
+      border: 1px solid rgba(34, 230, 214, 0.22);
+      transform: translateZ(-16px);
+      box-shadow: 0 26px 50px rgba(0, 0, 0, 0.92);
+      pointer-events: none;
+    }
+
+    /* Acoustic contact shadow cast onto the 3D floor below emblem */
+    .emblem-floor-shadow {
+      position: absolute;
+      bottom: -28px;
+      width: 86%;
+      height: 20px;
+      border-radius: 50%;
+      background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.85) 0%, rgba(34, 230, 214, 0.2) 45%, transparent 75%);
+      filter: blur(8px);
+      transform: rotateX(75deg) translateZ(-24px);
+      pointer-events: none;
+    }
+
+    /* Floating 3D halo tuning ring (+10px Z) */
+    .emblem-ring {
+      position: absolute;
+      inset: -11px;
+      border-radius: 38px;
+      border: 1px solid rgba(34, 230, 214, 0.38);
+      box-shadow:
+        0 0 24px rgba(34, 230, 214, 0.18),
+        inset 0 0 14px rgba(255, 157, 59, 0.12);
+      opacity: 0;
+      transform: translateZ(10px) scale(0.88);
+      pointer-events: none;
+    }
+
+    /* Elevated SVG Equalizer Glyph floating forward (+26px Z) */
+    .emblem-svg {
+      width: 66%;
+      height: 66%;
+      overflow: visible;
+      transform: translateZ(26px);
+      filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.72)) drop-shadow(0 0 10px rgba(34, 230, 214, 0.24));
+    }
+
+    /* Specular glass reflection sheen across front lens (+18px Z) */
+    .emblem-glare {
+      position: absolute;
+      inset: 0;
+      border-radius: 30px;
+      background: linear-gradient(
+        125deg,
+        rgba(255, 255, 255, 0.28) 0%,
+        rgba(255, 255, 255, 0.06) 28%,
+        transparent 52%,
+        rgba(255, 157, 59, 0.08) 100%
+      );
+      transform: translateZ(18px);
+      pointer-events: none;
+    }
+
+    /* Animated equalizer / "H" glyph bars inside the emblem */
+    .glyph-bar {
+      transform-origin: 50% 50%;
+      transform: scaleY(1);
+      opacity: 1;
+      will-change: transform, opacity;
+    }
+
+    /* Wordmark block elevated in foreground Z-plane (+34px Z) */
+    .wordmark-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      transform-style: preserve-3d;
+      transform: translateZ(34px);
+    }
+
+    .brand-title {
+      display: inline-flex;
+      align-items: baseline;
+      justify-content: center;
+      font-size: clamp(2.15rem, 6.4vw, 4rem);
+      line-height: 1.08;
+      letter-spacing: -0.03em;
+      padding: 6px 12px;
+      perspective: 700px;
+      transform-style: preserve-3d;
+    }
+
+    /* No per-frame blur: the 3D hinge + translate already carries the reveal,
+       and rewriting filter on 11 gradient-clipped glyphs was a major repaint cost. */
+    .brand-title .char {
+      display: inline-block;
+      opacity: 1;
+      transform-origin: 50% 100%;
+      will-change: transform, opacity;
+    }
+
+    /* Subtle multi-step 3D metallic bevel extrusion on "Hertz" */
+    .brand-title .weight-bold {
+      font-weight: 800;
+      color: var(--text-primary);
+      text-shadow:
+        0 1px 0 #cbd5e1,
+        0 2px 0 #94a3b8,
+        0 3px 0 #475569,
+        0 4px 0 #1e293b,
+        0 14px 28px rgba(0, 0, 0, 0.85),
+        0 0 26px rgba(34, 230, 214, 0.22);
+    }
+
+    .brand-title .weight-light {
+      font-weight: 350;
+      background: linear-gradient(120deg, #ffffff 15%, var(--accent-cyan) 68%, var(--accent-amber) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.8)) drop-shadow(0 2px 0 rgba(15, 23, 42, 0.9));
+    }
+
+    /* Calibration divider line + Hz readout */
+    .brand-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: clamp(0.7rem, 1.6vw, 0.84rem);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      opacity: 1;
+      text-shadow: 0 4px 12px rgba(0, 0, 0, 0.8);
+      will-change: transform, opacity;
+    }
+
+    .meta-rule {
+      width: clamp(22px, 4.5vw, 44px);
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(34, 230, 214, 0.7));
+    }
+
+    .meta-rule.right {
+      background: linear-gradient(90deg, rgba(255, 157, 59, 0.7), transparent);
+    }
+
+    .hz-badge {
+      color: var(--accent-cyan);
+      font-size: 1.08em;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+    }
+
+    /* ==========================================================================
+       4. TIMELINE TELEMETRY & CONTROLS
+       ========================================================================== */
+    .hud-footer {
+      position: absolute;
+      bottom: clamp(18px, 3.5vh, 32px);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      width: min(88vw, 340px);
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 2px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+      transition: opacity 0.3s ease;
+    }
+
+    .progress-fill {
+      width: 100%;
+      height: 100%;
+      transform-origin: 0% 50%;
+      transform: scaleX(0);
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue), var(--accent-amber));
+      will-change: transform;
+    }
+
+    .hud-status-row {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.12em;
+      color: rgba(138, 150, 173, 0.78);
+    }
+
+    /* In host/splash mode the debug telemetry is removed. Only a real
+       progress line remains, and only once the host feeds actual progress. */
+    .splash-stage.hud-minimal .hud-footer {
+      width: min(52vw, 260px);
+      bottom: clamp(14px, 2.5vh, 24px);
+    }
+    .splash-stage.hud-minimal .hud-status-row { display: none; }
+    .splash-stage.hud-minimal .progress-track { opacity: 0; }
+    .splash-stage.hud-minimal.has-progress .progress-track { opacity: 1; }
+
+    .loading-label {
+      display: none;
+      color: #a8b4c9;
+      font-size: 12px;
+      line-height: 1.6;
+      text-align: center;
+    }
+    .splash-stage.hud-minimal .loading-label { display: block; }
+
+    .control-btn {
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(13, 16, 25, 0.75);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.75rem;
+      letter-spacing: 0;
+      min-height: 40px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 0.35s ease, transform 0.35s ease, border-color 0.2s ease, background 0.2s ease;
+    }
+
+    .control-btn.is-visible {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .control-btn:hover {
+      border-color: rgba(34, 230, 214, 0.6);
+      background: rgba(34, 230, 214, 0.12);
+    }
+
+    .control-btn:focus-visible {
+      outline: 2px solid var(--accent-cyan);
+      outline-offset: 2px;
+    }
+
+    /* Skip sits top-right so it never collides with the centered footer. */
+    .skip-btn {
+      position: absolute;
+      top: clamp(16px, 3vh, 28px);
+      right: clamp(16px, 3vw, 32px);
+      z-index: 6;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .splash-stage,
+      .progress-track,
+      .control-btn { transition: none; }
+      .splash-stage.is-exiting { transform: none; }
+      .control-btn { transform: none; }
+    }
+
+    @media (max-width: 480px) {
+      .brand-lockup { gap: 16px; }
+      .brand-meta { letter-spacing: 0.16em; gap: 8px; }
+      .control-btn { padding: 8px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="splash-stage" id="stage" aria-label="Hertz Studio 开屏动画">
+    <div class="depth-vignette" aria-hidden="true"></div>
+    <div class="hero-scrim" id="heroScrim" aria-hidden="true"></div>
+    <div class="impact-flash" id="impactFlash" aria-hidden="true"></div>
+    <div class="ambient-glow" id="ambientGlow" aria-hidden="true"></div>
+
+    <canvas id="acoustic-canvas" aria-hidden="true"></canvas>
+
+    <section class="brand-lockup" id="brandLockup">
+      <div class="emblem-shell" id="emblemShell" aria-hidden="true">
+        <div class="emblem-floor-shadow"></div>
+        <div class="emblem-depth-plate"></div>
+        <div class="emblem-ring" id="emblemRing"></div>
+        <svg class="emblem-svg" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="hzGradCyan" x1="0" y1="8" x2="0" y2="72" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#22E6D6" />
+              <stop offset="100%" stop-color="#3B82F6" />
+            </linearGradient>
+            <linearGradient id="hzGradAmber" x1="0" y1="14" x2="0" y2="66" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#FF9D3B" />
+              <stop offset="100%" stop-color="#FF4D6D" />
+            </linearGradient>
+            <linearGradient id="hzBridge" x1="14" y1="40" x2="66" y2="40" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#22E6D6" />
+              <stop offset="50%" stop-color="#FFFFFF" />
+              <stop offset="100%" stop-color="#FF9D3B" />
+            </linearGradient>
+          </defs>
+          <rect class="glyph-bar" data-idx="0" x="8"  y="29" width="5" height="22" rx="2.5" fill="url(#hzGradCyan)" />
+          <rect class="glyph-bar" data-idx="1" x="19" y="13" width="8" height="54" rx="4"   fill="url(#hzGradCyan)" />
+          <rect class="glyph-bar" data-idx="2" x="32" y="28" width="5" height="24" rx="2.5" fill="#E2E8F0" />
+          <rect class="glyph-bar" data-idx="3" x="43" y="23" width="5" height="34" rx="2.5" fill="url(#hzBridge)" />
+          <rect class="glyph-bar" data-idx="4" x="53" y="13" width="8" height="54" rx="4"   fill="url(#hzGradAmber)" />
+          <rect class="glyph-bar" data-idx="5" x="67" y="29" width="5" height="22" rx="2.5" fill="url(#hzGradAmber)" />
+        </svg>
+        <div class="emblem-glare"></div>
+      </div>
+
+      <div class="wordmark-group">
+        <h1 class="brand-title" id="brandTitle" aria-label="HertzStudio">
+          <span class="char weight-bold">H</span><span class="char weight-bold">e</span><span class="char weight-bold">r</span><span class="char weight-bold">t</span><span class="char weight-bold">z</span><span class="char weight-light">S</span><span class="char weight-light">t</span><span class="char weight-light">u</span><span class="char weight-light">d</span><span class="char weight-light">i</span><span class="char weight-light">o</span>
+        </h1>
+        <div class="brand-meta" id="brandMeta">
+          <span class="meta-rule"></span>
+          <span>PRECISION AUDIO ENGINE</span>
+          <span class="hz-badge" id="hzReadout">440 HZ</span>
+          <span class="meta-rule right"></span>
+        </div>
+      </div>
+    </section>
+
+    <button type="button" class="control-btn skip-btn" id="skipBtn" hidden>跳过动画</button>
+
+    <footer class="hud-footer" id="hudFooter">
+      <div class="progress-track" aria-hidden="true">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <p class="loading-label" id="loadingLabel" aria-hidden="true">正在启动播放器</p>
+      <div class="hud-status-row">
+        <span id="phaseLabel">01 // SIGNAL IGNITION</span>
+        <button type="button" class="control-btn" id="replayBtn" hidden>重播动画</button>
+        <span id="timeLabel">0.00s / 4.00s</span>
+      </div>
+    </footer>
+
+    <div class="a11y-hidden" id="a11yStatus" role="status" aria-live="polite">正在启动 Hertz Studio</div>
+  </main>
+
+  <script>
+    /**
+     * HertzStudio Splash Controller — optimized pass.
+     *
+     * Integration (window.HertzSplashConfig, set before this script runs):
+     *   { autoDismiss: true, appReady: Promise, debug: false, maxWait: 8000, exitDuration: 420 }
+     *
+     * Public API (window.HertzSplash):
+     *   setProgress(0..1)  feed REAL loading progress; replaces animation-time progress
+     *   setStatus(text)    display the current resource preparation step
+     *   ready()            signal that the host app is ready to take over
+     *   skip()             skip to the final frame
+     *   replay()           replay the reveal
+     *   mode               'splash' when a host owns readiness, otherwise 'showcase'
+     *
+     * Events on window: splash:skip, splash:exit, splash:complete
+     *
+     * With no host config the file behaves as a standalone showcase (telemetry HUD
+     * + replay). With a host config the HUD degrades to a single real-progress line,
+     * a Skip control appears at 0.4s, and exit is gated on reveal + app readiness.
+     */
+    (() => {
+      const EMBEDDED = window.parent !== window && new URLSearchParams(location.search).get('host') === '1';
+      let resolveParentReady;
+      const parentReady = new Promise((resolve) => { resolveParentReady = resolve; });
+      const CONFIG = Object.assign({
+        autoDismiss: EMBEDDED,
+        appReady: EMBEDDED ? parentReady : null,
+        debug: false,
+        maxWait: 8000,
+        exitDuration: 420
+      }, window.HertzSplashConfig || {});
+
+      const DEBUG = CONFIG.debug === true || new URLSearchParams(location.search).get('debug') === '1';
+      const DISMISS = CONFIG.autoDismiss === true || CONFIG.appReady != null;
+      const SHOWCASE = !DISMISS;
+      const HUD_VISIBLE = DEBUG || SHOWCASE;
+
+      const TOTAL_DURATION = 4000;
+      const REVEAL_END = 3200;
+      const SKIP_AT = 400;
+
+      const stage = document.getElementById('stage');
+      const canvas = document.getElementById('acoustic-canvas');
+      const ctx = canvas.getContext('2d', { alpha: true });
+      const heroScrim = document.getElementById('heroScrim');
+      const impactFlash = document.getElementById('impactFlash');
+      const ambientGlow = document.getElementById('ambientGlow');
+      const brandLockup = document.getElementById('brandLockup');
+      const emblemShell = document.getElementById('emblemShell');
+      const emblemRing = document.getElementById('emblemRing');
+      const glyphBars = Array.from(document.querySelectorAll('.glyph-bar'));
+      const chars = Array.from(document.querySelectorAll('#brandTitle .char'));
+      const brandMeta = document.getElementById('brandMeta');
+      const hzReadout = document.getElementById('hzReadout');
+      const progressFill = document.getElementById('progressFill');
+      const loadingLabel = document.getElementById('loadingLabel');
+      const phaseLabel = document.getElementById('phaseLabel');
+      const timeLabel = document.getElementById('timeLabel');
+      const replayBtn = document.getElementById('replayBtn');
+      const skipBtn = document.getElementById('skipBtn');
+      const a11yStatus = document.getElementById('a11yStatus');
+
+      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+
+      let targetPointerX = 0;
+      let targetPointerY = 0;
+      let smoothPointerX = 0;
+      let smoothPointerY = 0;
+
+      let realProgress = 0;
+      let progressActive = false;
+      let finished = false;
+      let exiting = false;
+      let skipShown = false;
+      let revealFired = false;
+      let readyTimeoutId = null;
+
+      let resolveReveal;
+      let resolveManualReady;
+      const revealDone = new Promise((r) => { resolveReveal = r; });
+      const manualReady = new Promise((r) => { resolveManualReady = r; });
+
+      if (!HUD_VISIBLE) stage.classList.add('hud-minimal');
+
+      function resizeCanvas() {
+        dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+        width = stage.clientWidth || window.innerWidth;
+        height = stage.clientHeight || window.innerHeight;
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      window.addEventListener('resize', resizeCanvas, { passive: true });
+      window.addEventListener('pointermove', (e) => {
+        if (prefersReducedMotion || exiting) return;
+        targetPointerX = (e.clientX / Math.max(1, width) - 0.5) * 2;
+        targetPointerY = (e.clientY / Math.max(1, height) - 0.5) * 2;
+      }, { passive: true });
+      resizeCanvas();
+
+      const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
+      const norm = (val, start, end) => clamp((val - start) / (end - start), 0, 1);
+      const lerp = (a, b, t) => a + (b - a) * t;
+      const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+      const easeOutExpo = (t) => (t === 1 ? 1 : 1 - Math.pow(2, -10 * t));
+      const easeInOutCubic = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+      const easeOutBack = (t) => {
+        const c1 = 1.70158;
+        const c3 = c1 + 1;
+        return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+      };
+
+      /* Single camera source. Both the canvas projection and the DOM lockup
+         read these values, so the grid and the emblem can no longer drift. */
+      const camera = {
+        pitch: 0, yaw: 0, dist: 0, fov: 0,
+        cosY: 1, sinY: 0, cosX: 1, sinX: 0,
+        cosX04: 1, sinX04: 0, cosX55: 1, sinX55: 0
+      };
+
+      function computeCamera(sec) {
+        const intro = easeOutCubic(norm(sec, 0, 2.85));
+        camera.pitch = lerp(0.86, 0.52, intro) + smoothPointerY * -0.08;
+        camera.yaw = lerp(-0.42, 0, easeOutCubic(norm(sec, 0, 2.95))) + smoothPointerX * 0.12;
+        camera.dist = lerp(520, 740, easeOutCubic(norm(sec, 0, 2.2)));
+        camera.fov = 640 * clamp(Math.min(width, height) / 780, 0.55, 1.18);
+
+        camera.cosY = Math.cos(camera.yaw);
+        camera.sinY = Math.sin(camera.yaw);
+        camera.cosX = Math.cos(camera.pitch);
+        camera.sinX = Math.sin(camera.pitch);
+        camera.cosX04 = Math.cos(camera.pitch * 0.4);
+        camera.sinX04 = Math.sin(camera.pitch * 0.4);
+        camera.cosX55 = Math.cos(camera.pitch * 0.55);
+        camera.sinX55 = Math.sin(camera.pitch * 0.55);
+      }
+
+      /* Scratch transforms: reused every frame instead of allocating ~1000
+         short-lived {x,y,z} / {x,y,scale,depth} objects per frame. */
+      const _r1 = { x: 0, y: 0, z: 0 };
+      const _r2 = { x: 0, y: 0, z: 0 };
+      const _p1 = { x: 0, y: 0, scale: 0, depth: 0 };
+      const _p2 = { x: 0, y: 0, scale: 0, depth: 0 };
+
+      function rotateYP(x, y, z, cosY, sinY, cosX, sinX, out) {
+        const x1 = x * cosY + z * sinY;
+        const z1 = -x * sinY + z * cosY;
+        out.x = x1;
+        out.y = y * cosX - z1 * sinX;
+        out.z = y * sinX + z1 * cosX;
+        return out;
+      }
+
+      function rotate3D(x, y, z, pitch, yaw, roll, out) {
+        const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+        let x1 = x * cosY + z * sinY;
+        const z1 = -x * sinY + z * cosY;
+        const cosX = Math.cos(pitch), sinX = Math.sin(pitch);
+        let y2 = y * cosX - z1 * sinX;
+        const z2 = y * sinX + z1 * cosX;
+        if (roll !== 0) {
+          const cosZ = Math.cos(roll), sinZ = Math.sin(roll);
+          const x3 = x1 * cosZ - y2 * sinZ;
+          y2 = x1 * sinZ + y2 * cosZ;
+          x1 = x3;
+        }
+        out.x = x1; out.y = y2; out.z = z2;
+        return out;
+      }
+
+      function projectPoint(pt, out, cx, cy) {
+        const depth = camera.dist + pt.z;
+        if (depth < 40) return null;
+        const scale = camera.fov / depth;
+        out.x = cx + pt.x * scale;
+        out.y = cy + pt.y * scale;
+        out.scale = scale;
+        out.depth = depth;
+        return out;
+      }
+
+      const PARTICLE_COUNT = 52;
+      const particles = Array.from({ length: PARTICLE_COUNT }, (_, i) => ({
+        theta: (i / PARTICLE_COUNT) * Math.PI * 2 + (i % 5) * 0.37,
+        radial: 110 + ((i * 37) % 340),
+        yOffset: (((i * 19) % 20) - 10) * 14,
+        zBase: -420 + ((i * 53) % 840),
+        zSpeed: 210 + (i % 4) * 65,
+        size: 1.5 + (i % 3) * 0.95,
+        hueType: i % 3
+      }));
+
+      const pillarPool = Array.from({ length: 64 }, () => ({
+        bx: 0, by: 0, tx: 0, ty: 0, depth: 0, scale: 1, isWarm: false, excite: 0
+      }));
+      const pillars = [];
+
+      let startTime = null;
+      let rafId = null;
+      let ambientRafId = null;
+      let ambientStart = 0;
+      let lastAmbient = 0;
+
+      function renderCanvas(elapsed) {
+        ctx.clearRect(0, 0, width, height);
+
+        const sec = elapsed / 1000;
+        const cx = width * 0.5;
+        const emblemCenterY = height * 0.5 - Math.min(height * 0.085, 62);
+        const phaseTime = sec;
+
+        const pUnfold = norm(sec, 0.6, 2.15);
+
+        /* Staggered retirements: background leaves first, hero aura last. */
+        const pSettleBg = easeInOutCubic(norm(sec, 2.2, 2.95));
+        const pSettleMid = easeInOutCubic(norm(sec, 2.55, 3.35));
+        const pSettleHero = easeInOutCubic(norm(sec, 2.8, 3.5));
+
+        /* Background peaks at 0.6s, then dips to ~35% while the emblem is
+           unfolding and the wordmark flips in. This is the readability fix. */
+        const energyIn = easeOutCubic(norm(sec, 0.05, 0.6));
+        const heroDip = 1 - 0.65 * easeInOutCubic(norm(sec, 0.68, 1.65));
+        const dynamicEnergy = energyIn * heroDip * (1 - 0.82 * pSettleBg);
+        const steadyAura = easeOutCubic(norm(sec, 2.2, 3.6));
+        const pEntrance = norm(sec, 0, 0.85);
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+
+        /* Layer 1: perspective floor grid */
+        const gridFade = easeOutCubic(norm(sec, 0.05, 1.4)) * lerp(1, 0.65, pSettleBg);
+        if (gridFade > 0.01) {
+          const floorY = 128;
+          const halfGridW = 680;
+          const zNear = -360;
+          const zFar = 560;
+
+          for (let gx = -halfGridW; gx <= halfGridW; gx += 85) {
+            const edgeAtten = 1 - Math.abs(gx) / (halfGridW + 85);
+            rotateYP(gx, floorY, zNear, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r1);
+            const ok1 = projectPoint(_r1, _p1, cx, emblemCenterY);
+            rotateYP(gx, floorY, zFar, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r2);
+            const ok2 = projectPoint(_r2, _p2, cx, emblemCenterY);
+            if (ok1 && ok2) {
+              const grad = ctx.createLinearGradient(_p1.x, _p1.y, _p2.x, _p2.y);
+              const a = 0.14 * gridFade * edgeAtten;
+              grad.addColorStop(0, 'rgba(34, 230, 214, 0)');
+              grad.addColorStop(0.35, `rgba(34, 230, 214, ${a.toFixed(3)})`);
+              grad.addColorStop(1, 'rgba(59, 130, 246, 0)');
+              ctx.beginPath();
+              ctx.moveTo(_p1.x, _p1.y);
+              ctx.lineTo(_p2.x, _p2.y);
+              ctx.strokeStyle = grad;
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
+          }
+
+          const zScroll = (phaseTime * 110) % 90;
+          for (let gz = zNear; gz <= zFar; gz += 90) {
+            const zPos = gz - zScroll;
+            const depthNorm = 1 - Math.abs(zPos) / 560;
+            if (depthNorm <= 0) continue;
+            rotateYP(-halfGridW, floorY, zPos, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r1);
+            const okL = projectPoint(_r1, _p1, cx, emblemCenterY);
+            rotateYP(halfGridW, floorY, zPos, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r2);
+            const okR = projectPoint(_r2, _p2, cx, emblemCenterY);
+            if (okL && okR) {
+              const a = 0.11 * gridFade * depthNorm;
+              ctx.beginPath();
+              ctx.moveTo(_p1.x, _p1.y);
+              ctx.lineTo(_p2.x, _p2.y);
+              ctx.strokeStyle = `rgba(148, 163, 184, ${a.toFixed(3)})`;
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
+          }
+        }
+
+        /* Layer 2: tilted acoustic shockwave rings */
+        const pulseOffsets = [0.02, 0.34, 0.74, 1.92];
+        for (let i = 0; i < pulseOffsets.length; i++) {
+          const localT = norm(sec, pulseOffsets[i], pulseOffsets[i] + 1.45);
+          if (localT > 0 && localT < 1) {
+            const eased = easeOutExpo(localT);
+            const radius3D = lerp(30, 440 + i * 75, eased);
+            const alpha = (1 - localT) * (i === 3 ? 0.42 : 0.28);
+            const segs = 48;
+            ctx.beginPath();
+            let started = false;
+            for (let s = 0; s <= segs; s++) {
+              const ang = (s / segs) * Math.PI * 2;
+              rotateYP(Math.cos(ang) * radius3D, 0, Math.sin(ang) * radius3D,
+                camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r1);
+              if (!projectPoint(_r1, _p1, cx, emblemCenterY)) continue;
+              if (!started) { ctx.moveTo(_p1.x, _p1.y); started = true; }
+              else ctx.lineTo(_p1.x, _p1.y);
+            }
+            ctx.strokeStyle = i % 2 === 0
+              ? `rgba(34, 230, 214, ${alpha.toFixed(3)})`
+              : `rgba(255, 157, 59, ${(alpha * 0.8).toFixed(3)})`;
+            ctx.lineWidth = lerp(2.8, 0.7, localT);
+            ctx.stroke();
+          }
+        }
+
+        /* Layer 3: Z-stacked waveform ribbons with a center cut-out so the
+           busiest part of the wave is no longer directly behind the logo. */
+        const waveSpread = easeOutExpo(norm(sec, 0.05, 1.15));
+        const maxHalfSpan3D = 560 * waveSpread;
+        const ribbonPlanes = [
+          { z: 150,  freq: 2.1, speed: 5.4,  amp: 82,  color: 'rgba(59, 130, 246, ', alpha: 0.30, width: 1.3 },
+          { z: 75,   freq: 3.1, speed: -4.6, amp: 95,  color: 'rgba(34, 230, 214, ', alpha: 0.42, width: 1.7 },
+          { z: 0,    freq: 2.4, speed: 6.4,  amp: 112, color: 'rgba(34, 230, 214, ', alpha: 0.62, width: 2.4 },
+          { z: -75,  freq: 4.2, speed: -5.8, amp: 76,  color: 'rgba(255, 157, 59, ', alpha: 0.38, width: 1.8 },
+          { z: -145, freq: 5.0, speed: 7.2,  amp: 54,  color: 'rgba(255, 77, 109, ', alpha: 0.28, width: 1.3 }
+        ];
+
+        const xStep3D = width < 600 ? 22 : 18;
+        ribbonPlanes.forEach((w, idx) => {
+          const ampScale = dynamicEnergy + steadyAura * 0.09;
+          const alpha = w.alpha * (0.32 + 0.68 * (1 - 0.52 * pSettleMid)) * easeOutCubic(pEntrance);
+          if (alpha <= 0.01) return;
+
+          ctx.beginPath();
+          let started = false;
+          for (let wx = -maxHalfSpan3D; wx <= maxHalfSpan3D; wx += xStep3D) {
+            const nx = (wx + 560) / 1120;
+            const distCenter = Math.abs(wx) / 560;
+            const centerCut = 0.16 + 0.84 * clamp((distCenter - 0.10) / 0.30, 0, 1);
+            const windowEnv = Math.pow(Math.max(0, 1 - distCenter * distCenter), 1.65) * centerCut;
+            const harmonic =
+              Math.sin(nx * Math.PI * 2 * w.freq + phaseTime * w.speed + idx * 0.9) * 0.72 +
+              Math.cos(nx * Math.PI * 2 * (w.freq * 1.85) - phaseTime * (w.speed * 0.6)) * 0.28;
+            const wy = -harmonic * w.amp * windowEnv * ampScale;
+            const wz = w.z + Math.sin(nx * Math.PI * 3 + phaseTime * 2.2) * 18 * dynamicEnergy;
+            rotateYP(wx, wy, wz, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r1);
+            if (!projectPoint(_r1, _p1, cx, emblemCenterY)) continue;
+            if (!started) { ctx.moveTo(_p1.x, _p1.y); started = true; }
+            else ctx.lineTo(_p1.x, _p1.y);
+          }
+          ctx.strokeStyle = `${w.color}${alpha.toFixed(3)})`;
+          ctx.lineWidth = w.width;
+          ctx.stroke();
+        });
+
+        /* Layer 4: orbital gyroscope rings — cyan + blue, amber reserved for accent */
+        if (pUnfold > 0) {
+          const gyroAlpha = easeOutCubic(pUnfold) * lerp(0.55, 0.28, pSettleHero);
+          const orbits = [
+            { radius: 148, tiltX: 0.65,  tiltZ: 0.32,  spin: phaseTime * 0.9,   color: 'rgba(34, 230, 214, ' },
+            { radius: 168, tiltX: -0.52, tiltZ: -0.38, spin: -phaseTime * 0.75, color: 'rgba(96, 165, 250, ' }
+          ];
+          orbits.forEach((orb) => {
+            ctx.beginPath();
+            let started = false;
+            const segs = 48;
+            for (let s = 0; s <= segs; s++) {
+              const a = (s / segs) * Math.PI * 2 + orb.spin;
+              rotate3D(Math.cos(a) * orb.radius, 0, Math.sin(a) * orb.radius,
+                orb.tiltX, 0, orb.tiltZ, _r1);
+              rotateYP(_r1.x, _r1.y, _r1.z,
+                camera.cosY, camera.sinY, camera.cosX55, camera.sinX55, _r2);
+              if (!projectPoint(_r2, _p1, cx, emblemCenterY)) continue;
+              if (!started) { ctx.moveTo(_p1.x, _p1.y); started = true; }
+              else ctx.lineTo(_p1.x, _p1.y);
+            }
+            ctx.strokeStyle = `${orb.color}${gyroAlpha.toFixed(3)})`;
+            ctx.lineWidth = 1.25;
+            ctx.stroke();
+          });
+        }
+
+        /* Layer 5: depth-sorted equalizer pillars, drawn from a preallocated pool */
+        if (pUnfold > 0) {
+          const barCount = width < 520 ? 44 : 60;
+          const ringRadius3D = 195;
+          const unfoldEase = easeOutCubic(pUnfold);
+          const holdDamp = 1 - 0.76 * pSettleHero;
+          pillars.length = 0;
+          let poolIndex = 0;
+
+          for (let i = 0; i < barCount; i++) {
+            const ratio = i / barCount;
+            const angle = ratio * Math.PI * 2 + phaseTime * 0.22;
+            const bandExcite =
+              Math.abs(Math.sin(ratio * Math.PI * 6 + phaseTime * 5.2)) * 0.65 +
+              Math.abs(Math.cos(ratio * Math.PI * 10 - phaseTime * 3.7)) * 0.35;
+            const staticCrown = 8 + 12 * Math.pow(Math.abs(Math.cos(angle)), 2);
+            const pillarH = lerp(0, staticCrown, steadyAura) + bandExcite * 76 * unfoldEase * holdDamp;
+            if (pillarH <= 1.2) continue;
+
+            const wx = Math.cos(angle) * ringRadius3D;
+            const wz = Math.sin(angle) * ringRadius3D;
+            rotateYP(wx, 18, wz, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r1);
+            const okBase = projectPoint(_r1, _p1, cx, emblemCenterY);
+            rotateYP(wx, 18 - pillarH, wz, camera.cosY, camera.sinY, camera.cosX, camera.sinX, _r2);
+            const okTop = projectPoint(_r2, _p2, cx, emblemCenterY);
+            if (!okBase || !okTop) continue;
+
+            const item = pillarPool[poolIndex++];
+            item.bx = _p1.x; item.by = _p1.y;
+            item.tx = _p2.x; item.ty = _p2.y;
+            item.depth = _r1.z;
+            item.scale = _p2.scale;
+            item.isWarm = Math.cos(angle) > 0.12;
+            item.excite = bandExcite;
+            pillars.push(item);
+          }
+
+          pillars.sort((a, b) => b.depth - a.depth);
+          for (let i = 0; i < pillars.length; i++) {
+            const pil = pillars[i];
+            const depthShade = clamp(1.28 - (pil.depth + 220) / 520, 0.35, 1.15);
+            const alpha = (0.18 + 0.48 * pil.excite * holdDamp + 0.22 * steadyAura) * unfoldEase * depthShade;
+            const lw = clamp(2.8 * pil.scale, 1.2, 4.2);
+            ctx.beginPath();
+            ctx.moveTo(pil.bx, pil.by);
+            ctx.lineTo(pil.tx, pil.ty);
+            ctx.strokeStyle = pil.isWarm
+              ? `rgba(255, 157, 59, ${alpha.toFixed(3)})`
+              : `rgba(34, 230, 214, ${alpha.toFixed(3)})`;
+            ctx.lineWidth = lw;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+            if (depthShade > 0.85) {
+              ctx.beginPath();
+              ctx.arc(pil.tx, pil.ty, lw * 0.68, 0, Math.PI * 2);
+              ctx.fillStyle = `rgba(255, 255, 255, ${(alpha * 0.85).toFixed(3)})`;
+              ctx.fill();
+            }
+          }
+        }
+
+        /* Layer 6: Z-space particle fly-through */
+        const particleEnvelope = easeOutCubic(norm(sec, 0.12, 1.05)) * (1 - 0.72 * pSettleMid);
+        if (particleEnvelope > 0.01) {
+          for (let i = 0; i < particles.length; i++) {
+            const p = particles[i];
+            let wz = (p.zBase - phaseTime * p.zSpeed) % 840;
+            if (wz < -420) wz += 840;
+            const orbitAng = p.theta + phaseTime * 0.28;
+            const wx = Math.cos(orbitAng) * p.radial;
+            const wy = p.yOffset + Math.sin(orbitAng * 2) * 24;
+            rotateYP(wx, wy, wz, camera.cosY, camera.sinY, camera.cosX04, camera.sinX04, _r1);
+            if (!projectPoint(_r1, _p1, cx, emblemCenterY)) continue;
+            const depthFade = clamp(1 - Math.abs(wz) / 420, 0, 1);
+            const r = clamp(p.size * _p1.scale * 1.35, 0.6, 4.8);
+            const a = 0.72 * particleEnvelope * depthFade * (p.hueType === 2 ? 0.65 : 1);
+            ctx.beginPath();
+            ctx.arc(_p1.x, _p1.y, r, 0, Math.PI * 2);
+            ctx.fillStyle = p.hueType === 0
+              ? `rgba(34, 230, 214, ${a.toFixed(3)})`
+              : p.hueType === 1
+                ? `rgba(96, 165, 250, ${a.toFixed(3)})`
+                : `rgba(255, 157, 59, ${a.toFixed(3)})`;
+            ctx.fill();
+          }
+        }
+
+        /* Phase 1 ignition spark */
+        const sparkEnv = (1 - easeOutCubic(norm(sec, 0.15, 0.95))) * easeOutExpo(norm(sec, 0, 0.12));
+        if (sparkEnv > 0.01) {
+          const sparkGrad = ctx.createRadialGradient(cx, emblemCenterY, 0, cx, emblemCenterY, 76);
+          sparkGrad.addColorStop(0, `rgba(255, 255, 255, ${(0.95 * sparkEnv).toFixed(3)})`);
+          sparkGrad.addColorStop(0.35, `rgba(34, 230, 214, ${(0.65 * sparkEnv).toFixed(3)})`);
+          sparkGrad.addColorStop(1, 'rgba(34, 230, 214, 0)');
+          ctx.fillStyle = sparkGrad;
+          ctx.beginPath();
+          ctx.arc(cx, emblemCenterY, 76, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
+
+      function updateDOM(elapsed) {
+        const sec = elapsed / 1000;
+        const progress = clamp(elapsed / TOTAL_DURATION, 0, 1);
+        smoothPointerX += (targetPointerX - smoothPointerX) * 0.08;
+        smoothPointerY += (targetPointerY - smoothPointerY) * 0.08;
+
+        /* DOM tilt is derived from the same camera that drives the canvas. */
+        const baseTiltX = clamp((camera.pitch - 0.52) * -16, -9, 9);
+        const baseTiltY = clamp(camera.yaw * 14, -10, 10);
+        const lockupTiltX = baseTiltX + smoothPointerY * -7;
+        const lockupTiltY = baseTiltY + smoothPointerX * 9;
+        brandLockup.style.transform =
+          `rotateX(${lockupTiltX.toFixed(2)}deg) rotateY(${lockupTiltY.toFixed(2)}deg)`;
+
+        const pSettleHero = easeInOutCubic(norm(sec, 2.8, 3.5));
+
+        const glowIn = easeOutCubic(norm(sec, 0.1, 1.5));
+        const glowSettle = lerp(1.08, 0.92, pSettleHero);
+        ambientGlow.style.opacity = (glowIn * 0.88).toFixed(3);
+        ambientGlow.style.transform =
+          `translate3d(${(smoothPointerX * -16).toFixed(1)}px, ${(smoothPointerY * -12).toFixed(1)}px, -80px) ` +
+          `scale(${(0.65 + 0.35 * glowIn) * glowSettle})`;
+
+        heroScrim.style.opacity =
+          (easeOutCubic(norm(sec, 0.5, 1.15)) * (1 - 0.28 * pSettleHero)).toFixed(3);
+
+        const impact = (1 - easeOutCubic(norm(sec, 0.68, 1.02))) * easeOutExpo(norm(sec, 0.62, 0.72));
+        impactFlash.style.opacity = impact.toFixed(3);
+        impactFlash.style.transform =
+          `translate(-50%, -50%) scale(${(0.4 + 0.9 * easeOutCubic(norm(sec, 0.62, 1.02))).toFixed(3)})`;
+
+        const shellIn = easeOutBack(norm(sec, 0.68, 1.65));
+        const shellOpacity = easeOutCubic(norm(sec, 0.68, 1.12));
+        const settle3D = easeOutCubic(norm(sec, 0.68, 2.45));
+        emblemShell.style.opacity = shellOpacity.toFixed(3);
+        emblemShell.style.transform =
+          `translate3d(0, ${lerp(18, 0, shellOpacity).toFixed(2)}px, ${lerp(-240, 24, shellIn).toFixed(1)}px) ` +
+          `rotateX(${lerp(42, 6, settle3D).toFixed(2)}deg) rotateY(${lerp(-34, -5, settle3D).toFixed(2)}deg) ` +
+          `scale(${lerp(0.74, 1, shellIn).toFixed(4)})`;
+
+        const ringPulse = easeOutCubic(norm(sec, 1.1, 2.2));
+        emblemRing.style.opacity = (ringPulse * 0.9).toFixed(3);
+        emblemRing.style.transform = `translateZ(10px) scale(${lerp(0.88, 1, ringPulse).toFixed(4)})`;
+
+        const eqDanceDamp = 1 - pSettleHero;
+        for (let i = 0; i < glyphBars.length; i++) {
+          const barStart = 0.82 + i * 0.07;
+          const barAppear = easeOutCubic(norm(sec, barStart, barStart + 0.45));
+          const harmonicOsc = Math.sin(sec * 11.5 + i * 1.15) * 0.28 * eqDanceDamp;
+          glyphBars[i].style.opacity = barAppear.toFixed(3);
+          glyphBars[i].style.transform = `scaleY(${clamp(barAppear * (1 + harmonicOsc), 0.08, 1.35).toFixed(4)})`;
+        }
+
+        for (let i = 0; i < chars.length; i++) {
+          const charStart = 1.95 + i * 0.045;
+          const charT = norm(sec, charStart, charStart + 0.5);
+          const easedChar = easeOutExpo(charT);
+          chars[i].style.opacity = easedChar.toFixed(3);
+          chars[i].style.transform =
+            `translate3d(0, ${((1 - easedChar) * 34).toFixed(2)}px, ${lerp(-120, 0, easedChar).toFixed(1)}px) ` +
+            `rotateX(${((1 - easedChar) * -72).toFixed(1)}deg)`;
+        }
+
+        const metaT = easeOutCubic(norm(sec, 2.45, 3.05));
+        brandMeta.style.opacity = metaT.toFixed(3);
+        brandMeta.style.transform =
+          `translate3d(0, ${lerp(10, 0, metaT).toFixed(2)}px, ${lerp(-40, 20, metaT).toFixed(1)}px)`;
+
+        hzReadout.textContent = sec < 2.8
+          ? `${Math.round(lerp(20, 440, easeOutCubic(norm(sec, 0.2, 2.8))))} HZ`
+          : '440 HZ';
+
+        progressFill.style.transform =
+          `scaleX(${(progressActive ? realProgress : (HUD_VISIBLE ? progress : 0)).toFixed(4)})`;
+
+        if (HUD_VISIBLE) {
+          timeLabel.textContent = `${(elapsed / 1000).toFixed(2)}s / 4.00s`;
+          if (sec < 0.85) phaseLabel.textContent = '01 // SIGNAL IGNITION';
+          else if (sec < 2.15) phaseLabel.textContent = '02 // SPECTRUM UNFOLD';
+          else if (sec < 3.2) phaseLabel.textContent = '03 // IDENTITY LOCK';
+          else phaseLabel.textContent = '04 // STUDIO READY';
+        }
+      }
+
+      function dispatch(name) {
+        window.dispatchEvent(new CustomEvent(name, {
+          detail: { elapsed: TOTAL_DURATION, skip: name === 'splash:skip' }
+        }));
+        if (EMBEDDED && name === 'splash:exit') {
+          window.parent.postMessage({ type: 'hertz-splash:exit' }, '*');
+        }
+      }
+
+      function stopAmbient() {
+        if (ambientRafId !== null) {
+          cancelAnimationFrame(ambientRafId);
+          ambientRafId = null;
+        }
+      }
+
+      function startAmbient(now) {
+        if (prefersReducedMotion || exiting || !SHOWCASE) return;
+        ambientStart = now;
+        lastAmbient = 0;
+        if (ambientRafId === null) ambientRafId = requestAnimationFrame(ambientLoop);
+      }
+
+      /* Ambient loop uses an ever-advancing clock, so the post-reveal hold is
+         never frozen. It throttles to ~30fps when the pointer is idle and
+         stops entirely when the tab is hidden or the splash exits. */
+      function ambientLoop(now) {
+        if (document.hidden) { ambientRafId = null; return; }
+        const moving = Math.abs(targetPointerX - smoothPointerX) > 0.001 ||
+          Math.abs(targetPointerY - smoothPointerY) > 0.001;
+        if (now - lastAmbient >= (moving ? 0 : 32)) {
+          lastAmbient = now;
+          const t = TOTAL_DURATION + (now - ambientStart);
+          computeCamera(t);
+          renderCanvas(t);
+          updateDOM(TOTAL_DURATION);
+        }
+        ambientRafId = requestAnimationFrame(ambientLoop);
+      }
+
+      function exitSplash() {
+        if (exiting) return;
+        exiting = true;
+        window.clearTimeout(readyTimeoutId);
+        stopAmbient();
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        skipBtn.classList.remove('is-visible');
+        skipBtn.hidden = true;
+        a11yStatus.textContent = '正在打开播放器';
+        stage.classList.add('is-exiting');
+        dispatch('splash:exit');
+        window.setTimeout(() => {
+          stage.hidden = true;
+          dispatch('splash:complete');
+        }, prefersReducedMotion ? 0 : CONFIG.exitDuration);
+      }
+
+      function skipNow() {
+        if (exiting) return;
+        finished = true;
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        skipBtn.classList.remove('is-visible');
+        skipBtn.hidden = true;
+        dispatch('splash:skip');
+        computeCamera(TOTAL_DURATION);
+        renderCanvas(TOTAL_DURATION);
+        updateDOM(TOTAL_DURATION);
+        revealFired = true;
+        resolveReveal();
+        if (SHOWCASE || DEBUG) {
+          replayBtn.hidden = false;
+          replayBtn.classList.add('is-visible');
+        }
+        stopAmbient();
+      }
+
+      function tick(now) {
+        if (startTime === null) startTime = now;
+        const rawElapsed = now - startTime;
+        const elapsed = Math.min(rawElapsed, TOTAL_DURATION);
+
+        if (!revealFired && rawElapsed >= REVEAL_END) {
+          revealFired = true;
+          resolveReveal();
+        }
+        if (!skipShown && rawElapsed >= SKIP_AT) {
+          skipShown = true;
+          skipBtn.hidden = false;
+          skipBtn.classList.add('is-visible');
+        }
+
+        computeCamera(elapsed);
+        renderCanvas(elapsed);
+        updateDOM(elapsed);
+
+        if (rawElapsed < TOTAL_DURATION) {
+          rafId = requestAnimationFrame(tick);
+        } else {
+          finished = true;
+          rafId = null;
+          if (SHOWCASE || DEBUG) {
+            replayBtn.hidden = false;
+            replayBtn.classList.add('is-visible');
+          }
+          if (!DISMISS) a11yStatus.textContent = '开屏动画已播放完毕';
+          startAmbient(now);
+          revealFired = true;
+          resolveReveal();
+        }
+      }
+
+      function startSplash() {
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        stopAmbient();
+        finished = false;
+        exiting = false;
+        skipShown = false;
+        revealFired = false;
+        stage.hidden = false;
+        stage.classList.remove('is-exiting');
+        skipBtn.classList.remove('is-visible');
+        replayBtn.classList.remove('is-visible');
+        skipBtn.hidden = replayBtn.hidden = true;
+        targetPointerX = targetPointerY = 0;
+        smoothPointerX = smoothPointerY = 0;
+        a11yStatus.textContent = '正在启动 Hertz Studio';
+        if (!DISMISS) {
+          progressActive = false;
+          realProgress = 0;
+          stage.classList.remove('has-progress');
+        }
+        startTime = null;
+        if (prefersReducedMotion) {
+          computeCamera(TOTAL_DURATION);
+          renderCanvas(TOTAL_DURATION);
+          updateDOM(TOTAL_DURATION);
+          finished = true;
+          revealFired = true;
+          resolveReveal();
+          if (SHOWCASE || DEBUG) {
+            replayBtn.hidden = false;
+            replayBtn.classList.add('is-visible');
+          }
+        } else {
+          computeCamera(0);
+          renderCanvas(0);
+          updateDOM(0);
+          rafId = requestAnimationFrame(tick);
+        }
+      }
+
+      replayBtn.addEventListener('click', startSplash);
+      skipBtn.addEventListener('click', skipNow);
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') skipNow();
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          stopAmbient();
+          if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        } else if (!exiting) {
+          if (finished) startAmbient(performance.now());
+          else if (!prefersReducedMotion) rafId = requestAnimationFrame(tick);
+        }
+      });
+      window.addEventListener('pagehide', () => {
+        stopAmbient();
+        if (rafId !== null) cancelAnimationFrame(rafId);
+        window.clearTimeout(readyTimeoutId);
+        window.removeEventListener('message', onParentMessage);
+      });
+
+      window.HertzSplash = {
+        setProgress(value) {
+          realProgress = clamp(Number(value) || 0, 0, 1);
+          progressActive = true;
+          stage.classList.add('has-progress');
+          progressFill.style.transform = `scaleX(${realProgress.toFixed(4)})`;
+        },
+        setStatus(text) {
+          loadingLabel.textContent = String(text || '正在启动播放器');
+          a11yStatus.textContent = loadingLabel.textContent;
+        },
+        ready() { resolveManualReady(); },
+        skip: skipNow,
+        replay: startSplash,
+        get mode() { return DISMISS ? 'splash' : 'showcase'; }
+      };
+      function onParentMessage(event) {
+        if (event.source !== window.parent || !event.data || typeof event.data !== 'object') return;
+        if (event.data.type === 'hertz-splash:progress') {
+          window.HertzSplash.setProgress(event.data.value);
+          window.HertzSplash.setStatus(event.data.status);
+        } else if (event.data.type === 'hertz-splash:ready') resolveParentReady();
+      }
+      if (EMBEDDED) {
+        window.addEventListener('message', onParentMessage);
+        window.parent.postMessage({ type: 'hertz-splash:attached' }, '*');
+      }
+
+      if (DISMISS) {
+        const hostReady = CONFIG.appReady != null
+          ? Promise.resolve(CONFIG.appReady)
+          : CONFIG.autoDismiss ? Promise.resolve() : new Promise(() => {});
+        const timeout = new Promise((r) => { readyTimeoutId = window.setTimeout(r, CONFIG.maxWait); });
+        Promise.race([
+          Promise.all([revealDone, Promise.race([hostReady, manualReady])]),
+          timeout
+        ]).then(exitSplash, exitSplash);
+      }
+
+      startSplash();
+    })();
+  </script>
+</body>
+</html>

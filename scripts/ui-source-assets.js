@@ -18,7 +18,7 @@ async function routeSourceAssets(page, fixture) {
     });
     const asset = assets.get(url.pathname);
     if (asset) return route.fulfill({ path: asset.file,
-      contentType: asset.mime === 'JS' ? 'application/javascript' : 'text/css' });
+      contentType: { JS: 'application/javascript', CSS: 'text/css', HTML: 'text/html' }[asset.mime] });
     return route.fallback();
   });
 }

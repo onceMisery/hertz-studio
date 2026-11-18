@@ -57,6 +57,7 @@
 
   var H = null;
   var T = null;
+  var pendingLoad = Promise.resolve();
 
   var st = {
     /// online = 各平台汇总；local = 本机规则引擎。
@@ -74,6 +75,7 @@
 
   function load() {
     if (!T) return Promise.resolve();
+    if (st.loading) return pendingLoad;
     st.loading = true;
     st.failed = false;
     render();
@@ -81,7 +83,7 @@
     var qs = '?limit=' + LIMIT;
     // 两条来源并发取：在线挂了不影响本地出榜，反之亦然。
     // allSettled 而不是 all：任一条 reject 都不该把另一条的结果一起丢掉。
-    return Promise.allSettled([
+    pendingLoad = Promise.allSettled([
       T.get('/v1/recommend/daily' + qs),
       T.get('/v1/recommend/daily/online' + qs),
     ]).then(function (res) {
@@ -92,6 +94,7 @@
       st.loading = false;
       render();
     });
+    return pendingLoad;
   }
 
   /// 当前来源下的那份数据。
@@ -564,7 +567,7 @@
     render();
   }
 
-  /// 进入页面时才拉：启动时多打两条请求不值得，用户不一定会点开。
+  /// 开屏期间预取的结果保留在本模块；进入页面直接复用，在途请求也不重复发。
   function onViewEnter() {
     // 已有数据就不重复拉；切走再回来看到的还是同一份。
     if (!page()) load();

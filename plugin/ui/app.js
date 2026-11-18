@@ -5769,7 +5769,7 @@ function openInlineDesktopLyrics() {
 function enterPlaylistsView() { renderOnlinePlaylistSection(); }
 // 队列页的高亮由快照实时同步，但隐藏期间没有布局可滚；进入时把当前曲定位回来。
 function enterQueueView() { syncQueuePlaying(state.snapshot, true); }
-// 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
+// 收藏仍在进入时拉；每日推荐在开屏期间准备好，页面进入时复用模块内的数据。
 function enterFavoritesView() { if (window.Favorites) window.Favorites.onViewEnter(); }
 // 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
 function enterDailyView() { if (window.DailyView) window.DailyView.onViewEnter(); }
@@ -9106,7 +9106,12 @@ async function startApp() {
   });
   // 两种 surface（工作台 tab / 浮动胶囊）都要挂；放在分支之前，别藏在 tab 那条路里。
   if (transport.kind === 'dbx') bindDbxCloseHook();
-  if (window.HertzCapsuleOnly) return startFloatingCapsule();
+  if (window.HertzCapsuleOnly) {
+    if (window.HertzStartup) window.HertzStartup.disable();
+    return startFloatingCapsule();
+  }
+  // Sign cover URLs before any startup preload can render its first cards.
+  await refreshCoverTicket();
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;
     toast('未连接本地服务，已进入演示模式', 'info');
@@ -10425,7 +10430,8 @@ async function startApp() {
     // 在线行的「加入歌单」：本地自建歌单按快照富形态收下在线曲目。
     addToPlaylistMenu: openPlaylistMenu,
   });
-  window.Online.init();
+  const onlineStartup = window.Online.init({ preload: true });
+  if (window.HertzStartup) window.HertzStartup.track('online', onlineStartup);
   if (window.Podcasts) window.Podcasts.bind({
     play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
   });
@@ -10568,6 +10574,8 @@ async function startApp() {
   if (window.Daily) {
     window.Daily.bind(favHost);
     window.Daily.init();
+    const dailyStartup = window.Daily.load({ silent: true });
+    if (window.HertzStartup) window.HertzStartup.track('daily', dailyStartup);
   }
   // Daily 视图模块就位了：补跑启动期攒下的换肤对账（见 onSkinChangedForViews）。
   // 放在 DailyView.bind 之前 —— 它只是 setView('library')，不依赖独立页。
@@ -10577,6 +10585,8 @@ async function startApp() {
   if (window.DailyView) {
     window.DailyView.bind(favHost);
     window.DailyView.init();
+    const dailyViewStartup = window.DailyView.load();
+    if (window.HertzStartup) window.HertzStartup.track('daily-view', dailyViewStartup);
   }
   initHomeDashboard();
   initSpaceHome(favHost);
@@ -10605,9 +10615,7 @@ async function startApp() {
   // 启动落在默认视图（在线曲库）—— 见 defaultView() 上方的边界说明：
   // 这里只改"回首页"语义，rail 的显式点击仍去本地曲库。
   setView(defaultView(), { skipDesktopDetection: true });
-  // 先把封面票签好再拉列表：coverUrl() 是同步契约，票没到位就只能退回 ?token=，
-  // 那第一屏封面又会把长期凭据带进 URL（正是这一步要消掉的东西）。
-  await refreshCoverTicket();
+  // Cover tickets were prepared before starting the parallel page preloads.
   // 浮层钥匙同理：复制/预览要同步拼 URL，先取回来缓存住。
   await loadOverlayKey();
   await refreshAll();
@@ -10727,7 +10735,9 @@ function showServiceExit(note) {
 (async function boot() {
   try {
     await startApp();
+    if (window.HertzStartup) window.HertzStartup.ready();
   } catch (err) {
     showBootFailure(err);
+    if (window.HertzStartup) window.HertzStartup.fail();
   }
 })();

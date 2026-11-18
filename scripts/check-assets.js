@@ -42,7 +42,7 @@ const indexHtml = fs.readFileSync(INDEX, 'utf8');
 const { readAssets } = require('./ui-assets');
 const entries = readAssets();
 const manifest = fs.readFileSync(require('./ui-assets').FILE, 'utf8');
-const includes = entries.map(e => ({ name: e.name, rel: e.rel }));
+const includes = entries.map(e => ({ name: e.name, href: e.packaged }));
 const routes = entries.map(e => ({ path: e.path, mime: e.mime, const: e.name }));
 const STANDALONE_PAGES = new Set(['INDEX_HTML', 'OVERLAY_HTML']);
 let m;
@@ -52,9 +52,10 @@ ok(new Set(entries.map(e => e.path)).size === entries.length, '资源路径唯�
 ok(new Set(entries.map(e => e.name)).size === entries.length, '资源标识唯一');
 entries.forEach(e => {
   ok(fs.existsSync(e.file), `${e.path} 的文件存在`);
-  ok(path.resolve(e.file).startsWith(path.resolve(WEB) + path.sep), `${e.path} 来自 UI 目录`);
-  ok(e.path === '/' + path.relative(WEB, e.file).split(path.sep).join('/'), `${e.path} 与打包路径相同`);
-  ok(e.path.endsWith(e.mime === 'JS' ? '.js' : '.css'), `${e.path} 的 MIME 正确`);
+  const sourceRoot = e.packaged.startsWith('splash/') ? path.join(ROOT, 'splash') : WEB;
+  ok(path.resolve(e.file).startsWith(path.resolve(sourceRoot) + path.sep), `${e.path} 来自声明的 UI 来源`);
+  ok(e.path === '/' + e.packaged, `${e.path} 与打包路径相同`);
+  ok(e.path.endsWith({ JS: '.js', CSS: '.css', HTML: '.html' }[e.mime]), `${e.path} 的 MIME 正确`);
 });
 console.log('\n目录消费');
 ok(/\.merge\(ui_asset_router\(\)\)/.test(mainRs), '主路由挂载资源目录');
@@ -96,8 +97,7 @@ const linkedJsSource = linkedJs
   .join('\n');
 includes.forEach((inc) => {
   if (STANDALONE_PAGES.has(inc.name)) return;
-  const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), inc.rel);
-  const href = path.relative(WEB, abs).split(path.sep).join('/');
+  const href = inc.href;
   ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`)
     || linkedJsSource.includes(`'/${href}'`),
     `${inc.name}（${href}）被 index.html 引用`);

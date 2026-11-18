@@ -1,0 +1,56 @@
+/* SPDX-License-Identifier: MIT */
+.hertz-startup {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: grid;
+  place-items: center;
+  background: #05060b;
+  color: #f8fafc;
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  opacity: 1;
+  transition: opacity 420ms ease-out;
+}
+
+.hertz-startup.is-exiting {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hertz-startup-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  opacity: 0;
+}
+
+.hertz-startup.is-attached .hertz-startup-frame { opacity: 1; }
+.hertz-startup.is-attached .hertz-startup-fallback { visibility: hidden; }
+
+.hertz-startup-fallback {
+  display: grid;
+  justify-items: center;
+  gap: 20px;
+  padding: 24px;
+  text-align: center;
+}
+
+.hertz-startup-brand {
+  margin: 0;
+  font-size: clamp(28px, 6vw, 48px);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.hertz-startup-status {
+  margin: 0;
+  color: #a8b4c9;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hertz-startup { transition: none; }
+}

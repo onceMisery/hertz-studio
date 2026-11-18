@@ -37,6 +37,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", source.display());
     println!(
         "cargo:rerun-if-changed={}",
+        root.join("splash/hertzstudio-splash.html").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         root.join("build-support/edition-ui.rs").display()
     );
     let dest = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("ui");
@@ -159,7 +163,7 @@ fn compress_assets(directory: &std::path::Path) -> std::io::Result<()> {
             compress_assets(&path)?;
         } else if matches!(
             path.extension().and_then(|s| s.to_str()),
-            Some("js" | "css")
+            Some("js" | "css" | "html")
         ) {
             // GzipBuilder's zero mtime and omitted filename make output reproducible.
             let mut encoder = flate2::GzBuilder::new()
