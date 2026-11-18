@@ -38,7 +38,8 @@
 | 全屏与弹窗、歌词请求竞态、错误/空态、键盘焦点与封面墙返回 | `check-now-playing-browser.js` |
 | 在线页、顶栏与空间搜索的增量结果、重试、分页、取消、焦点和窄屏 | `check-search-journey-browser.js` |
 | 每日推荐首屏、异步落位、节点复用、收起偏好、曲库多选和末行可达 | `check-daily-strip.js`、`check-daily-collapse-browser.js`、`check-daily-scroll-browser.js` |
-| DBX 表单提交、行控件几何、桌面设置授权/撤销/失败/启动行为 | `check-dbx-ui-browser.js`、`check-dbx-desktop-settings-browser.js`（另跑 `--settings-default`） |
+| DBX 表单、行控件几何与桌面功能排除 | `check-dbx-ui-browser.js`；先 `check-editions.js`，再 `check-dbx-desktop-settings-browser.js` 核对原始页和两版实际生成界面，保留普通歌词/播放 |
+| 独立桌面来源与历史 DBX 配置保留 | `check-desktop-management-native.js`、`check-desktop-source-browser.js`；原 DBX 私有桥夹具已退役 |
 | 桌面歌词全局恢复快捷键：设置页录入/取消/清除、脏草稿互斥、失败反馈、窄窗口 | `check-recovery-hotkey-browser.js`（页面契约）；`check-recovery-hotkey-native.js`（隔离原生宿主：真实注册占用、注入按键与定向消息到解锁定位、退出释放、重启持久、启动冲突，见 `docs/desktop-host.md` §5.1） |
 | 房间播放器、主题与局域网收藏、胶囊大小与对比度 | `check-room-player-browser.js`、`check-room-theme-browser.js`、`check-capsule-browser.js` |
 

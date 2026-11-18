@@ -22,8 +22,10 @@ pub const CLOSE_BEHAVIOR_KEY: &str = "native_window_close_behavior";
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CloseBehavior {
-    #[default]
     Hide,
+    /// 默认关闭即退出：点 × 却只隐到托盘时，正在播放的音乐会让人以为程序
+    /// 没关掉。需要后台播放的用户可以在「窗口与舞台」里显式改为隐藏。
+    #[default]
     Quit,
 }
 
@@ -252,17 +254,17 @@ impl WindowLifecycle {
         }
         let close_behavior = match vmusic_store::settings::get(&state.db, CLOSE_BEHAVIOR_KEY).await
         {
-            Ok(None) => CloseBehavior::Hide,
+            Ok(None) => CloseBehavior::Quit,
             Ok(Some(value)) => match serde_json::from_value::<CloseBehavior>(value) {
                 Ok(behavior) => behavior,
                 Err(_) => {
-                    tracing::warn!("invalid native window close preference; defaulting to hide");
-                    CloseBehavior::Hide
+                    tracing::warn!("invalid native window close preference; defaulting to quit");
+                    CloseBehavior::Quit
                 }
             },
             Err(_) => {
-                tracing::warn!("native window close preference unavailable; defaulting to hide");
-                CloseBehavior::Hide
+                tracing::warn!("native window close preference unavailable; defaulting to quit");
+                CloseBehavior::Quit
             }
         };
         let placement = placement::PlacementState::load(state).await;
@@ -844,7 +846,7 @@ mod tests {
     async fn preference_is_durable_and_failed_writes_leave_runtime_unchanged() {
         let (state, audio) = fixture().await;
         let lifecycle = WindowLifecycle::install(&state).await;
-        assert_eq!(lifecycle.close_behavior(), CloseBehavior::Hide);
+        assert_eq!(lifecycle.close_behavior(), CloseBehavior::Quit);
         lifecycle
             .set_close_behavior(CloseBehavior::Quit)
             .await
@@ -877,7 +879,7 @@ mod tests {
             WindowLifecycle::install(&restored_state)
                 .await
                 .close_behavior(),
-            CloseBehavior::Hide
+            CloseBehavior::Quit
         );
 
         sqlx::query("DROP TABLE settings")

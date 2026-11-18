@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! Builtin wallpaper mode for the existing local Ollama transport. The selected
+//! Builtin wallpaper contract and its local Ollama adapter. The selected
 //! scene's request schema comes from the native catalog; jobs still owns the
 //! single execution slot, cancellation, usage and artifact publication.
 
@@ -15,6 +15,13 @@ use serde_json::{json, Map, Value};
 
 pub(super) const OUTPUT_TOKENS: u64 = 4096;
 const INVALID_REQUEST: &str = "local wallpaper request violates the generation contract";
+
+/// Contract-owned content shared by bounded provider transports.
+pub(super) struct PreparedWallpaper {
+    pub schema: Value,
+    pub system: String,
+    pub user: String,
+}
 
 fn schema(request: &WallpaperGenerateRequest) -> Result<Value, &'static str> {
     request.validate().map_err(|_| INVALID_REQUEST)?;
@@ -83,7 +90,7 @@ fn schema(request: &WallpaperGenerateRequest) -> Result<Value, &'static str> {
     ]}))
 }
 
-fn request(model: &str, input: &WallpaperGenerateRequest) -> Result<Vec<u8>, &'static str> {
+pub(super) fn prepare(input: &WallpaperGenerateRequest) -> Result<PreparedWallpaper, &'static str> {
     let schema = schema(input)?;
     let system = format!(
         "Create one new desktop wallpaper for the selected builtin scene. \
@@ -94,11 +101,20 @@ fn request(model: &str, input: &WallpaperGenerateRequest) -> Result<Vec<u8>, &'s
          Do not generate code, URLs, files, tools, timelines or changes to other scenes. \
          If the description requires unsupported behavior, return {{\"unsupported\":true}}."
     );
+    Ok(PreparedWallpaper {
+        schema,
+        system,
+        user: input.brief.clone(),
+    })
+}
+
+fn request(model: &str, input: &WallpaperGenerateRequest) -> Result<Vec<u8>, &'static str> {
+    let prepared = prepare(input)?;
     let body = serde_json::to_vec(&json!({
         "model":model,"stream":false,"think":false,
-        "messages":[{"role":"system","content":system},
-                    {"role":"user","content":input.brief}],
-        "format":schema,
+        "messages":[{"role":"system","content":prepared.system},
+                    {"role":"user","content":prepared.user}],
+        "format":prepared.schema,
         "options":{"num_predict":OUTPUT_TOKENS,"temperature":0}
     }))
     .map_err(|_| INVALID_REQUEST)?;
@@ -129,6 +145,15 @@ fn failed(reason: &str) -> WallpaperReply {
         output: Err(reason.into()),
         usage: None,
     }
+}
+
+pub(super) fn decode(
+    input: &WallpaperGenerateRequest,
+    text: &str,
+) -> Result<Value, WallpaperOutputError> {
+    let output = super::wallpaper_jobs::validate_builtin_output(input, text.as_bytes())
+        .map_err(|_| WallpaperOutputError::Rejected)?;
+    serde_json::to_value(output).map_err(|_| WallpaperOutputError::Rejected)
 }
 
 pub(super) async fn generate(
@@ -165,12 +190,7 @@ pub(super) async fn generate(
             output: reply
                 .text
                 .map_err(WallpaperOutputError::Provider)
-                .and_then(|text| {
-                    let output =
-                        super::wallpaper_jobs::validate_builtin_output(&input, text.as_bytes())
-                            .map_err(|_| WallpaperOutputError::Rejected)?;
-                    serde_json::to_value(output).map_err(|_| WallpaperOutputError::Rejected)
-                }),
+                .and_then(|text| decode(&input, &text)),
             usage: reply.usage,
         },
         Err(reason) => failed(&reason),

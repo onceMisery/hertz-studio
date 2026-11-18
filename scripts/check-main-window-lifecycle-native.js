@@ -91,7 +91,7 @@ if($Action -eq 'close'){if($main -eq [IntPtr]::Zero){throw 'Owned main missing'}
 if($Action -eq 'cancel-fallback'){if($dialog -eq [IntPtr]::Zero){throw 'Owned fallback missing'};$button=[LifecycleWindows]::GetDlgItem($dialog,7);if($button -eq [IntPtr]::Zero){throw 'Cancel button missing'};[void][LifecycleWindows]::PostMessage($button,245,[IntPtr]::Zero,[IntPtr]::Zero)}
 @{visible=($main -ne [IntPtr]::Zero -and [LifecycleWindows]::IsWindowVisible($main));fallback=($dialog -ne [IntPtr]::Zero);main=$main.ToInt64()}|ConvertTo-Json -Compress
 `, 'utf8');
-  await start(); assert.equal((await lifecycle()).closeBehavior, 'hide');
+  await start(); assert.equal((await lifecycle()).closeBehavior, 'quit');
   const music = path.join(output, 'music'); fs.mkdirSync(music);
   const wav = Buffer.alloc(44 + 8000 * 600 * 2);
   wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
@@ -101,10 +101,11 @@ if($Action -eq 'cancel-fallback'){if($dialog -eq [IntPtr]::Zero){throw 'Owned fa
   const track = await until(async () => (await api('/v1/tracks?limit=20')).tracks[0], 'real local WAV scan');
   await api('/v1/player/load', 'POST', { track_id: track.id });
   await until(async () => (await api('/v1/state')).playing, 'null output real audio actor playing');
+  await api('/v1/window/settings', 'PUT', { closeBehavior: 'hide' });
   native('close'); await until(() => !native('read').visible, 'native CloseRequested hides');
   const hidden = await api('/v1/state'); assert.equal(hidden.playing, true); assert.equal(hidden.track_id, track.id);
   assert.equal((await lifecycle()).phase, 'idle'); await focus();
-  mark('actual WM_CLOSE hides by default and preserves the active audio actor; authenticated focus restores the same native window');
+  mark('default close quits; an explicit hide makes actual WM_CLOSE hide while preserving the active audio actor, and authenticated focus restores the same native window');
   await require('./native-sleep-checks')({ api, page, base: 'http://127.0.0.1:' + discovery.port, until, mark, snapshot });
   await page.evaluate(() => { window.__exitRequests = []; window.addEventListener('hertz-native-exit-request', event => __exitRequests.push(event.detail)); });
   await api('/v1/player/load', 'POST', { track_id: track.id });

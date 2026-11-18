@@ -232,11 +232,11 @@ impl App {
         };
         let playlist_token = if self.is_mirror_target() {
             if let Some(playlist) = playlist {
-                self.install_mirror_playlist(playlist);
+                self.install_mirror_playlist(playlist, Some(&reference));
             }
             self.mirror_switch().map(|switch| switch.token)
         } else {
-            self.install_playlist_snapshot(playlist)
+            self.install_playlist_snapshot(playlist, Some(&reference))
         };
         self.cancel_wallpaper_transition();
         self.desktop.prepared = Some(Prepared {
@@ -477,11 +477,12 @@ impl App {
         {
             let playlist_token = if self.is_mirror_target() {
                 if let Some(playlist) = playlist {
-                    self.install_mirror_playlist(playlist);
+                    self.install_mirror_playlist(playlist, Some(&reference));
                 }
                 self.mirror_switch().map(|switch| switch.token)
             } else {
-                self.install_playlist_snapshot(playlist).or(playlist_token)
+                self.install_playlist_snapshot(playlist, Some(&reference))
+                    .or(playlist_token)
             };
             self.desktop.prepared = Some(Prepared {
                 media,

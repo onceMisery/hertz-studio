@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: MIT
-//! One desktop management owner for REST and DBX. Construction and cached reads do no I/O.
-
+//! Standalone desktop facade. The original in-process host owns every window and command.
+//! DBX has no desktop management RPC, discovery, authorization or launch path.
 pub(crate) mod standalone;
-#[cfg(all(windows, target_arch = "x86_64"))]
-mod windows;
 
 use crate::{
-    desktop_bridge::{DesktopBridge, DesktopError, ScopeFailure},
-    error::{bad_request, ApiError},
+    error::{internal, ApiError},
     state::AppState,
 };
 use hertz_desktop_ipc::{Profile, Scope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 
 #[cfg(test)]
 pub(crate) use standalone::CONTROL_COMMANDS;
 pub(crate) use standalone::{ControlRequest, CONTROL_BODY_BYTES};
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DesktopError {
+    pub code: &'static str,
+    pub message: String,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,16 +29,15 @@ pub(crate) struct Component {
     pub origin: Option<&'static str>,
     pub error: Option<DesktopError>,
 }
-impl Default for Component {
-    fn default() -> Self {
-        Self {
-            state: "unknown",
-            origin: None,
-            error: None,
-        }
-    }
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ScopeFailure {
+    pub scope: Scope,
+    pub error: DesktopError,
 }
 
+// Retain the REST response fields for existing standalone clients. No bridge
+// authorization is inferred from old files, and no listener is created here.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Authorization {
@@ -76,15 +78,6 @@ pub(crate) struct Capabilities {
     pub source_scopes: SourceScopes,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OperationResult {
-    pub ok: bool,
-    pub error: Option<DesktopError>,
-    pub center_opened: bool,
-    pub capabilities: Capabilities,
-}
-
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CapabilitiesQuery {
@@ -92,63 +85,8 @@ pub(crate) struct CapabilitiesQuery {
     pub refresh: bool,
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Tab {
-    Lyrics,
-    Wallpaper,
-    #[default]
-    Runtime,
-}
-#[cfg(all(windows, target_arch = "x86_64"))]
-impl Tab {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Lyrics => "lyrics",
-            Self::Wallpaper => "wallpaper",
-            Self::Runtime => "runtime",
-        }
-    }
-}
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ConnectRequest {
-    #[serde(default)]
-    pub tab: Tab,
-}
-
-pub(crate) fn parse_connect(body: &Value) -> Result<ConnectRequest, ApiError> {
-    if body.is_null() {
-        return Ok(ConnectRequest::default());
-    }
-    if !body.is_object() {
-        return Err(bad_request("桌面连接请求必须是对象"));
-    }
-    serde_json::from_value(body.clone())
-        .map_err(|_| bad_request("桌面连接只接受 tab: lyrics、wallpaper 或 runtime"))
-}
-pub(crate) fn parse_empty(body: &Value) -> Result<(), ApiError> {
-    if body.is_null() || body.as_object().is_some_and(|o| o.is_empty()) {
-        Ok(())
-    } else {
-        Err(bad_request("桌面断开不接受参数"))
-    }
-}
-pub(super) fn error(code: &'static str, message: impl Into<String>) -> DesktopError {
-    DesktopError {
-        code,
-        message: message.into(),
-    }
-}
-pub(super) fn api_error(error: &ApiError) -> DesktopError {
-    self::error(error.code, error.message.clone())
-}
-
 pub(crate) struct Desktop {
     state: Weak<AppState>,
-    bridge: OnceLock<Arc<DesktopBridge>>,
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    runtime: windows::Runtime,
 }
 
 impl Desktop {
@@ -158,205 +96,143 @@ impl Desktop {
             .get_or_init(|| {
                 Arc::new(Self {
                     state: Arc::downgrade(state),
-                    bridge: OnceLock::new(),
-                    #[cfg(all(windows, target_arch = "x86_64"))]
-                    runtime: windows::Runtime::default(),
                 })
             })
             .clone()
     }
-    /// Called only by the sidecar's actual bridge assembly; page input cannot select a form.
-    pub fn attach_bridge(&self, bridge: Arc<DesktopBridge>) {
-        let _ = self.bridge.set(bridge);
-    }
-    pub(crate) fn calibration_authorized(&self) -> bool {
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        {
-            self.bridge
-                .get()
-                .is_some_and(|b| b.calibration_authorized())
-        }
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
-        {
-            false
-        }
-    }
+
     pub(crate) async fn calibration_authorization(
         &self,
         enabled: Option<bool>,
     ) -> Result<Value, ApiError> {
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        if let Some(b) = self.bridge.get() {
-            return b.calibration_authorization(enabled).await;
-        }
         let state = self
             .state
             .upgrade()
-            .ok_or_else(|| bad_request("播放器来源已退出"))?;
+            .ok_or_else(|| internal("Service stopped"))?;
         state
             .lyrics_calibration
             .standalone_authorization(&state, enabled)
     }
+
     fn source(&self) -> Option<Profile> {
-        if let Some(bridge) = self.bridge.get() {
-            return bridge.profile();
-        }
         self.state.upgrade().map(|state| Profile::Standalone {
-            edition: crate::edition::NAME.into(),
+            // The embedded host binds HostOptions.data_dir as a custom standalone source.
+            edition: "custom".into(),
             data_dir: state.data_dir.to_string_lossy().into_owned(),
         })
     }
-    fn authorization(&self) -> Authorization {
-        self.bridge
-            .get()
-            .map_or_else(Authorization::default, |bridge| {
-                let status = bridge.status();
-                Authorization {
-                    scopes: status.authorized_scopes,
-                    revision: status.revision,
-                    gate: bridge.capture_generation().is_some(),
-                    listener_ready: status.listener_ready,
-                    persistent_revoked: status.persistent_revoked,
-                    cleanup_incomplete: status.cleanup_incomplete,
-                    scope_errors: status.scope_errors,
-                    error: status.error,
-                }
-            })
-    }
-    fn empty(&self) -> Capabilities {
-        let supported = cfg!(all(windows, target_arch = "x86_64"));
+
+    /// In-process liveness only. Reading capabilities never starts a window or probes files/pipes.
+    pub fn cached(&self) -> Capabilities {
+        let supported = cfg!(all(
+            windows,
+            target_arch = "x86_64",
+            feature = "desktop-host"
+        ));
+        let running = supported && crate::desktop_host::is_running();
         Capabilities {
             supported,
-            reason: Some(if supported {
-                "not-detected"
-            } else {
+            reason: Some(if !cfg!(feature = "desktop-host") {
+                "desktop-feature-disabled"
+            } else if !supported {
                 "unsupported-target"
+            } else if running {
+                "host-running"
+            } else {
+                "not-running"
             }),
             error: None,
             source: self.source(),
-            transport: if self.bridge.get().is_some() {
-                "named-pipe"
-            } else {
-                "http"
-            },
-            build_id: env!("HERTZ_PLUGIN_BUILD_ID"),
+            transport: "in-process",
+            build_id: env!("HERTZ_STUDIO_BUILD_ID"),
             required_desktop_build_id: env!("HERTZ_DESKTOP_BUILD_ID"),
-            launch_mode: "manual",
-            component: Component::default(),
-            authorization: self.authorization(),
+            launch_mode: "embedded",
+            component: Component {
+                state: if running { "ready" } else { "not-running" },
+                origin: Some("embedded"),
+                error: None,
+            },
+            authorization: Authorization::default(),
             management_protocol: 2,
-            bridge_protocol: 1,
-            launch_requested: false,
+            bridge_protocol: 0,
+            launch_requested: running,
             management_ready: false,
             source_connected: false,
             source_scopes: SourceScopes::default(),
         }
     }
-    pub fn cached(&self) -> Capabilities {
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        {
-            self.runtime.cached(self)
-        }
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
-        {
-            self.empty()
-        }
-    }
+
     pub async fn capabilities(self: &Arc<Self>, refresh: bool) -> Capabilities {
-        if !refresh {
-            return self.cached();
+        let mut result = self.cached();
+        if !refresh || !result.launch_requested {
+            return result;
         }
-        #[cfg(all(windows, target_arch = "x86_64"))]
+        match self
+            .control(ControlRequest {
+                command: "status".into(),
+                value: None,
+            })
+            .await
         {
-            self.refresh().await
-        }
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
-        {
-            self.empty()
-        }
-    }
-    fn result(&self, failure: Option<DesktopError>, center_opened: bool) -> OperationResult {
-        OperationResult {
-            ok: failure.is_none(),
-            error: failure,
-            center_opened,
-            capabilities: self.cached(),
-        }
-    }
-    pub async fn connect(self: &Arc<Self>, tab: Tab) -> OperationResult {
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        {
-            self.connect_windows(tab).await
-        }
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
-        {
-            let _ = tab;
-            self.result(
-                Some(error(
-                    "desktop_platform_unsupported",
-                    "DBX desktop data requires Windows x64",
-                )),
-                false,
-            )
-        }
-    }
-    pub async fn disconnect(self: &Arc<Self>) -> OperationResult {
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        self.runtime.invalidate();
-        let Some(bridge) = self.bridge.get() else {
-            return self.result(
-                Some(error(
-                    "desktop_dbx_required",
-                    "Desktop source authorization requires a DBX sidecar",
-                )),
-                false,
-            );
-        };
-        // No management-worker join or management lock before bridge.disconnect's gate closure.
-        let result = bridge.disconnect().await;
-        self.result(result.err().as_ref().map(api_error), false)
-    }
-    pub async fn control(self: &Arc<Self>, request: ControlRequest) -> Result<Value, ApiError> {
-        if self.bridge.get().is_none() {
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| crate::error::internal("Service stopped"))?;
-            return standalone::control(&state, request).await;
-        }
-        match request.command.as_str() {
-            "status" if request.value.as_ref().is_none_or(Value::is_null) => {
-                Ok(serde_json::to_value(self.capabilities(true).await).expect("desktop DTO"))
+            Ok(status)
+                if status["ok"] == true
+                    && status["desktopBuildId"] == result.required_desktop_build_id =>
+            {
+                result.management_ready = true;
+                if is_active_source(&status["activeProfile"], result.source.as_ref()) {
+                    result.source_scopes.lyrics = status["sourceScopes"]["lyrics"] == true;
+                    result.source_scopes.wallpaper = status["sourceScopes"]["wallpaper"] == true;
+                    result.source_connected =
+                        result.source_scopes.lyrics || result.source_scopes.wallpaper;
+                }
             }
-            "open-center" => {
-                let request = parse_connect(request.value.as_ref().unwrap_or(&Value::Null))?;
-                Ok(serde_json::to_value(self.connect(request.tab).await).expect("desktop DTO"))
-            }
-            _ => Err(bad_request(
-                "DBX 桌面控制只支持 status 或 open-center；来源切换请使用桌面设置中心",
-            )),
-        }
-    }
-    pub async fn launch(self: &Arc<Self>, wallpaper: bool) -> Result<Value, ApiError> {
-        if self.bridge.get().is_some() {
-            return Ok(serde_json::to_value(
-                self.connect(if wallpaper {
-                    Tab::Wallpaper
-                } else {
-                    Tab::Lyrics
+            Ok(_) => {
+                result.error = Some(DesktopError {
+                    code: "desktop_response_invalid",
+                    message: "桌面宿主返回了不匹配的状态".into(),
                 })
-                .await,
-            )
-            .expect("desktop DTO"));
+            }
+            Err(error) => {
+                result.error = Some(DesktopError {
+                    code: error.code,
+                    message: error.message,
+                })
+            }
         }
+        result
+    }
+
+    pub async fn control(self: &Arc<Self>, request: ControlRequest) -> Result<Value, ApiError> {
         let state = self
             .state
             .upgrade()
-            .ok_or_else(|| crate::error::internal("Service stopped"))?;
-        let result = standalone::launch(&state, wallpaper).await?;
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        self.runtime.launched();
-        Ok(result)
+            .ok_or_else(|| internal("Service stopped"))?;
+        standalone::control(&state, request).await
+    }
+
+    pub async fn launch(self: &Arc<Self>, wallpaper: bool) -> Result<Value, ApiError> {
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| internal("Service stopped"))?;
+        standalone::launch(&state, wallpaper).await
+    }
+}
+
+/// Refresh compares the host's validated source identity, including Windows path aliases.
+fn is_active_source(value: &Value, expected: Option<&Profile>) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    let Ok(active) = serde_json::from_value::<Profile>(value.clone()) else {
+        return false;
+    };
+    if !matches!(active, Profile::Standalone { .. }) {
+        return false;
+    }
+    match (expected.normalized(), active.normalized()) {
+        (Ok(expected), Ok(active)) => expected == active,
+        _ => false,
     }
 }
 

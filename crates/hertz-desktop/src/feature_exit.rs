@@ -35,10 +35,6 @@ impl App {
     }
 
     pub(super) fn sync_lyrics_feed(&mut self) {
-        if config::is_dbx(&self.profile) {
-            self.sync_dbx_feed();
-            return;
-        }
         if !self.lyrics_needed() || self.config.active_profile.is_none() {
             self.lyrics_feed_stop.store(true, Ordering::Release);
             return;
@@ -98,7 +94,6 @@ impl App {
                 self.reconcile_mirror_playback(Instant::now());
                 self.stop_wallpaper_feed();
                 self.wallpaper_last = None;
-                self.wallpaper_last_update = None;
             }
         }
         self.sync_settings_feed();

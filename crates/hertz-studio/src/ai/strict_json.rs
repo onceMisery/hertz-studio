@@ -7,7 +7,7 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::fmt;
 
-pub(super) fn parse(
+pub(crate) fn parse(
     bytes: &[u8],
     max_bytes: usize,
     max_depth: usize,

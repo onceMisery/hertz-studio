@@ -120,7 +120,9 @@ pub fn emit(root: &Path, plugin: bool) {
         let plugin_id = digest(root, &inputs, &context);
         println!("cargo:rustc-env=HERTZ_PLUGIN_BUILD_ID={plugin_id}");
         let native = std::env::var_os("CARGO_FEATURE_NATIVE_WINDOW").is_some();
-        let studio_context = format!("standalone/1\n{context}\nnative-window={native}");
+        let desktop_host = std::env::var_os("CARGO_FEATURE_DESKTOP_HOST").is_some();
+        let studio_context =
+            format!("standalone/2\n{context}\nnative-window={native}\ndesktop-host={desktop_host}");
         println!(
             "cargo:rustc-env=HERTZ_STUDIO_BUILD_ID={}",
             digest(root, &inputs, &studio_context)

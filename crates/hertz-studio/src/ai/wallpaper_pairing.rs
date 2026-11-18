@@ -78,7 +78,7 @@ pub(crate) struct Session {
     expires_at: i64,
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 fn current_binding(state: &AppState, binding: &Binding) -> bool {
     use hertz_desktop_ipc::{
         windows::{process_generation, Identity},
@@ -104,7 +104,7 @@ fn current_binding(state: &AppState, binding: &Binding) -> bool {
             .is_ok_and(|generation| generation == binding.native_generation)
         && (binding.native_pid != std::process::id() || crate::desktop_host::is_running())
 }
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 fn current_binding(_state: &AppState, _binding: &Binding) -> bool {
     false
 }
@@ -135,7 +135,7 @@ pub(crate) async fn pending(state: &Arc<AppState>) -> Value {
     })).collect::<Vec<_>>()})
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 async fn deliver(binding: &Binding, payload: Value) -> ApiResult<()> {
     let binding = binding.clone();
     let response = tokio::task::spawn_blocking(move || {
@@ -160,7 +160,7 @@ async fn deliver(binding: &Binding, payload: Value) -> ApiResult<()> {
     }
     Ok(())
 }
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 async fn deliver(_binding: &Binding, _payload: Value) -> ApiResult<()> {
     Err(failure("desktop_unavailable", "短会话配对仅支持 Windows"))
 }
@@ -342,6 +342,6 @@ pub(crate) async fn cancel_grant_jobs(state: &Arc<AppState>, grant_id: &str) -> 
     super::jobs::cancel_principal_jobs(state, grant_id).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop-host"))]
 #[path = "wallpaper_pairing_tests.rs"]
 mod tests;

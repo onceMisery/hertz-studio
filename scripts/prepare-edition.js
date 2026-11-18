@@ -11,11 +11,13 @@ function prepare(edition) {
   if (!['standard', 'full'].includes(edition)) throw new Error('edition must be standard or full');
   const full = edition === 'full';
   const dest = path.join(ROOT, 'output', 'editions', edition, 'plugin');
+  const outputRoot = path.resolve(ROOT, 'output', 'editions');
+  if (!dest.startsWith(outputRoot + path.sep)) throw new Error('edition output escapes its workspace');
   fs.rmSync(dest, { recursive: true, force: true });
   fs.mkdirSync(path.join(dest, 'backend'), { recursive: true });
   const helper = path.join(path.dirname(dest), 'edition-ui' + (process.platform === 'win32' ? '.exe' : ''));
   execFileSync('rustc', ['--edition=2021', path.join(ROOT, 'build-support/edition-ui.rs'), '-o', helper], { stdio: 'inherit' });
-  execFileSync(helper, [path.join(ROOT, 'plugin/ui'), path.join(dest, 'ui'), edition], { stdio: 'inherit' });
+  execFileSync(helper, [path.join(ROOT, 'plugin/ui'), path.join(dest, 'ui'), edition, 'dbx'], { stdio: 'inherit' });
   require('./minify-ui').minifyUi(path.join(dest, 'ui'));
   fs.cpSync(path.join(ROOT, 'plugin/assets'), path.join(dest, 'assets'), { recursive: true });
   const sdk = path.join(dest, 'sdk-root/plugins/sdk/rust/dbx-plugin-sdk');

@@ -1,6 +1,8 @@
 # ADR-0012 · DBX 可选桌面读取与授权边界
 
-状态：已实施，发布验收待完成（2026-10-29）。D0 数据传输、D1 授权及原生读取、D2 管理与设置流程已通过独立规格和质量审查；D3 配套产物及真实环境进展以[实施记录](../plans/2026-10-28-dbx-desktop-implementation.md)为准。下表只登记已实现的边界，不代表真实跨用户、图形工作台和长稳验收全部通过。
+状态：已退役（2026-11-18），由 [ADR-0014](0014-standalone-desktop-ownership.md) 替代，以下决定与数值保留为历史。用户明确要求将桌面功能移出 DBX 插件；现行 owner 为独立播放器 `desktop-host`，插件没有私有桌面数据桥、管理/校准接线和桌面 UI，原生宿主拒绝 DBX 来源。历史 profile/授权数据保留，当前边界见 [退役说明](../desktop-dbx.md)。
+
+历史状态：已实施，发布验收待完成（2026-10-29）。D0 数据传输、D1 授权及原生读取、D2 管理与设置流程已通过独立规格和质量审查；D3 配套产物及真实环境进展以[实施记录](../plans/2026-10-28-dbx-desktop-implementation.md)为准。下表保留仍有定义的历史协议数值对照；已移除的门面常量另列于下方，不代表现行执行路径或真实环境验收通过。
 
 ## 决定
 
@@ -29,12 +31,14 @@ DBX 桌面功能通过用户主动授权的本机只读管道复用 HertzDesktop
 | 管理请求上限（字节） | 16384 | `crates/hertz-desktop-ipc/src/management.rs::REQUEST_LIMIT` | 服务端有界读取单条 raw JSON、旧客户端互通、空消息与慢客户端回收 |
 | 管理响应上限（字节） | 65536 | `crates/hertz-desktop-ipc/src/management.rs::RESPONSE_LIMIT` | 应答序列化与客户端有界读取；超限走结构化失败而非截断 |
 | 原生管理协议版本 | 2 | `crates/hertz-desktop/src/component.rs::MANAGEMENT_PROTOCOL` | 严格目标来源、实际构建及 requestId 关联；legacy 独立版兼容 |
-| 门面单次操作总期限（秒） | 5 | `crates/hertz-studio/src/desktop/windows/mod.rs::TOTAL` | 排队、探测与全部管理请求共用剩余预算，超时取消并回收实际 worker |
-| 门面管理可用缓存期限（秒） | 3 | `crates/hertz-studio/src/desktop/windows/protocol.rs::FRESHNESS` | 当前操作/授权代际遮罩；来源认证不复用此缓存 |
 | 原生配置 schema 版本 | 5 | `crates/hertz-desktop/src/config.rs::SCHEMA_VERSION` | v1/v2/v3/v4 迁移、未绑定独立版偏好与降级说明 |
 | 已绑定来源上限（个） | 8 | `crates/hertz-desktop/src/config.rs::MAX_PROFILES` | 插入活动来源后数量校验与设置页候选 |
 | 原生配置上限（字节） | 65536 | `crates/hertz-desktop/src/config.rs::MAX_CONFIG_BYTES` | 读入前限长与提交失败不替换内存 |
 | 音乐数据失效期限（秒） | 3 | `crates/hertz-desktop/src/management.rs::STALE_AFTER` | 原生独立计时、管理来源在线事实、页面剩余寿命与同身份文档恢复 |
+
+## 已退役门面的历史数值
+
+原 `crates/hertz-studio/src/desktop/windows/mod.rs` 的 `TOTAL` 为 5 秒，覆盖排队、探测及全部管理请求的同一剩余预算；原 `crates/hertz-studio/src/desktop/windows/protocol.rs` 的 `FRESHNESS` 为 3 秒，只缓存门面管理可用性，不复用来源认证。两份源码随 DBX 桌面门面退役删除，这些数值仅记录当时设计。
 
 ## 禁止回退
 

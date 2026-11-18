@@ -36,10 +36,10 @@ fn error(code: &'static str) -> ApiError {
     )
 }
 
-#[cfg(all(test, windows, target_arch = "x86_64"))]
+#[cfg(all(test, windows, target_arch = "x86_64", feature = "desktop-host"))]
 mod tests {
     use super::*;
-    use crate::desktop_bridge::authorization::{create_key, Authorization};
+    use crate::desktop_authorization::{create_key, Authorization};
     use hertz_desktop_ipc::Scope;
     fn wire_deadline(state: &AppState) -> Value {
         // A fresh fixture acceptance really occurs after the source's last
@@ -339,10 +339,9 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let key =
-            crate::desktop_bridge::authorization::read_key(&f.directory, Scope::LyricsCalibration)
-                .unwrap()
-                .to_string();
+        let key = crate::desktop_authorization::read_key(&f.directory, Scope::LyricsCalibration)
+            .unwrap()
+            .to_string();
         let client = reqwest::Client::new();
         assert_eq!(
             client
@@ -535,83 +534,24 @@ mod tests {
         f.finish().await;
     }
     #[tokio::test]
-    async fn calibration_dbx_handoff_assigns_one_full_target_and_survives_forwarder_exit() {
+    async fn calibration_rejects_dbx_workbench_authority_and_handoff() {
         let f = Fixture::new().await;
-        let bridge = crate::desktop_bridge::DesktopBridge::new(&f.state);
-        crate::desktop::Desktop::for_state(&f.state).attach_bridge(bridge.clone());
-        bridge.restore().await.unwrap();
-        let floating = f
-            .state
-            .lyrics_calibration
-            .ui(
-                &f.state,
-                json!({"op":"register","kind":"floating","visible":true,"workbench":true}),
-            )
-            .unwrap()["receiverId"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let intent = f.intent("handoff", 1);
-        let binding = intent["bindingId"].clone();
+        for request in [
+            json!({"op":"register","kind":"full","visible":true,"workbench":true}),
+            json!({"op":"register","kind":"full","visible":true,"handoff":"legacy-dbx-handoff"}),
+        ] {
+            assert!(f.state.lyrics_calibration.ui(&f.state, request).is_err());
+        }
+        let receiver = f.page(true);
+        let intent = f.intent("standalone-request", 1);
         f.state
             .lyrics_calibration
             .narrow(&f.state, "request", intent)
             .unwrap();
-        assert!(f.action(&floating, "handoff", "claim").unwrap()["intent"].is_object());
-        let marker = f.action(&floating, "handoff", "handoff").unwrap()["handoff"].clone();
-        assert!(marker.is_string());
-        assert!(f.action(&floating, "handoff", "handoff").is_err());
-        assert!(f.state.lyrics_calibration.ui(&f.state, json!({"op":"complete","receiverId":floating,"requestId":"handoff","result":"shown","detailVisible":true,"documentVisible":true,"documentFocused":true,"offsetFocused":true})).is_err());
-        let full = |token: &str| {
-            f.state
-                .lyrics_calibration
-                .ui(
-                    &f.state,
-                    json!({"op":"register","kind":"full","visible":true,"workbench":true,"handoff":token}),
-                )
-                .unwrap()["receiverId"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
-        let other = full("");
-        assert!(f.action(&other, "handoff", "claim").unwrap()["intent"].is_null());
-        assert!(f.state.lyrics_calibration.ui(&f.state,json!({"op":"register","kind":"full","visible":true,"workbench":true,"handoff":"wrong-marker"})).is_err());
-        let target = full(marker.as_str().unwrap());
-        assert!(f.action(&target, "handoff", "claim").unwrap()["intent"].is_null());
-        let claimed = f
-            .state
-            .lyrics_calibration
-            .ui(
-                &f.state,
-                json!({"op":"claim","receiverId":target,"visible":true,"handoff":marker}),
-            )
-            .unwrap();
-        assert_eq!(claimed["handoff"], marker);
-        assert!(f.action(&other, "handoff", "claim").unwrap()["intent"].is_null());
-        f.action(&floating, "handoff", "unregister").unwrap();
-        assert_eq!(
-            f.action(&target, "handoff", "validate").unwrap()["valid"],
-            true
-        );
-        lock(&f.state.lyrics_calibration.owner)
-            .pending
-            .as_mut()
-            .unwrap()
-            .deadline = Instant::now();
-        assert!(f.action(&target, "handoff", "validate").is_err());
-        assert_eq!(
-            f.state
-                .lyrics_calibration
-                .narrow(
-                    &f.state,
-                    "result",
-                    json!({"bindingId":binding,"requestId":"handoff"})
-                )
-                .unwrap()["state"],
-            "timeout"
-        );
-        bridge.shutdown().await;
+        assert!(f
+            .action(&receiver, "standalone-request", "handoff")
+            .is_err());
+        assert!(f.action(&receiver, "standalone-request", "claim").unwrap()["intent"].is_object());
         f.finish().await;
     }
     #[tokio::test]
@@ -811,10 +751,9 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let key =
-            crate::desktop_bridge::authorization::read_key(&f.directory, Scope::LyricsCalibration)
-                .unwrap()
-                .to_string();
+        let key = crate::desktop_authorization::read_key(&f.directory, Scope::LyricsCalibration)
+            .unwrap()
+            .to_string();
         let client = reqwest::Client::new();
         let bind_url = format!("{base}/v1/desktop-lyrics/calibration/bind");
         let bound: Value = client
@@ -1013,7 +952,7 @@ mod tests {
             .await
             .unwrap();
             if revoke {
-                f.state.lyrics_calibration.set_gate(false, false);
+                f.state.lyrics_calibration.set_gate(false);
             } else {
                 f.state
                     .audio
@@ -1150,15 +1089,12 @@ struct Receiver {
     id: String,
     kind: String,
     visible: bool,
-    workbench: bool,
     expires: Instant,
 }
 struct Pending {
     intent: Intent,
     deadline: Instant,
     receiver: String,
-    handoff: Option<String>,
-    target: Option<String>,
     claimed: bool,
     loading: bool,
     cancel_loading: tokio::sync::watch::Sender<bool>,
@@ -1183,7 +1119,6 @@ struct BindingOrder {
 #[derive(Default)]
 struct Owner {
     authorized: bool,
-    dbx: bool,
     loaded: bool,
     key: Option<zeroize::Zeroizing<String>>,
     binding: String,
@@ -1236,21 +1171,9 @@ impl Owner {
             self.receivers.clear();
             return;
         }
-        if self.dbx
-            && !state
-                .desktop
-                .get()
-                .is_some_and(|d| d.calibration_authorized())
-        {
-            self.fence_binding();
-            self.authorized = false;
-            self.finish("permission-required");
-            self.binding.clear();
-            self.terminals.clear();
-        }
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        if self.authorized && !self.dbx {
-            use crate::desktop_bridge::authorization::{read_key, Authorization};
+        #[cfg(all(windows, target_arch = "x86_64", feature = "desktop-host"))]
+        if self.authorized {
+            use crate::desktop_authorization::{read_key, Authorization};
             use hertz_desktop_ipc::Scope;
             let valid = Authorization::read(&state.data_dir)
                 .ok()
@@ -1287,11 +1210,7 @@ impl Owner {
                 Some("track-changed")
             } else if state.room.is_active() {
                 Some("room-active")
-            } else if !self
-                .receivers
-                .iter()
-                .any(|r| r.id == p.target.as_deref().unwrap_or(&p.receiver))
-            {
+            } else if !self.receivers.iter().any(|r| r.id == p.receiver) {
                 Some("receiver-unavailable")
             } else {
                 None
@@ -1318,14 +1237,13 @@ fn matches_truth(state: &AppState, i: &Intent) -> bool {
         && player.generation.to_string() == i.generation
 }
 impl LyricsCalibration {
-    /// DBX authorization remains owned by the bridge; gate changes invalidate all bindings.
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) fn set_gate(&self, authorized: bool, dbx: bool) {
+    /// Test injection for an in-flight runtime permission fence.
+    #[cfg(all(test, windows, target_arch = "x86_64", feature = "desktop-host"))]
+    fn set_gate(&self, authorized: bool) {
         let mut owner = lock(&self.owner);
         owner.fence_binding();
         owner.finish("permission-required");
         owner.authorized = authorized;
-        owner.dbx = dbx;
         owner.loaded = true;
         owner.binding.clear();
         owner.high_water = 0;
@@ -1344,15 +1262,14 @@ impl LyricsCalibration {
             return;
         }
         owner.loaded = true;
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        if let Ok(Some(record)) =
-            crate::desktop_bridge::authorization::Authorization::read(&state.data_dir)
+        #[cfg(all(windows, target_arch = "x86_64", feature = "desktop-host"))]
+        if let Ok(Some(record)) = crate::desktop_authorization::Authorization::read(&state.data_dir)
         {
             if record
                 .scopes
                 .contains(&hertz_desktop_ipc::Scope::LyricsCalibration)
             {
-                if let Ok(key) = crate::desktop_bridge::authorization::read_key(
+                if let Ok(key) = crate::desktop_authorization::read_key(
                     &state.data_dir,
                     hertz_desktop_ipc::Scope::LyricsCalibration,
                 ) {
@@ -1361,7 +1278,7 @@ impl LyricsCalibration {
                 }
             }
         }
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        #[cfg(not(all(windows, target_arch = "x86_64", feature = "desktop-host")))]
         let _ = state;
     }
     pub(crate) fn capability(&self, state: &AppState, lyrics_ready: bool) -> Value {
@@ -1378,7 +1295,7 @@ impl LyricsCalibration {
             "track-changed"
         } else if !lyrics_ready {
             "lyrics-unavailable"
-        } else if !o.receivers.iter().any(|r| !o.dbx || r.workbench) {
+        } else if o.receivers.is_empty() {
             "receiver-unavailable"
         } else {
             ""
@@ -1403,9 +1320,9 @@ impl LyricsCalibration {
                 o.high_water = 0;
                 o.terminals.clear();
             }
-            #[cfg(all(windows, target_arch = "x86_64"))]
+            #[cfg(all(windows, target_arch = "x86_64", feature = "desktop-host"))]
             if let Some(enabled) = enabled {
-                use crate::desktop_bridge::authorization::{create_key, key_file, Authorization};
+                use crate::desktop_authorization::{create_key, key_file, Authorization};
                 use hertz_desktop_ipc::{windows, Scope};
                 let existing = Authorization::read(&state.data_dir)
                     .map_err(|_| error("authorization-invalid"))?;
@@ -1450,7 +1367,7 @@ impl LyricsCalibration {
                 o.authorized = enabled;
                 o.key = key;
             }
-            #[cfg(not(all(windows, target_arch = "x86_64")))]
+            #[cfg(not(all(windows, target_arch = "x86_64", feature = "desktop-host")))]
             return Err(error("permission-required"));
         }
         let authorized = {
@@ -1458,9 +1375,9 @@ impl LyricsCalibration {
             o.sweep(state);
             o.authorized
         };
-        #[cfg(all(windows, target_arch = "x86_64"))]
+        #[cfg(all(windows, target_arch = "x86_64", feature = "desktop-host"))]
         {
-            use crate::desktop_bridge::authorization::{key_file, Authorization};
+            use crate::desktop_authorization::{key_file, Authorization};
             use hertz_desktop_ipc::Scope;
             let persistent = Authorization::read(&state.data_dir)
                 .map_err(|_| error("authorization-invalid"))?
@@ -1475,7 +1392,7 @@ impl LyricsCalibration {
                 json!({"authorized":authorized,"persistentAuthorized":persistent,"cleanupIncomplete":cleanup}),
             )
         }
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        #[cfg(not(all(windows, target_arch = "x86_64", feature = "desktop-host")))]
         Ok(json!({"authorized":authorized}))
     }
     pub(crate) fn authenticate(&self, state: &AppState, key: &str) -> bool {
@@ -1483,7 +1400,6 @@ impl LyricsCalibration {
         let mut o = lock(&self.owner);
         o.sweep(state);
         o.authorized
-            && !o.dbx
             && o.key.as_ref().is_some_and(|k| {
                 k.len() == key.len()
                     && k.bytes().zip(key.bytes()).fold(0, |d, (a, b)| d | (a ^ b)) == 0
@@ -1625,7 +1541,6 @@ impl LyricsCalibration {
         let receiver = o
             .receivers
             .iter()
-            .filter(|r| !o.dbx || r.workbench)
             .min_by_key(|r| match r.kind.as_str() {
                 "native" => 0,
                 "full" if r.visible => 1,
@@ -1643,8 +1558,6 @@ impl LyricsCalibration {
             intent: i.clone(),
             deadline,
             receiver: receiver_id,
-            handoff: None,
-            target: None,
             claimed: false,
             loading: !ready,
             cancel_loading,
@@ -1775,6 +1688,10 @@ impl LyricsCalibration {
             return Err(error("invalid-request"));
         }
         let c: UiCall = serde_json::from_value(body).map_err(|_| error("invalid-request"))?;
+        // Empty legacy fields are accepted for cached standalone pages; they grant no authority.
+        if c.workbench || !c.handoff.is_empty() {
+            return Err(error("invalid-request"));
+        }
         let mut o = lock(&self.owner);
         o.sweep(state);
         if *state.exiting.borrow() {
@@ -1787,34 +1704,13 @@ impl LyricsCalibration {
             {
                 return Err(error("receiver-unavailable"));
             }
-            if !(c.handoff.is_empty()
-                || o.dbx
-                    && c.kind == "full"
-                    && c.workbench
-                    && o.pending.as_ref().is_some_and(|p| {
-                        !p.loading
-                            && p.handoff.as_deref() == Some(c.handoff.as_str())
-                            && p.target.is_none()
-                    }))
-            {
-                return Err(error("receiver-unavailable"));
-            }
             let id = uuid::Uuid::new_v4().to_string();
             o.receivers.push(Receiver {
                 id: id.clone(),
                 kind: c.kind.clone(),
                 visible: c.visible,
-                workbench: c.workbench,
                 expires: Instant::now() + LEASE,
             });
-            if !c.handoff.is_empty() {
-                if let Some(p) = o.pending.as_mut().filter(|p| {
-                    p.handoff.as_deref() == Some(c.handoff.as_str()) && p.target.is_none()
-                }) {
-                    p.target = Some(id.clone());
-                    p.claimed = false;
-                }
-            }
             return Ok(json!({"receiverId":id,"session":state.server_instance_id()}));
         }
         let r = o
@@ -1833,48 +1729,29 @@ impl LyricsCalibration {
             return Ok(json!({"renewed":true}));
         }
         if c.op == "claim" {
-            let Some(p) = o.pending.as_mut().filter(|p| {
-                !p.loading
-                    && p.target.as_deref().unwrap_or(&p.receiver) == c.receiver_id
-                    && !p.claimed
-                    && (p.target.is_none() || p.handoff.as_deref() == Some(c.handoff.as_str()))
-            }) else {
+            let Some(p) = o
+                .pending
+                .as_mut()
+                .filter(|p| !p.loading && p.receiver == c.receiver_id && !p.claimed)
+            else {
                 return Ok(json!({"intent":null}));
             };
             p.claimed = true;
             return Ok(
-                json!({"intent":p.intent,"remainingMs":p.deadline.saturating_duration_since(Instant::now()).as_millis(),"handoff":p.handoff}),
+                json!({"intent":p.intent,"remainingMs":p.deadline.saturating_duration_since(Instant::now()).as_millis()}),
             );
         }
         let p = o
             .pending
             .as_ref()
             .filter(|p| {
-                p.intent.request_id == c.request_id
-                    && !p.loading
-                    && p.target.as_deref().unwrap_or(&p.receiver) == c.receiver_id
+                p.intent.request_id == c.request_id && !p.loading && p.receiver == c.receiver_id
             })
             .ok_or_else(|| error("expired/unknown"))?;
         if c.op == "validate" {
             return Ok(
                 json!({"valid":true,"remainingMs":p.deadline.saturating_duration_since(Instant::now()).as_millis()}),
             );
-        }
-        if c.op == "handoff" {
-            if !o.dbx {
-                return Err(error("invalid-request"));
-            }
-            let r = o.receivers.iter().find(|r| r.id == c.receiver_id).unwrap();
-            if r.kind != "floating" || !r.workbench {
-                return Err(error("receiver-unavailable"));
-            }
-            let p = o.pending.as_mut().unwrap();
-            if p.handoff.is_some() {
-                return Err(error("request-conflict"));
-            }
-            let marker = uuid::Uuid::new_v4().to_string();
-            p.handoff = Some(marker.clone());
-            return Ok(json!({"handoff":marker}));
         }
         if c.op == "complete" {
             let full = o

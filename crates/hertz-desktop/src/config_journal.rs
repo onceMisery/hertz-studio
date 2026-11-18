@@ -131,6 +131,7 @@ struct Record {
 pub(crate) struct Operation {
     pub request_id: String,
     pub command: String,
+    pub payload_digest: String,
     pub state: State,
     pub saved: Option<bool>,
     pub config_revision: Option<u64>,
@@ -143,6 +144,7 @@ impl Record {
         Operation {
             request_id: self.request_id.clone(),
             command: self.command.clone(),
+            payload_digest: self.payload_digest.clone(),
             state: self.state,
             saved: match self.state {
                 State::Committed => Some(true),

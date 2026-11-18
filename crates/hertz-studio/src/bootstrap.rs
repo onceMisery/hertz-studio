@@ -236,6 +236,7 @@ pub async fn boot(
         room: Default::default(),
         config: Arc::new(config.clone()),
         data_dir: data_dir.clone(),
+        #[cfg(any(feature = "desktop-host", test))]
         desktop: Default::default(),
         native_window: Default::default(),
         native_sleep: Default::default(),
@@ -245,7 +246,9 @@ pub async fn boot(
         desktop_lyrics_key: desktop_lyrics_key.clone(),
         wallpaper_key: wallpaper_key.clone(),
         desktop_mini_key: desktop_mini_key.clone(),
+        #[cfg(any(feature = "desktop-host", test))]
         desktop_mini_seq: Default::default(),
+        #[cfg(any(feature = "desktop-host", test))]
         wallpaper: Default::default(),
         events,
         queue: Default::default(),
@@ -285,7 +288,9 @@ pub async fn boot(
         exiting: tokio::sync::watch::channel(false).0,
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
+        #[cfg(any(feature = "desktop-host", test))]
         desktop_lyrics: Default::default(),
+        #[cfg(any(feature = "desktop-host", test))]
         lyrics_calibration: Default::default(),
         listen: Default::default(),
         scrobble: Default::default(),

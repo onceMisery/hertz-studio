@@ -12,6 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, JobError>;
+#[derive(Debug)]
+pub(crate) struct SubmissionOutcome {
+    pub request_id: String,
+    pub pending: bool,
+    pub interrupted: bool,
+    pub retired_service_instance: Option<String>,
+}
 fn error(code: &'static str, message: &str) -> JobError {
     JobError::new(code, message)
 }
@@ -59,6 +66,27 @@ pub(crate) struct NativeGeneration {
     state: Mutex<State>,
     busy: AtomicBool,
     jobs: Mutex<Option<Arc<super::jobs::ImportJobs>>>,
+}
+impl State {
+    fn abandon_generation(&mut self) -> Option<SubmissionOutcome> {
+        let request_id = self
+            .submission
+            .take()
+            .and_then(|body| body["requestId"].as_str().map(str::to_owned));
+        let retired_service_instance = self
+            .connection
+            .as_ref()
+            .map(|c| c.binding.server_instance_id.clone());
+        if request_id.is_none() && retired_service_instance.is_none() {
+            return None;
+        }
+        Some(SubmissionOutcome {
+            request_id: request_id.unwrap_or_default(),
+            pending: true,
+            interrupted: true,
+            retired_service_instance,
+        })
+    }
 }
 impl NativeGeneration {
     pub(crate) fn new() -> Arc<Self> {
@@ -109,14 +137,14 @@ impl NativeGeneration {
         state.quote = None;
         state.quote_revision = state.quote_revision.wrapping_add(1);
     }
-    pub(crate) fn retire_profile(&self) {
-        let connection = {
+    pub(crate) fn retire_profile(&self) -> Option<SubmissionOutcome> {
+        let (connection, outcome) = {
             let mut state = lock(&self.state);
+            let outcome = state.abandon_generation();
             state.epoch = state.epoch.wrapping_add(1);
             state.quote = None;
             state.job = None;
-            state.submission = None;
-            state.connection.take()
+            (state.connection.take(), outcome)
         };
         if let Some(connection) = connection.filter(|c| c.bearer.is_some()) {
             let _ = std::thread::Builder::new()
@@ -127,6 +155,17 @@ impl NativeGeneration {
                     }
                 });
         }
+        outcome
+    }
+    pub(crate) fn confirmation_request_id(&self, owner: u64, token: &str) -> Result<String> {
+        lock(&self.state)
+            .quote
+            .as_ref()
+            .filter(|quote| {
+                quote.owner == owner && quote.token == token && Instant::now() < quote.expires
+            })
+            .map(|quote| quote.request_id.clone())
+            .ok_or_else(|| error("quote_expired", "报价已变化或到期，请重新报价"))
     }
     pub(crate) fn confirmation(&self, owner: u64, token: &str) -> Result<String> {
         let state = lock(&self.state);
@@ -199,6 +238,87 @@ impl NativeGeneration {
         Ok(format!("允许本次壁纸生成？\n\n模型：{} / {}\n地址：{}\n发送范围：{}\n规格：{}\n描述：{}\n最长等待：{} 秒\n{}\n\n仅生成候选，不保存或切换桌面。",
             summary.provider,summary.model,summary.endpoint_label,summary.data_scope,quote.specification,quote.description,summary.maximum_wait_seconds,price))
     }
+
+    /// This narrow proof is unrelated to the model bearer. The existing HTTP
+    /// transport verifies the selected Profile and actual loopback process.
+    pub(crate) fn accept_external(
+        profile: crate::config::Profile,
+        service: super::external_requests::ServiceIdentity,
+        proof: String,
+        request_id: String,
+        digest: String,
+        settings_generation: u64,
+    ) -> Result<Value> {
+        let current = super::external_requests::current_service(&profile)?;
+        super::external_requests::check_service(&service, &current, service.pid)?;
+        let identity = hertz_desktop_ipc::windows::Identity::current()
+            .map_err(|_| error("identity_unavailable", "登录身份不可用"))?;
+        let native_pid = std::process::id();
+        let native_generation = hertz_desktop_ipc::windows::process_generation(native_pid)
+            .map_err(|_| error("identity_unavailable", "原生进程不可用"))?;
+        let discovery = crate::bridge::read_discovery(&profile)
+            .map_err(|_| error("service_unavailable", "播放器已停止"))?;
+        let connection = Connection {
+            binding: Binding {
+                protocol: pairing::PROTOCOL,
+                user_sid: identity.user_sid,
+                windows_session_id: identity.windows_session_id,
+                native_pid,
+                native_generation: native_generation.clone(),
+                desktop_build_id: crate::component::BUILD_ID.into(),
+                edition: service.edition,
+                profile_digest: service.profile_digest,
+                service_pid: service.pid,
+                server_instance_id: service.server_instance_id,
+            },
+            profile,
+            origin: format!("http://127.0.0.1:{}", discovery.port),
+            service_generation: service.generation,
+            challenge: String::new(),
+            challenge_deadline: Instant::now(),
+            verified: true,
+            bearer: None,
+            grant_id: None,
+            expires: None,
+        };
+        let result = http(
+            &connection,
+            "POST",
+            "/v1/ai/wallpaper/requests/accept",
+            Some(json!({
+            "proof":proof,"requestId":request_id,"digest":digest,"nativePid":native_pid,
+            "nativeGeneration":native_generation,"settingsGeneration":settings_generation })),
+        )?;
+        if result["requestId"] != request_id
+            || result["digest"] != digest
+            || result["acceptanceId"]
+                .as_str()
+                .is_none_or(|s| !super::api::valid_id(s))
+        {
+            return Err(error("invalid_response", "申请受理回执无效"));
+        }
+        Ok(result)
+    }
+    /// Read the already associated job on demand through the original session;
+    /// it cannot quote, reconnect or submit another generation.
+    pub(crate) fn read_external_job(
+        &self,
+        profile: crate::config::Profile,
+        owner: u64,
+        job_id: String,
+    ) -> Result<Value> {
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return Err(error("ai_busy", "原生成状态正在读取"));
+        }
+        let result = self.perform(
+            profile,
+            owner,
+            "wallpaper.ai.generate.job",
+            json!({"jobId":job_id}),
+        );
+        self.busy.store(false, Ordering::Release);
+        result
+    }
     pub(crate) fn verify(
         &self,
         payload: Value,
@@ -268,6 +388,7 @@ impl NativeGeneration {
         }
         Ok(json!({"ok":true}))
     }
+    #[cfg(test)]
     pub(crate) fn run(
         self: &Arc<Self>,
         profile: crate::config::Profile,
@@ -275,6 +396,18 @@ impl NativeGeneration {
         command: String,
         payload: Value,
         done: impl FnOnce(Result<Value>) + Send + 'static,
+    ) -> Result<()> {
+        self.run_with_submission(profile, owner, command, payload, move |result, _| {
+            done(result)
+        })
+    }
+    pub(crate) fn run_with_submission(
+        self: &Arc<Self>,
+        profile: crate::config::Profile,
+        owner: u64,
+        command: String,
+        payload: Value,
+        done: impl FnOnce(Result<Value>, Option<SubmissionOutcome>) + Send + 'static,
     ) -> Result<()> {
         if self.busy.swap(true, Ordering::AcqRel) {
             return Err(error("ai_busy", "上一操作尚未完成"));
@@ -284,17 +417,33 @@ impl NativeGeneration {
         if std::thread::Builder::new()
             .name("wallpaper-ai-request".into())
             .spawn(move || {
-                let result = service.perform(profile, owner, &command, payload);
+                let mut submission_pending = None;
+                let result = service.perform_with_submission(
+                    profile,
+                    owner,
+                    &command,
+                    payload,
+                    &mut submission_pending,
+                );
                 if result.as_ref().is_err_and(|e| {
                     matches!(
                         e.code,
                         "grant_revoked" | "wallpaper_session_expired" | "service_identity_mismatch"
                     )
                 }) {
-                    service.retire_profile();
+                    if let Some(outcome) = &mut submission_pending {
+                        outcome.interrupted = outcome.pending;
+                    }
+                    let retired = service.retire_profile();
+                    if let Some(outcome) = &mut submission_pending {
+                        outcome.retired_service_instance =
+                            retired.and_then(|r| r.retired_service_instance);
+                    } else {
+                        submission_pending = retired;
+                    }
                 }
                 service.busy.store(false, Ordering::Release);
-                done(result);
+                done(result, submission_pending);
             })
             .is_err()
         {
@@ -309,9 +458,17 @@ impl NativeGeneration {
         connection: &Connection,
         body: Value,
         asset_set: Option<String>,
+        submission_pending: &mut Option<SubmissionOutcome>,
     ) -> Result<Value> {
         // The service receipt belongs to this frozen submission even when the
         // settings/profile authority changes while HTTP is in flight.
+        let recovering = submission_pending.is_some();
+        *submission_pending = Some(SubmissionOutcome {
+            request_id: body["requestId"].as_str().unwrap_or("").into(),
+            pending: true,
+            interrupted: false,
+            retired_service_instance: None,
+        });
         let result = http(
             connection,
             "POST",
@@ -331,10 +488,42 @@ impl NativeGeneration {
                             | "quote_provider_changed"
                             | "quote_consumed"
                             | "idempotency_conflict"
+                            | "grant_revoked"
+                            | "unauthorized"
+                            | "wallpaper_session_expired"
+                            | "wallpaper_session_expiring"
+                            | "scope_required"
+                            | "generation_consent_required"
+                            | "ai_disabled"
+                            | "ai_locked"
                     )
                 )
             })
         }) {
+            // An authority rejection during recovery cannot prove that the
+            // earlier attempt created no job. Stop delivery without inventing
+            // a no-cost failure for that previous unknown submission.
+            let interrupted = recovering
+                && result.as_ref().err().is_some_and(|error| {
+                    error.details.as_ref().is_some_and(|details| {
+                        matches!(
+                            details["serviceCode"].as_str(),
+                            Some(
+                                "grant_revoked"
+                                    | "unauthorized"
+                                    | "wallpaper_session_expired"
+                                    | "wallpaper_session_expiring"
+                                    | "scope_required"
+                                    | "generation_consent_required"
+                                    | "ai_disabled"
+                                    | "ai_locked"
+                            )
+                        )
+                    })
+                });
+            let outcome = submission_pending.as_mut().expect("frozen submission");
+            outcome.pending = interrupted;
+            outcome.interrupted = interrupted;
             {
                 let mut state = lock(&self.state);
                 if state.epoch == epoch && state.submission.as_ref() == Some(&body) {
@@ -367,7 +556,11 @@ impl NativeGeneration {
                 super::ai_asset_sets::AiAssetSets(jobs.library()).bind_job(quote, request, job),
             )?;
         }
-        result
+        result.map(|mut response| {
+            // Provenance belongs to the frozen submit/recover body.
+            response["generationRequestId"] = request.into();
+            response
+        })
     }
 
     fn perform(
@@ -377,6 +570,26 @@ impl NativeGeneration {
         command: &str,
         payload: Value,
     ) -> Result<Value> {
+        self.perform_with_submission(profile, owner, command, payload, &mut None)
+    }
+    fn perform_with_submission(
+        &self,
+        profile: crate::config::Profile,
+        owner: u64,
+        command: &str,
+        payload: Value,
+        submission_pending: &mut Option<SubmissionOutcome>,
+    ) -> Result<Value> {
+        if command == "wallpaper.ai.generate.recover" {
+            *submission_pending = lock(&self.state).submission.as_ref().and_then(|body| {
+                body["requestId"].as_str().map(|id| SubmissionOutcome {
+                    request_id: id.into(),
+                    pending: true,
+                    interrupted: false,
+                    retired_service_instance: None,
+                })
+            });
+        }
         if matches!(
             command,
             "wallpaper.ai.connect"
@@ -389,19 +602,20 @@ impl NativeGeneration {
             return Err(error("invalid_input", "此操作不接受额外参数"));
         }
         if command == "wallpaper.ai.connect" {
-            return self.connect(profile);
+            return self.connect(profile, submission_pending);
         }
         if command == "wallpaper.ai.status" {
             let mut state = lock(&self.state);
             if state.connection.as_ref().is_some_and(|c| {
                 profile.normalized().ok().as_ref() != Some(&c.profile)
                     || current_discovery(c).is_err()
+                    || c.bearer.is_some() && c.expires.is_none_or(|t| Instant::now() >= t)
             }) {
+                *submission_pending = state.abandon_generation();
                 state.epoch = state.epoch.wrapping_add(1);
                 state.connection = None;
                 state.quote = None;
                 state.job = None;
-                state.submission = None;
                 state.last_poll = None;
             }
             let mut result=state.connection.as_ref().map_or(json!({"connected":false}), |c| json!({
@@ -420,11 +634,11 @@ impl NativeGeneration {
                 .clone()
                 .ok_or_else(|| error("ai_not_connected", "先连接已运行的播放器"))?;
             if command == "wallpaper.ai.disconnect" {
+                *submission_pending = state.abandon_generation();
                 state.epoch = state.epoch.wrapping_add(1);
                 state.quote = None;
                 state.connection = None;
                 state.job = None;
-                state.submission = None;
             }
             (state.epoch, connection)
         };
@@ -643,7 +857,7 @@ impl NativeGeneration {
                         "连接或报价已变化，请重新选择素材并报价",
                     ));
                 }
-                self.submit_generation(epoch, &connection, body, asset_set_id)?
+                self.submit_generation(epoch, &connection, body, asset_set_id, submission_pending)?
             }
             "wallpaper.ai.generate.recover" => {
                 let (body, asset_set) = {
@@ -654,7 +868,7 @@ impl NativeGeneration {
                         .ok_or_else(|| error("submission_unknown", "没有待查询的确认请求"))?;
                     (body, state.submission_asset_set.clone())
                 };
-                self.submit_generation(epoch, &connection, body, asset_set)?
+                self.submit_generation(epoch, &connection, body, asset_set, submission_pending)?
             }
             "wallpaper.ai.generate.job" | "wallpaper.ai.generate.cancel" => {
                 #[derive(Deserialize)]
@@ -746,7 +960,11 @@ impl NativeGeneration {
         }
         Ok(result)
     }
-    fn connect(&self, profile: crate::config::Profile) -> Result<Value> {
+    fn connect(
+        &self,
+        profile: crate::config::Profile,
+        abandoned: &mut Option<SubmissionOutcome>,
+    ) -> Result<Value> {
         if crate::config::is_dbx(&profile) {
             return Err(error(
                 "ai_standalone_required",
@@ -816,10 +1034,10 @@ impl NativeGeneration {
             }) {
                 return Err(error("ai_already_connected", "先断开当前生成连接"));
             }
+            *abandoned = state.abandon_generation();
             state.epoch = state.epoch.wrapping_add(1);
             state.quote = None;
             state.job = None;
-            state.submission = None;
             state.last_poll = None;
             state.connection = Some(connection.clone());
             state.epoch

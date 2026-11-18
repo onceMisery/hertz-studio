@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT
+[package]
+name = "hertz-wallpaper-hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Independent wallpaper community identity, quarantine and review service"
+
+[dependencies]
+hertz-wallpaper = { path = "../hertz-wallpaper", features = ["community-release"] }
+hertz-wallpaper-signer = { path = "../hertz-wallpaper-signer" }
+axum = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+fslock = { workspace = true }
+jsonwebtoken = { version = "=9.3.1", default-features = false }
+ipnet = "=2.12.2"

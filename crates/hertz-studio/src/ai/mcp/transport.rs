@@ -94,7 +94,29 @@ fn bounded_reply(item: TxJsonRpcMessage<RoleServer>) -> io::Result<TxJsonRpcMess
 struct Input<R> {
     inner: R,
     line_bytes: usize,
+    json_line: Vec<u8>,
     closed: watch::Sender<bool>,
+}
+
+impl<R> Input<R> {
+    fn validate_json_line(&self) -> io::Result<()> {
+        // The SDK accepts a leading UTF-8 BOM and a final frame at EOF.
+        // Check the same JSON bytes before its Value parser can erase duplicates.
+        let line = self
+            .json_line
+            .strip_prefix(b"\xef\xbb\xbf")
+            .unwrap_or(&self.json_line);
+        if hertz_wallpaper::json::check_bounded_json(line, 128)
+            .is_err_and(|error| error.code == "duplicate_key")
+        {
+            self.closed.send_replace(true);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP input contains duplicate JSON keys",
+            ));
+        }
+        Ok(())
+    }
 }
 
 struct Output<W> {
@@ -151,16 +173,23 @@ impl<R: AsyncRead + Unpin> AsyncRead for Input<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let before = buf.filled().len();
-        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+        // AsyncRead must leave the caller's filled bytes unchanged on error.
+        // Validate a bounded scratch read before publishing any of its bytes.
+        let mut scratch = [0u8; 4096];
+        let capacity = buf.remaining().min(scratch.len());
+        let mut read = ReadBuf::new(&mut scratch[..capacity]);
+        match Pin::new(&mut self.inner).poll_read(cx, &mut read) {
             Poll::Ready(Ok(())) => {
-                let bytes = &buf.filled()[before..];
+                let bytes = read.filled();
                 // A zero-capacity read is not EOF.
                 if bytes.is_empty() && buf.remaining() > 0 {
                     self.closed.send_replace(true);
+                    self.validate_json_line()?;
                 }
                 for &byte in bytes {
                     if byte == b'\n' {
+                        self.validate_json_line()?;
+                        self.json_line.clear();
                         self.line_bytes = 0;
                     } else if self.line_bytes == MAX_INPUT_LINE_BYTES {
                         self.closed.send_replace(true);
@@ -170,8 +199,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for Input<R> {
                         )));
                     } else {
                         self.line_bytes += 1;
+                        self.json_line.push(byte);
                     }
                 }
+                buf.put_slice(bytes);
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(error)) => {
@@ -201,6 +232,7 @@ where
         Input {
             inner: read,
             line_bytes: 0,
+            json_line: Vec::new(),
             closed: closed.clone(),
         },
         Output {
@@ -332,6 +364,57 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn external_input_rejects_original_duplicate_business_keys() {
+        let (closed, _) = watch::channel(false);
+        let bytes = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"wallpaper_generate_request\",\"arguments\":{\"operationId\":\"one\",\"brief\":\"first\",\"brief\":\"second\",\"outputKind\":\"builtin\"}}}\n";
+        let mut input = Input {
+            inner: bytes.as_slice(),
+            line_bytes: 0,
+            json_line: Vec::new(),
+            closed,
+        };
+        let mut output = Vec::new();
+        assert!(input.read_to_end(&mut output).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn duplicate_input_never_reaches_sdk_dispatch_with_bom_or_eof() {
+        let request = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wallpaper_generate_request","arguments":{"operationId":"one","brief":"first","brief":"second","outputKind":"builtin"}}}"#;
+        for bom in [false, true] {
+            for newline in [false, true] {
+                let mut bytes = Vec::new();
+                if bom {
+                    bytes.extend_from_slice(b"\xef\xbb\xbf");
+                }
+                bytes.extend_from_slice(request);
+                if newline {
+                    bytes.push(b'\n');
+                }
+                let (mut transport, closed) = bounded(bytes.as_slice(), tokio::io::sink());
+                assert!(
+                    transport.receive().await.is_none(),
+                    "duplicate frame reached dispatch: bom={bom}, newline={newline}"
+                );
+                assert!(*closed.borrow());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_bom_prefixed_frames_keep_sdk_compatibility() {
+        for newline in [false, true] {
+            let mut bytes = b"\xef\xbb\xbf".to_vec();
+            bytes.extend_from_slice(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+            if newline {
+                bytes.push(b'\n');
+            }
+            let (mut transport, _) = bounded(bytes.as_slice(), tokio::io::sink());
+            let received = transport.receive().await.unwrap();
+            assert_eq!(serde_json::to_value(received).unwrap()["id"], 7);
+        }
+    }
+
+    #[tokio::test]
     async fn input_limit_is_per_line_and_preserves_fragmented_reads() {
         let (closed, receiver) = watch::channel(false);
         let mut bytes = vec![b'x'; MAX_INPUT_LINE_BYTES];
@@ -341,6 +424,7 @@ mod tests {
         let mut input = Input {
             inner: bytes.as_slice(),
             line_bytes: 0,
+            json_line: Vec::new(),
             closed,
         };
         let mut actual = Vec::new();

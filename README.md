@@ -31,7 +31,7 @@ Windows Full 候选构建包含原生窗口，解压后通过包内 **Hertz Stud
 - 播放控制：播放、暂停、停止、跳转、音量、上一首 / 下一首、三种播放模式（重复 / 单曲 / 随机），
   一首结束自动续播；睡眠定时到点自动暂停
 - 谁在看谁在听：关掉最后一个界面页面会在宽限期后自动暂停（按一次 F5 或另开一个标签都不会误停）；
-  原生窗口关闭后隐藏到托盘，托盘「退出」结束服务
+  原生窗口关闭默认退出播放器；需要关窗后台播放时在设置中改为隐藏到托盘，托盘「退出」结束服务
 - 实时频谱：64 段 FFT，约 30 fps 推到界面
 - 本地曲库：目录扫描、内嵌标签与封面提取、增删自动同步、标题 / 艺术家 / 专辑搜索；
   排序与分页都在服务端完成，点播用**完整筛选结果**作为队列；搜索关键词留历史
@@ -273,6 +273,7 @@ sidecar 只做传输：把宿主的调用转成与 HTTP 响应同构的返回值
 两种形态的事件口径一致，业务实现只有一份。插件形态的生命周期由宿主管理。
 **当前状态**：`crates/hertz-studio/src/rpc/` 已覆盖曲库、播放、歌单、推荐、播客、远程来源与设置，
 与 HTTP 复用同一套服务实现；`scripts/check-plugin-sidecar.js` 验证信封、路由与事件契约。
+桌面歌词、壁纸、桌面宠物/原生小窗、桌面校准及壁纸 AI 由独立播放器提供；两版 DBX 插件只生成插件形态的界面和后端，保留普通歌词、沉浸舞台与舞台素材。旧 DBX 桌面接入已退役，历史配置和证据见[原接入记录](docs/desktop-dbx.md)。
 真实平台账号和原生宿主的验收范围见[上架手册](docs/dbx-store-submission.md)。
 
 ---
@@ -576,9 +577,9 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | 音频格式与错误边界 | 13 种扩展名，四件不同的事（检查 / 标签 / 解码 / 出声）写明并如实上报 | [audio-format-support.md](docs/audio-format-support.md) |
 | S2–S4 音频二期 | 升采样、参数 EQ、卷积 IR、EBU R128、真峰值限幅、噪声整形、交叉馈送、饱和，以及 Windows WASAPI 独占输出——排期在 R0–R6 之外 | 待音频专项重新定序 |
 | P0–P3 壁纸引擎 | 已有九场景、单目标屏、预览、自启与分项恢复证据；后续设计覆盖本地作品库与多屏、可扩展资源/组合编辑、AI 生成与受控切换、隔离网页及社区分发，约束资源生命周期、性能预算与生成授权；新增阶段尚未交付，W0/W1 历史证据保留 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
-| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；DBX 候选入口已实现，L1-C 与 DBX D3 完整发布验收待完成 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
+| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；由独立播放器进程内宿主提供，DBX 桌面入口已退役，当前原生发行资格按独立播放器验收 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
 | 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 已有实机探针结果，L1 首版按本契约落地；本机管理通道与来源切换已通，发布验收仍未完成 | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
-| DBX 桌面接入 | D0–D2 已实现并通过独立审查；D3a 两版同源配套候选已准备。最低 0.6.35 / 当前 0.6.47 两版插件的无组件基础流程、真实定时、关闭重开、原生呈现和正常退出通过，当前 Full 另验真实在线取词；D3b 的物理媒体键、跨用户/会话、桌面恢复与长稳等仍待验。组件由用户独立启动，DBX 单独使用无行为变化为硬约束 | [DBX 接入方案](docs/desktop-dbx.md) |
+| DBX 桌面边界 | 桌面歌词、壁纸、原生小窗/桌宠、校准与壁纸 AI 已移出插件形态；两版插件保留普通歌词和舞台。旧 D0–D3 配套实现及原生/长稳证据作为历史记录，当前只验证隔离与插件基础功能 | [历史接入与退役说明](docs/desktop-dbx.md) |
 | LAN-L 局域网一起听 | 房主统一渲染、接收端按设备时钟同步；含受限配对/撤权、旧播控入口模式门禁，以及互动弹幕的独立有界存储。**设计提案待评审、尚未实施**，不依赖桌面专项 | [lan-listening.md](docs/lan-listening.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |

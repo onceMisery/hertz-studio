@@ -121,6 +121,7 @@ pub struct InstalledReceipt {
 pub struct AssetStore {
     root: PathBuf,
     content_capacity: u64,
+    trust: std::sync::OnceLock<Arc<super::community::TrustStore>>,
     _root_owner: crate::root_owner::RootOwner,
 }
 
@@ -160,6 +161,7 @@ impl AssetStore {
         Ok(Self {
             root: root.to_path_buf(),
             content_capacity: super::content_quota::CAP,
+            trust: std::sync::OnceLock::new(),
             _root_owner: root_owner,
         })
     }
@@ -170,6 +172,17 @@ impl AssetStore {
 
     pub(crate) fn content_capacity(&self) -> u64 {
         self.content_capacity
+    }
+
+    pub(crate) fn bind_trust(&self, trust: Arc<super::community::TrustStore>) -> Result<()> {
+        let bound=self.trust.get_or_init(||Arc::clone(&trust));
+        if !Arc::ptr_eq(bound,&trust){return Err(JobError::new("trust_owner_conflict","资产库已绑定另一安全库"));}
+        Ok(())
+    }
+
+    pub(crate) fn security_check(&self, hash: &str) -> Result<()> {
+        if let Some(trust)=self.trust.get(){trust.security_check(hash)?;}
+        Ok(())
     }
 
     #[cfg(any(test, all(debug_assertions, feature = "wallpaper-media-probe")))]
@@ -521,6 +534,7 @@ impl AssetStore {
         std::io::copy(&mut file, &mut hasher)
             .map_err(|error| JobError::io(format!("读取快照失败：{error}")))?;
         let package_hash = format!("{:x}", hasher.finalize());
+        self.security_check(&package_hash)?;
         let package = hertz_wallpaper::validate_package(file)?;
         let manifest_json = serde_json::to_string(&package.manifest)
             .map_err(|error| JobError::io(format!("manifest 再序列化失败：{error}")))?;
@@ -751,6 +765,7 @@ impl AssetStore {
     /// 已安装包核验：原包验证结果是路径/MIME/摘要真值，投影逐文件核对 SHA-256。
     /// 返回 Some(收据) 表示目录与 original.hwpkg 完整可核验。
     pub fn verify_installed(&self, package_hash: &str) -> Result<Option<InstalledReceipt>> {
+        self.security_check(package_hash)?;
         let dir = self.package_dir(package_hash);
         let original = dir.join("original.hwpkg");
         if !dir.is_dir() || !original.is_file() {
@@ -857,6 +872,7 @@ impl AssetStore {
 
     /// 读取已安装包的 manifest（启动恢复入库用）。
     pub fn read_installed_manifest(&self, package_hash: &str) -> Result<StagedPackage> {
+        self.security_check(package_hash)?;
         let original = self.package_dir(package_hash).join("original.hwpkg");
         self.read_manifest_at(&original, package_hash, PackageLocation::Installed)
     }

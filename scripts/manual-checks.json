@@ -8,7 +8,7 @@
     },
     {
       "script": "check-wallpaper-generation-native.js",
-      "purpose": "Owned Windows/WebView2 fixtures for embedded HostHandle and standalone pipe pairing, default-No native consent, original confirmed task recovery, repeated artifact receive, original GL preview and close, explicit immutable package save/reopen, hidden-tab polling and session revocation. Requires freshly built HERTZ_BIN and HERTZ_DESKTOP_BIN plus PLAYWRIGHT_MODULE; set HERTZ_GENERATION_STANDALONE=1 for the standalone case. Uses only free fake generation and isolated fixture data, refuses an existing desktop host. Real provider qualification, paid calls and additional image/composition adapters remain separate."
+      "purpose": "Owned Windows/WebView2 fixtures for embedded HostHandle and standalone pipe pairing, default-No native consent, original confirmed task recovery, repeated artifact receive, original GL preview and close, explicit immutable package save/reopen, hidden-tab polling and session revocation. Requires freshly built HERTZ_BIN and HERTZ_DESKTOP_BIN plus PLAYWRIGHT_MODULE; set HERTZ_GENERATION_STANDALONE=1 for the standalone case. HERTZ_GENERATION_EXTERNAL_FIXTURE=1 additionally uses wallpaper-external-sdk-checks.js and the built official rmcp wallpaper_mcp_client example (HERTZ_MCP_SDK_BIN) against actual stdio adapters: explicit tool scopes, safe catalog/exact package identity, same-key/cross-grant requests, pending and per-minute limits, hidden panel, native No/Yes generation and exact switch, original job/config receipts and revocation before confirmation. Requires Node 22.12+ node:sqlite for the isolated original job store's read-only projection, which includes native-session jobs omitted from the official local-owner jobs route. Writes external-sdk-results.json including owned driver/adapter cleanup. External mode requires the free builtin fixture and is run for each edition/host mode. Uses only isolated fixture data, refuses an existing desktop host. Opt-in live text acceptance sets HERTZ_GENERATION_OPENAI_COMPATIBLE=1 with explicit HERTZ_SUBAPI_ORIGIN, HERTZ_SUBAPI_MODEL and isolated HERTZ_SUBAPI_KEY; wallpaper-compatible-checks.js verifies unknown monetary pricing, one actual token usage entry and credential cleanup. Add HERTZ_GENERATION_COMPOSITION_FIXTURE=1 for live composition. Other product MCP clients remain separate qualifications."
     },
     {
       "script": "check-wallpaper-model-loader.mjs",
@@ -96,7 +96,7 @@
     },
     {
       "script": "check-desktop-lyrics-calibration-browser.js",
-      "purpose": "Production desktop calibration button, player receiver/controller and existing lyric-offset controls in Chrome: explicit consent/revocation, single receiver and DBX handoff, current-track fencing, cancellation/deadline, focus failure, no offset writes, narrow layout and K=0 recovery. Requires PLAYWRIGHT_MODULE; isolated fixture transport. Actual Windows foreground focus, paired native service and DBX 0.6.35/0.6.47 acceptance remain separate."
+      "purpose": "Production standalone calibration receiver and original lyric-offset controls in Chromium: consent/revoke, fencing, deadlines, cancellation, focus failures and recovery; DBX main/floating pages must make zero desktop receiver/calibration requests. Requires PLAYWRIGHT_MODULE; actual Windows foreground and release/device qualification remain separate."
     },
     {
       "script": "check-stage-engine-m1-native.js",
@@ -260,19 +260,19 @@
     },
     {
       "script": "check-dbx-desktop-settings-browser.js",
-      "purpose": "Production Hertz UI in a real opaque allow-scripts iframe: settings/reopen/desktop entries, consent, independent capability facts, partial failures, revoke races, startup privacy and guide fallback. --settings-default checks saved settings startup."
+      "purpose": "Source plus actual staged Standard/Full UIs in opaque allow-scripts iframes: no desktop DOM/accessibility/navigation/resources or desktop requests; ordinary lyric offset, playback and lyrics remain usable. Run check-editions.js first; requires Playwright and Chromium."
     },
     {
       "script": "check-desktop-management-native.js",
-      "purpose": "Isolated Windows WebView2 management v2 admission, legacy scalar compatibility, explicit DBX candidate binding failure/retry, revision guards and authenticated pipe source health. Requires a built native binary, Cargo, Playwright and no running desktop instance."
+      "purpose": "Isolated Windows WebView2 standalone management v2 and original scalar controls: validated HTTP source scopes, explicit source switching, save failure/CAS guards, retired DBX target rejection and historical domain preservation. Requires a fresh native binary, Playwright and no running desktop instance."
     },
     {
       "script": "check-desktop-persistence-native.js",
       "purpose": "Isolated Windows WebView2/Win32 persistence regression: failed-save lock, appearance and placement rollback, and unbound legacy preferences explicit atomic binding. Requires a built native binary, Playwright and no running desktop instance."
     },
     {
-      "script": "check-desktop-dbx-browser.js",
-      "purpose": "Isolated Chrome/WebGL verification of DBX read-only lyric controls, standalone recovery, monotonic request/queue/cache freshness, sequence replay and wallpaper expiry. Requires Playwright and Chrome."
+      "script": "check-desktop-source-browser.js",
+      "purpose": "Standalone bundled lyric/wallpaper pages in Chromium: readonly capability controls and recovery, conservative request/queue/cache freshness, sequence replay and independent wallpaper expiry. Requires Playwright and Chromium."
     },
     {
       "script": "check-desktop-lyrics-browser.js",

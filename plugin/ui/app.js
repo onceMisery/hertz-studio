@@ -73,6 +73,7 @@ const ui = {
   setLyricOffsetDown: $('set-lyric-offset-down'),
   setLyricOffsetUp: $('set-lyric-offset-up'),
   setLyricOffsetReset: $('set-lyric-offset-reset'),
+// form:desktop
   setDesktopLyricsRow: $('set-desktop-lyrics-row'),
   setDesktopLyricsOpen: $('set-desktop-lyrics-open'),
   setDesktopLyricsLocate: $('set-desktop-lyrics-locate'),
@@ -84,6 +85,7 @@ const ui = {
   setMiniToggle: $('set-mini-toggle'),
   setMiniAssets: $('set-mini-assets'),
   setMiniNote: $('set-mini-note'),
+// form:end
   setLyricStaff: $('set-lyric-staff'),
   setLyricStaffPattern: $('set-lyric-staff-pattern'),
   setLyricStaffNote: $('set-lyric-staff-note'),
@@ -277,7 +279,9 @@ const ui = {
   barTitle: $('bar-title'),
   barSub: $('bar-sub'),
   barFavorite: $('bar-favorite'),
+// form:desktop
   barDesktopSettings: $('bar-desktop-settings'),
+// form:end
   barTime: $('bar-time'),
   prev: $('prev'),
   playpause: $('playpause'),
@@ -1126,6 +1130,10 @@ window.AiGrantSettings = (function () {
     'library:read': '检索曲库',
     'stage:capabilities_read': '读取舞台契约',
     'stage:intent_validate': '校验舞台草稿',
+// form:desktop
+    'wallpaper:catalog_read': '分享壁纸目录（标题与标签）',
+    'wallpaper:request': '提出壁纸申请（本机确认）',
+// form:end
   };
   const controlScopes = [
     'playback:pause', 'playback:resume', 'playback:previous',
@@ -1332,7 +1340,9 @@ window.AiGrantSettings = (function () {
     refs.list.appendChild(item);
   }
 
+// form:desktop
   function installWallpaperPairings() {
+    if (!window.hertzHost.desktopEnabled) return;
     const previous = node('ai-wallpaper-pairings');
     if (previous) previous.remove();
     const panel = document.createElement('details'); panel.id = 'ai-wallpaper-pairings';
@@ -1375,6 +1385,7 @@ window.AiGrantSettings = (function () {
     refs.root.appendChild(panel);
   }
 
+// form:end
   function render() {
     if (!refs) return;
     refs.create.disabled = busy;
@@ -1450,7 +1461,9 @@ window.AiGrantSettings = (function () {
       status: node('ai-grant-status'),
       list: node('ai-grant-list'),
     };
+// form:desktop
     installWallpaperPairings();
+// form:end
     manager.hidden = false;
     unavailable.hidden = true;
     if (presets[refs.preset.value]) setScopes(presets[refs.preset.value]);
@@ -5741,30 +5754,33 @@ function enterSettingsView(ctx) {
   loadDiagnostics();
   // 缓存占用是随时会变的数字，进设置页才刷新。
   // 恢复默认视图（包括已保存的 settings）不代表用户请求桌面检测。
-  if (!options.skipDesktopDetection && window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
-  if (!options.skipDesktopDetection) refreshInlineDesktopLyrics();
+// form:desktop
+  if (!options.skipDesktopDetection && window.hertzHost.desktopEnabled) refreshInlineDesktopLyrics();
+// form:end
   if (window.__loadCacheStats) window.__loadCacheStats();
   if (window.__loadDspSettings) window.__loadDspSettings();
   if (window.__loadRemoteRoots) window.__loadRemoteRoots();
 }
+// form:desktop
 function refreshInlineDesktopLyrics() {
+  if (!window.hertzHost.desktopEnabled) return;
   const group = $('desktop-lyrics-settings');
   if (state.view === 'settings' && group && group.getClientRects().length && window.HertzDesktopLyricsSettings) {
     window.HertzDesktopLyricsSettings.refresh();
   }
 }
 function openInlineDesktopLyrics() {
+  if (!window.hertzHost.desktopEnabled) return;
   if (window.Stage3D) window.Stage3D.close();
   if (window.Space3D) window.Space3D.close();
   closeNowPlaying();
   setView('settings');
   if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
-  if (window.hertzHost && window.hertzHost.isDbx) {
-    if (window.HertzDesktopSettings) window.HertzDesktopSettings.focus();
-  } else if (window.HertzDesktopLyricsSettings) {
+  if (window.HertzDesktopLyricsSettings) {
     window.HertzDesktopLyricsSettings.open();
   }
 }
+// form:end
 // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
 function enterPlaylistsView() { renderOnlinePlaylistSection(); }
 // 队列页的高亮由快照实时同步，但隐藏期间没有布局可滚；进入时把当前曲定位回来。
@@ -7128,7 +7144,6 @@ const skinActions = {
 
   'settings-enter': (d) => {
     // 播放页工具按需读取原设置；同次请求由模块合并。
-    if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
     loadDiagnostics();
     const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
     (Array.isArray(d.sections) ? d.sections : []).forEach(section => {
@@ -8068,28 +8083,21 @@ function openNowPlaying(options) {
 }
 
 function closeNowPlaying(options) {
+// form:desktop
   calibrationUi.cancelLocal();
+// form:end
   if (lyricImporter) lyricImporter.close();
   if (window.NowPlaying) NowPlaying.close(options);
   np.scrim.hidden = true;
   np.modal.hidden = true;
 }
 
+// form:desktop
 // An authenticated page receives one source-owned intent; narrow desktop keys never enter JS.
 const calibrationUi = (() => {
-  let receiver = null, flight = null, timer = 0, active = null, stopped = false, handoffMarker = '', contextEpoch = 0;
+  let receiver = null, flight = null, timer = 0, active = null, stopped = false, contextEpoch = 0;
   const endpoint = '/v1/desktop/calibration-ui';
   const call = body => transport.post(endpoint, { visible: document.visibilityState === 'visible', ...body });
-  const isDbx = () => !!(window.hertzHost && window.hertzHost.isDbx);
-  const workbench = () => isDbx() && !!(window.dbxPlugin && typeof window.dbxPlugin.openWorkbench === 'function'
-    && typeof window.dbxPlugin.onInit === 'function' && typeof window.dbxPlugin.onContext === 'function');
-  function contextHandoff(context) {
-    const marker = context && context.hertzCalibrationHandoff;
-    if (window.HertzCapsuleOnly || typeof marker !== 'string' || !/^[0-9a-f-]{36}$/i.test(marker) || marker === handoffMarker) return;
-    handoffMarker = marker; cancelLocal();
-    if (receiver) { const old = receiver; receiver = null; call({ op: 'unregister', receiverId: old.receiverId }).catch(() => {}); }
-    poll();
-  }
   function local(c) {
     return active === c && c.epoch === contextEpoch && !stopped && state.connected
       && receiver === c.receiver && receiver && receiver.session === c.intent.session
@@ -8109,24 +8117,6 @@ const calibrationUi = (() => {
   }
   async function run(c) {
     if (!await valid(c)) return;
-    if (isDbx()) {
-      if (!workbench()) {
-        await call({ op: 'complete', receiverId: c.receiver.receiverId, requestId: c.intent.requestId, result: 'receiver-unavailable' }); return;
-      }
-      if (window.HertzCapsuleOnly) {
-        const reply = await call({ op: 'handoff', receiverId: c.receiver.receiverId, requestId: c.intent.requestId });
-        if (!await valid(c)) return;
-        if (typeof reply.handoff !== 'string' || !/^[0-9a-f-]{36}$/i.test(reply.handoff)) return;
-        try { await window.dbxPlugin.openWorkbench(playerWorkbench(), { hertzCalibrationHandoff: reply.handoff }, { target: 'tab' }); }
-        catch (_) {
-          if (await valid(c)) await call({ op: 'complete', receiverId: c.receiver.receiverId, requestId: c.intent.requestId, result: 'receiver-unavailable' });
-        }
-        return;
-      }
-      if (!await valid(c)) return;
-      await window.dbxPlugin.openWorkbench(playerWorkbench(), {}, { target: 'tab' });
-      if (!await valid(c)) return;
-    }
     const track = state.current;
     const doc = await (track.source && track.onlineId ? window.Online.loadLyricDoc(track)
       : transport.get(`/v1/tracks/${encodeURIComponent(c.intent.trackId)}/lyrics`));
@@ -8166,33 +8156,26 @@ const calibrationUi = (() => {
       && flight === ticket && receiver === ticket.receiver;
     try {
       if (!receiver) {
-        const marker = handoffMarker;
-        const registered = await call({ op: 'register', kind: isDbx() && window.HertzCapsuleOnly ? 'floating'
-          : window.WindowLifecycle && WindowLifecycle.isNative() ? 'native' : 'full', workbench: workbench(), handoff: marker });
-        if (!current() || marker !== handoffMarker) { call({ op: 'unregister', receiverId: registered.receiverId }).catch(() => {}); return; }
+        const registered = await call({ op: 'register', kind: window.WindowLifecycle && WindowLifecycle.isNative() ? 'native' : 'full' });
+        if (!current()) { call({ op: 'unregister', receiverId: registered.receiverId }).catch(() => {}); return; }
         receiver = registered;
         ticket.receiver = registered;
       }
       const claimStarted = performance.now();
-      const reply = await call({ op: 'claim', receiverId: ticket.receiver.receiverId, handoff: handoffMarker });
+      const reply = await call({ op: 'claim', receiverId: ticket.receiver.receiverId });
       if (!current()) return;
       if (reply.intent && !active) {
-        handoffMarker = '';
         const c = { intent: reply.intent, deadline: claimStarted + Math.min(5000, Number(reply.remainingMs || 0)),
           epoch: ticket.epoch, receiver: ticket.receiver };
         active = c;
         try { await run(c); } finally { if (active === c) active = null; }
       }
-    } catch (_) { if (current()) { active = null; receiver = null; handoffMarker = ''; } }
+    } catch (_) { if (current()) { active = null; receiver = null; } }
     finally { if (flight === ticket) flight = null; }
   }
   function cancelLocal() { active = null; contextEpoch++; flight = null; }
   function init() {
-    if (workbench()) {
-      window.dbxPlugin.onInit(contextHandoff);
-      window.dbxPlugin.onContext(contextHandoff);
-      contextHandoff(window.dbxPlugin.context);
-    }
+    if (!window.hertzHost.desktopEnabled || timer || window.HertzCapsuleOnly) return;
     timer = setInterval(() => {
       if (active && !local(active)) cancelLocal();
       if (flight && receiver) {
@@ -8255,6 +8238,7 @@ const calibrationUi = (() => {
   return { init, cancelLocal };
 })();
 
+// form:end
 // 播放快照 → 弹窗（播放态 / 时间 / 进度）
 function syncNpSnapshot(snap) {
   if (lyricImporter) lyricImporter.sync();
@@ -9034,7 +9018,6 @@ async function startFloatingCapsule() {
   initCapsuleControls();
   bindMediaSession();
   await refreshFloatingCapsule();
-  calibrationUi.init();
   openSocket();
 }
 
@@ -10138,133 +10121,101 @@ async function startApp() {
       persistSettings({ online_auto_relay: ui.setRelay.checked });
     };
   }
-  // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
-  // DBX 的统一桌面区只注册事件；实际打开设置或显式桌面动作才检测。
-  if (window.HertzDesktopSettings) window.HertzDesktopSettings.init(transport);
-  if (window.HertzDesktopLyricsSettings) window.HertzDesktopLyricsSettings.init(transport);
-  if (window.HertzWallpaperSettings) window.HertzWallpaperSettings.init(transport);
-  window.addEventListener('hertz-settings-category', refreshInlineDesktopLyrics);
-  window.addEventListener('hertz-open-desktop-lyrics-settings', openInlineDesktopLyrics);
   if (window.WindowLifecycle) window.WindowLifecycle.init(transport);
-  calibrationUi.init();
-  if (ui.barDesktopSettings) {
-    ui.barDesktopSettings.hidden = false;
-  }
-  if (ui.setDesktopLyricsRow) {
-    ui.setDesktopLyricsRow.style.display =
-      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
-  }
-  if (ui.setWallpaperRow) {
-    ui.setWallpaperRow.style.display =
-      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
-  }
-  if (ui.setWallpaperNote) {
-    ui.setWallpaperNote.style.display =
-      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
-  }
-  if ($('set-desktop-lyrics-note')) {
-    $('set-desktop-lyrics-note').hidden = !!(window.hertzHost && window.hertzHost.isDbx);
-  }
-  if (ui.setDesktopLyricsOpen) {
-    ui.setDesktopLyricsOpen.onclick = openInlineDesktopLyrics;
-  }
-  if (ui.setDesktopLyricsLocate) {
-    ui.setDesktopLyricsLocate.onclick = () => {
-      transport.post('/v1/desktop/lyrics/launch', {}, { timeoutMs: 55000 })
-        .then(() => toast('已定位桌面歌词'))
-        .catch((err) => toast(errText('定位桌面歌词失败', err), 'error'));
+// form:desktop
+  if (window.hertzHost.desktopEnabled) {
+    // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
+    if (window.HertzDesktopLyricsSettings) window.HertzDesktopLyricsSettings.init(transport);
+    if (window.HertzWallpaperSettings) window.HertzWallpaperSettings.init(transport);
+    window.addEventListener('hertz-settings-category', refreshInlineDesktopLyrics);
+    window.addEventListener('hertz-open-desktop-lyrics-settings', openInlineDesktopLyrics);
+    calibrationUi.init();
+    if (ui.barDesktopSettings) {
+      ui.barDesktopSettings.hidden = false;
+    }
+    if (ui.setDesktopLyricsOpen) {
+      ui.setDesktopLyricsOpen.onclick = openInlineDesktopLyrics;
+    }
+    if (ui.setDesktopLyricsLocate) {
+      ui.setDesktopLyricsLocate.onclick = () => {
+        transport.post('/v1/desktop/lyrics/launch', {}, { timeoutMs: 55000 })
+          .then(() => toast('已定位桌面歌词'))
+          .catch((err) => toast(errText('定位桌面歌词失败', err), 'error'));
+      };
+    }
+    if (ui.barDesktopSettings) ui.barDesktopSettings.onclick = openInlineDesktopLyrics;
+    let desktopLaunch = null;
+    const wallpaperControl = (command, value) => {
+      const post = () => transport.post('/v1/desktop/control', { command, value }, { timeoutMs: 25000 }).then((result) => {
+        if (result && result.ok === false) throw new Error(result.message || result.error || '桌面宿主返回错误');
+        return result;
+      });
+      if (desktopLaunch) return desktopLaunch.then(post);
+      return post().catch((err) => {
+        if (err.code !== 'desktop_not_running') throw err;
+        // 内嵌启动最多等待 30 秒，首次开窗命令另有 20 秒预算；前端等服务的实际结果。
+        if (!desktopLaunch) desktopLaunch = transport.post('/v1/desktop/wallpaper/launch', {}, { timeoutMs: 55000 })
+          .finally(() => { desktopLaunch = null; });
+        return desktopLaunch.then(post);
+      });
     };
-  }
-  if (ui.barDesktopSettings) ui.barDesktopSettings.onclick = openInlineDesktopLyrics;
-  let desktopLaunch = null;
-  const wallpaperControl = (command, value) => {
-    const post = () => transport.post('/v1/desktop/control', { command, value }, { timeoutMs: 25000 }).then((result) => {
-      if (result && result.ok === false) throw new Error(result.message || result.error || '桌面宿主返回错误');
-      return result;
-    });
-    if (desktopLaunch) return desktopLaunch.then(post);
-    return post().catch((err) => {
-      if (err.code !== 'desktop_not_running') throw err;
-      // 内嵌启动最多等待 30 秒，首次开窗命令另有 20 秒预算；前端等服务的实际结果。
-      if (!desktopLaunch) desktopLaunch = transport.post('/v1/desktop/wallpaper/launch', {}, { timeoutMs: 55000 })
-        .finally(() => { desktopLaunch = null; });
-      return desktopLaunch.then(post);
-    });
-  };
-  for (const button of [ui.setWallpaperSettings]) {
-    if (!button) continue;
-    button.onclick = () => {
-      if (window.hertzHost && window.hertzHost.isDbx) {
-        setView('settings');
-        if (window.HertzSkin) window.HertzSkin.selectSettings('desktop');
-        // 若已打开则显式重新检测；入口已发出的同次检测会被本地合并。
-        if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
-        // 分类显隐完成后聚焦歌词组里的桌面区。
-        requestAnimationFrame(() => window.HertzDesktopSettings && window.HertzDesktopSettings.focus());
-        return;
-      }
-      if (window.__hertzWindowHost && window.HertzWallpaperSettings) {
-        void window.HertzWallpaperSettings.open('wallpaper');
-        return;
-      }
-      wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
-        .then(() => toast('已打开桌面歌词与壁纸'))
-        .catch((err) => toast(errText('打开桌面歌词与壁纸失败', err), 'error'));
+    for (const button of [ui.setWallpaperSettings]) {
+      if (!button) continue;
+      button.onclick = () => {
+        if (window.__hertzWindowHost && window.HertzWallpaperSettings) {
+          void window.HertzWallpaperSettings.open('wallpaper');
+          return;
+        }
+        wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
+          .then(() => toast('已打开桌面歌词与壁纸'))
+          .catch((err) => toast(errText('打开桌面歌词与壁纸失败', err), 'error'));
+      };
+    }
+    if (ui.setWallpaperToggle) {
+      ui.setWallpaperToggle.onclick = () => {
+        wallpaperControl('wallpaper-toggle')
+          .then((result) => {
+            const wallpaper = result && result.wallpaper;
+            if (!wallpaper || !wallpaper.enabled) {
+              toast('桌面壁纸未启用，请先在壁纸设置中开启');
+              return;
+            }
+            toast(wallpaper.hidden ? '已隐藏桌面壁纸' : '已显示桌面壁纸');
+          })
+          .catch((err) => toast(errText('切换桌面壁纸失败', err), 'error'));
+      };
+    }
+    // 桌面宠物（小窗播放）：开关走管理管道；按钮文案跟 status 应答的 mini 节走。
+    const applyMiniStatus = (mini) => {
+      if (!mini || !ui.setMiniToggle) return;
+      ui.setMiniToggle.textContent = mini.visible ? '关闭小窗' : '开启小窗';
     };
-  }
-  if (ui.setWallpaperToggle) {
-    ui.setWallpaperToggle.onclick = () => {
-      wallpaperControl('wallpaper-toggle')
-        .then((result) => {
-          const wallpaper = result && result.wallpaper;
-          if (!wallpaper || !wallpaper.enabled) {
-            toast('桌面壁纸未启用，请先在壁纸设置中开启');
-            return;
-          }
-          toast(wallpaper.hidden ? '已隐藏桌面壁纸' : '已显示桌面壁纸');
-        })
-        .catch((err) => toast(errText('切换桌面壁纸失败', err), 'error'));
+    const probeMiniStatus = () => {
+      transport.post('/v1/desktop/control', { command: 'status' })
+        .then((result) => applyMiniStatus(result && result.mini))
+        .catch(() => { /* 组件未运行：保持默认文案，点击时再按需拉起 */ });
     };
+    if (ui.setMiniToggle) {
+      ui.setMiniToggle.onclick = () => {
+        wallpaperControl('mini-toggle')
+          .then((result) => {
+            applyMiniStatus(result && result.mini);
+            const mini = result && result.mini;
+            toast(mini && mini.visible ? '已开启桌面宠物小窗' : '已关闭桌面宠物小窗');
+          })
+          .catch((err) => toast(errText('切换桌面宠物失败', err), 'error'));
+      };
+    }
+    if (ui.setMiniAssets) {
+      ui.setMiniAssets.onclick = () => {
+        wallpaperControl('open-pet-assets')
+          .then(() => toast('已打开桌宠素材文件夹'))
+          .catch((err) => toast(errText('打开素材文件夹失败', err), 'error'));
+      };
+    }
+    probeMiniStatus();
   }
-  // 桌面宠物（小窗播放）：开关走管理管道；按钮文案跟 status 应答的 mini 节走。
-  // 只在独立形态展示；DBX 走页内胶囊，桌面宠物对它不可用。
-  const applyMiniStatus = (mini) => {
-    if (!mini || !ui.setMiniToggle) return;
-    ui.setMiniToggle.textContent = mini.visible ? '关闭小窗' : '开启小窗';
-  };
-  const probeMiniStatus = () => {
-    if (window.hertzHost && window.hertzHost.isDbx) return;
-    transport.post('/v1/desktop/control', { command: 'status' })
-      .then((result) => applyMiniStatus(result && result.mini))
-      .catch(() => { /* 组件未运行：保持默认文案，点击时再按需拉起 */ });
-  };
-  if (ui.setMiniRow) {
-    ui.setMiniRow.style.display =
-      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
-  }
-  if (ui.setMiniNote) {
-    ui.setMiniNote.style.display =
-      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
-  }
-  if (ui.setMiniToggle) {
-    ui.setMiniToggle.onclick = () => {
-      wallpaperControl('mini-toggle')
-        .then((result) => {
-          applyMiniStatus(result && result.mini);
-          const mini = result && result.mini;
-          toast(mini && mini.visible ? '已开启桌面宠物小窗' : '已关闭桌面宠物小窗');
-        })
-        .catch((err) => toast(errText('切换桌面宠物失败', err), 'error'));
-    };
-  }
-  if (ui.setMiniAssets) {
-    ui.setMiniAssets.onclick = () => {
-      wallpaperControl('open-pet-assets')
-        .then(() => toast('已打开桌宠素材文件夹'))
-        .catch((err) => toast(errText('打开素材文件夹失败', err), 'error'));
-    };
-  }
-  probeMiniStatus();
+// form:end
   ui.setLyricOffsetDown.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.max(-2000, globalLyricOffsetMs() - 100) });
   ui.setLyricOffsetUp.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.min(2000, globalLyricOffsetMs() + 100) });
   ui.setLyricOffsetReset.onclick = () => saveLyricSettings({ global_lyric_offset_ms: 0 });

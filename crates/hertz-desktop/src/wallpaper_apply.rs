@@ -26,15 +26,55 @@ pub(super) struct ApplyTransaction {
     ai: Option<crate::wallpaper::ai::Authority>,
     ai_recheck_pending: bool,
     ai_rechecked: bool,
+    pub(super) community: Option<wallpaper_community::Authority>,
+    pub(super) community_rechecking: bool,
+    pub(super) community_rechecked: bool,
+    community_run_error: Option<String>,
+    config_attempted: bool,
 }
 
 impl ApplyTransaction {
+    pub(super) fn bind_community(&mut self, authority: wallpaper_community::Authority) {
+        if authority.playlist.is_some() {
+            for target in self
+                .plan
+                .targets
+                .iter()
+                .filter(|t| t.group_id == authority.binding.group_id)
+            {
+                if self.draft.wallpaper.enabled
+                    && !self.queue.iter().any(|queued| queued.id == target.id)
+                {
+                    self.queue.push_back(target.clone());
+                }
+            }
+            if let Some(group) = self
+                .draft
+                .wallpaper
+                .groups
+                .iter()
+                .find(|g| g.id == authority.binding.group_id)
+            {
+                if group.mode == crate::wallpaper::config::LayoutMode::Mirror {
+                    self.layouts
+                        .push((group.selection.clone(), group.displays.len()));
+                }
+                self.properties
+                    .push(crate::wallpaper::public_properties::PropertySelection {
+                        selection: group.selection.clone(),
+                        properties: group.properties.clone(),
+                    });
+            }
+        }
+        self.community = Some(authority);
+    }
     pub(super) fn cancel_for_feature_exit(&self) {
         self.cancel.store(true, Ordering::Release);
     }
 
     pub(super) fn cancel_for_playlist(&self, id: &str) {
-        if self.draft.wallpaper.groups.iter().any(|group| matches!(&group.selection, crate::wallpaper::config::Selection::Playlist { playlist_id } if playlist_id == id)) {
+        let original_community=self.community.as_ref().is_some_and(|a|serde_json::from_str::<crate::wallpaper::config::Selection>(&a.binding.selection_json).is_ok_and(|selection|matches!(selection,crate::wallpaper::config::Selection::Playlist{playlist_id}if playlist_id==id)));
+        if original_community||self.draft.wallpaper.groups.iter().any(|group| matches!(&group.selection, crate::wallpaper::config::Selection::Playlist { playlist_id } if playlist_id == id)) {
             self.cancel.store(true, Ordering::Release);
         }
     }
@@ -206,7 +246,7 @@ impl App {
         self.begin_wallpaper_apply_snapshot(request, owner, draft, reply, slot, None)
     }
 
-    fn begin_wallpaper_apply_snapshot(
+    pub(super) fn begin_wallpaper_apply_snapshot(
         &mut self,
         request: api::Request,
         owner: u64,
@@ -279,6 +319,11 @@ impl App {
             ai,
             ai_recheck_pending: false,
             ai_rechecked: false,
+            community: None,
+            community_rechecking: false,
+            community_rechecked: false,
+            community_run_error: None,
+            config_attempted: false,
         });
         Ok(())
     }
@@ -289,6 +334,8 @@ impl App {
         };
         let source_valid = if let Some(authority) = transaction.ai.as_ref() {
             self.validate_ai_authority(authority).is_ok()
+        } else if let Some(authority) = transaction.community.as_ref() {
+            self.validate_community_authority(authority).is_ok()
         } else {
             self.settings_drafts
                 .get(
@@ -314,7 +361,10 @@ impl App {
         if !valid || transaction.started.elapsed() > Duration::from_secs(60) {
             transaction.cancel.store(true, Ordering::Release);
         }
-        if transaction.active.is_some() || transaction.layout_task.is_some() {
+        if transaction.active.is_some()
+            || transaction.layout_task.is_some()
+            || transaction.community_rechecking
+        {
             return;
         }
         if transaction.cancel.load(Ordering::Acquire) {
@@ -395,7 +445,7 @@ impl App {
                     runtime.surface.as_ref().is_some_and(|surface| {
                         surface.media_frame_kind() == crate::wallpaper::session::FrameKind::Video
                             && !surface.static_poster
-                    }) && (!transaction
+                    }) && (transaction.community.as_ref().is_some_and(|a|a.playlist.is_some()&&a.binding.group_id==runtime.configuration.main().id)||!transaction
                         .plan
                         .targets
                         .iter()
@@ -471,12 +521,34 @@ impl App {
                 } else {
                     configuration.main().selection.clone()
                 };
-            let resume = self.desktop.mirrors.get(&next.group_id).and_then(|group| {
-                if configuration.main().mode != crate::wallpaper::config::LayoutMode::Mirror { return None; }
-                let playlist = group.playback.playlist()?;
-                if !matches!(&selection, crate::wallpaper::config::Selection::Playlist { playlist_id } if playlist_id == &playlist.playlist_id) { return None; }
-                Some(selection_plan::PlaylistResume { revision: playlist.revision, reference: group.playback.switch()?.reference.clone() })
-            });
+            let resume = transaction
+                .community
+                .as_ref()
+                .filter(|a| {
+                    a.binding.group_id == next.group_id
+                        && matches!(&selection, crate::wallpaper::config::Selection::Playlist { .. })
+                })
+                .and_then(|a| {
+                    a.playlist.as_ref().map(|list| selection_plan::PlaylistResume {
+                        revision: list.revision,
+                        reference: a.candidate.clone(),
+                    })
+                })
+                .or_else(|| {
+                    self.desktop.mirrors.get(&next.group_id).and_then(|group| {
+                        if configuration.main().mode != crate::wallpaper::config::LayoutMode::Mirror {
+                            return None;
+                        }
+                        let playlist = group.playback.playlist()?;
+                        if !matches!(&selection, crate::wallpaper::config::Selection::Playlist { playlist_id } if playlist_id == &playlist.playlist_id) {
+                            return None;
+                        }
+                        Some(selection_plan::PlaylistResume {
+                            revision: playlist.revision,
+                            reference: group.playback.switch()?.reference.clone(),
+                        })
+                    })
+                });
             let result = self.wallpaper_library.resolve_desktop_selection(
                 selection,
                 wallpaper_desktop::target(&configuration, &next.monitor()),
@@ -542,9 +614,21 @@ impl App {
             self.wallpaper_apply = Some(transaction);
             return;
         }
+        if let Some(authority) = transaction.community.clone().filter(|_| !transaction.community_rechecked) {
+            if let Err(e) = self.request_community_recheck(authority) {
+                self.finish_wallpaper_apply(transaction, Err(e));
+                return;
+            }
+            transaction.community_rechecking = true;
+            self.wallpaper_apply = Some(transaction);
+            return;
+        }
         let result = (|| {
             if let Some(authority) = transaction.ai.as_ref() {
                 self.validate_ai_authority(authority)?;
+            }
+            if let Some(authority) = transaction.community.as_ref() {
+                self.validate_community_authority(authority)?;
             }
             transaction.draft.check_apply(
                 transaction
@@ -567,13 +651,14 @@ impl App {
                 caller_sid: crate::config_journal::caller_sid()
                     .map_err(|error| JobError::new("identity_unavailable", error.to_string()))?,
             };
-            let mut next = if transaction.ai.is_some() {
+            let mut next = if transaction.ai.is_some() || transaction.community.is_some() {
                 self.committed_config.clone()
             } else {
                 self.config.clone()
             };
             next.wallpaper = transaction.draft.wallpaper.clone();
             next.lyrics = transaction.draft.lyrics.clone();
+            transaction.config_attempted = true;
             config::commit_request(&mut self.config, next, &intent).map_err(|error| {
                 JobError::new(
                     crate::config_journal::error_code(&error, "config_write_failed"),
@@ -587,7 +672,7 @@ impl App {
                     self.feature_stops.wallpaper = false;
                     self.feature_stops.wallpaper_save_failed = false;
                 }
-                if transaction.ai.is_none() && transaction.draft.lyrics.enabled {
+                if transaction.ai.is_none() && transaction.community.is_none() && transaction.draft.lyrics.enabled {
                     self.resume_lyrics();
                 }
                 // Registry mutation occurs outside target scopes, after the one
@@ -597,6 +682,9 @@ impl App {
                     .err();
                 if !transaction.preserve_failed_playback {
                     self.retry_failed_mirrors_after_apply();
+                }
+                if let Some(list) = transaction.community.as_ref().and_then(|a| a.playlist.as_ref()) {
+                    self.playlist_changed(&list.playlist_id);
                 }
                 for (key, resolved) in std::mem::take(&mut transaction.prepared) {
                     let monitor = transaction
@@ -612,6 +700,9 @@ impl App {
                     .ai
                     .as_ref()
                     .map(|_| std::mem::take(&mut self.settings_drafts));
+                let preserved_drafts = preserved_drafts.or_else(|| {
+                    transaction.community.as_ref().map(|_| std::mem::take(&mut self.settings_drafts))
+                });
                 let run_error = self
                     .apply_saved_wallpaper_settings(transaction.draft.wallpaper.clone(), target)
                     .err()
@@ -619,9 +710,12 @@ impl App {
                 if let Some(drafts) = preserved_drafts {
                     self.settings_drafts = drafts;
                 }
+                transaction.community_run_error = run_error.clone();
                 self.send_settings_status(
                     run_error.as_deref(),
-                    Some(if transaction.ai.is_some() {
+                    Some(if transaction.community.is_some() {
+                        "已更新社区壁纸（设置草稿保留）"
+                    } else if transaction.ai.is_some() {
                         "已切换壁纸（设置草稿保留）"
                     } else {
                         "已应用"
@@ -743,6 +837,24 @@ impl App {
         transaction: ApplyTransaction,
         result: JobResult<serde_json::Value>,
     ) {
+        if let Some(authority) = transaction.community.as_ref() {
+            let saved = self.config.last_commit.as_ref().is_some_and(|c| {
+                c.request_id == transaction.request.request_id
+                    && c.payload_digest == transaction.request.digest()
+            });
+            let failure = transaction.community_run_error.clone().or_else(|| {
+                result.as_ref().err().map(|e| format!("{}: {}", e.code, e.message))
+            });
+            if !transaction.config_attempted {
+                self.abort_community_receipt(
+                    authority,
+                    failure.unwrap_or_else(|| "准备未完成，原配置未派发".into()),
+                    &transaction.request,
+                );
+            } else if !matches!(result.as_ref(), Err(e) if e.code == "operation_pending") {
+                self.finish_community_receipt(authority, saved, failure, &transaction.request);
+            }
+        }
         let progress = transaction
             .ai
             .as_ref()

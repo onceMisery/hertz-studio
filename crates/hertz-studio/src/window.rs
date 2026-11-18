@@ -11,7 +11,7 @@
 //   3. 标题栏、按钮与拖动由系统负责，原生边框/系统菜单/贴靠保留；
 //   4. 双实例以 DataDir 内核锁裁决，经鉴权 HTTP 与实例身份聚焦既有窗口；
 //   5. DPI = 读数与 ScaleFactorChanged 日志（三档对照为真机人工项）。
-// 关闭默认隐藏；用户保存的退出偏好与显式退出统一经原生确认所有者。
+// 关闭默认退出；用户保存的偏好（含隐藏到托盘）与显式退出统一经原生确认所有者。
 
 use anyhow::Context as _;
 use hertz_studio::window_lifecycle::{
@@ -880,7 +880,7 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
     let (bind_ip, port, entry_url, overlay_key, lifecycle, importer) = started;
     #[cfg(not(windows))]
     let _ = importer;
-    println!("  window   http://{bind_ip}:{port}/  （原生主窗口形态；关闭窗口=隐藏到托盘）");
+    println!("  window   http://{bind_ip}:{port}/  （原生主窗口形态；关闭窗口=退出播放器，可在设置中改为隐藏到托盘）");
 
     // 托盘（设计 §2.2）：左键开菜单之外，「打开主窗口」承担隐藏后的恢复入口，
     // 「退出 hertz-studio」是唯一由窗口侧发起的显式退出命令。

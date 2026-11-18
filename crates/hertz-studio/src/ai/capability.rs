@@ -48,6 +48,10 @@ pub(crate) const SCOPE_LIBRARY_READ: &str = "library:read";
 /// 没被授出，它对应的 operation 对这份凭据就不存在。
 pub(crate) const STAGE_TOOLS_KEY: &str = "ai_stage_intent_tools";
 pub(crate) const SCOPES: &[&str] = &[
+    #[cfg(feature = "desktop-host")]
+    "wallpaper:catalog_read",
+    #[cfg(feature = "desktop-host")]
+    "wallpaper:request",
     "stage:capabilities_read",
     "stage:intent_validate",
     SCOPE_PLAYBACK_PAUSE,
@@ -93,6 +97,10 @@ impl Effect {
 /// [`find`] 的键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Handler {
+    WallpaperCatalogGet,
+    WallpaperSwitchRequest,
+    WallpaperGenerateRequest,
+    WallpaperRequestGet,
     StageCapabilitiesGet,
     StageIntentValidate,
     PlaybackSnapshotGet,
@@ -108,6 +116,10 @@ pub(crate) enum Handler {
 impl Handler {
     pub(crate) fn operation(self) -> &'static str {
         match self {
+            Self::WallpaperCatalogGet => "wallpaper.catalog_get",
+            Self::WallpaperSwitchRequest => "wallpaper.switch_request",
+            Self::WallpaperGenerateRequest => "wallpaper.generate_request",
+            Self::WallpaperRequestGet => "wallpaper.request_get",
             Self::StageCapabilitiesGet => "stage.capabilities_get",
             Self::StageIntentValidate => "stage.intent_validate",
             Self::PlaybackSnapshotGet => "playback.snapshot_get",
@@ -124,10 +136,21 @@ impl Handler {
     pub(crate) fn is_stage(self) -> bool {
         matches!(self, Self::StageCapabilitiesGet | Self::StageIntentValidate)
     }
+
+    pub(crate) fn is_wallpaper_request(self) -> bool {
+        matches!(
+            self,
+            Self::WallpaperCatalogGet
+                | Self::WallpaperSwitchRequest
+                | Self::WallpaperGenerateRequest
+                | Self::WallpaperRequestGet
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputSchema {
+    WallpaperRequest(hertz_wallpaper::external_requests::Operation),
     Empty,
     StagePage,
     StageArtifact,
@@ -139,6 +162,7 @@ pub(crate) enum InputSchema {
 impl InputSchema {
     pub(crate) fn value(self) -> Value {
         match self {
+            Self::WallpaperRequest(operation) => super::wallpaper_request_schema::input(operation),
             Self::Empty => json!({
                 "type": "object",
                 "properties": {},
@@ -174,6 +198,8 @@ impl InputSchema {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputSchema {
+    WallpaperCatalog,
+    WallpaperReceipt,
     StagePage,
     StageValidation,
     PlaybackSnapshot,
@@ -184,6 +210,8 @@ pub(crate) enum OutputSchema {
 impl OutputSchema {
     pub(crate) fn value(self) -> Value {
         match self {
+            Self::WallpaperCatalog => super::wallpaper_request_schema::catalog_schema(),
+            Self::WallpaperReceipt => super::wallpaper_request_schema::receipt_schema(),
             Self::StagePage => schema_value::<RegisteredStagePage>(),
             Self::StageValidation => schema_value::<RegisteredStageValidation>(),
             Self::PlaybackSnapshot => schema_value::<RegisteredPlaybackSnapshot>(),
@@ -424,6 +452,8 @@ struct RegisteredLibrarySearch {
 
 fn validate_registered_output(schema: OutputSchema, value: &Value) -> bool {
     match schema {
+        OutputSchema::WallpaperCatalog => super::wallpaper_request_schema::valid_catalog(value),
+        OutputSchema::WallpaperReceipt => super::wallpaper_request_schema::valid_receipt(value),
         OutputSchema::StagePage => serde_json::from_value::<RegisteredStagePage>(value.clone())
             .is_ok_and(|page| {
                 page.artifact_version == 1
@@ -487,7 +517,82 @@ pub(crate) struct Capability {
     pub description: &'static str,
 }
 
+impl Capability {
+    pub(crate) fn required_scopes(&self) -> Vec<&'static str> {
+        if self.handler == Handler::WallpaperSwitchRequest {
+            vec![self.scope, "wallpaper:catalog_read"]
+        } else {
+            vec![self.scope]
+        }
+    }
+    pub(crate) fn scopes_satisfied(&self, scopes: &BTreeSet<String>) -> bool {
+        self.required_scopes()
+            .iter()
+            .all(|required| scope_satisfied(scopes, required))
+    }
+}
+
 pub(crate) const CAPABILITIES: &[Capability] = &[
+    #[cfg(feature = "desktop-host")]
+    Capability {
+        mcp_name: "wallpaper_catalog_get",
+        handler: Handler::WallpaperCatalogGet,
+        input_schema: InputSchema::WallpaperRequest(
+            hertz_wallpaper::external_requests::Operation::Catalog,
+        ),
+        output_schema: OutputSchema::WallpaperCatalog,
+        scope: "wallpaper:catalog_read",
+        allowed_projection: super::wallpaper_request_schema::CATALOG_PROJECTION,
+        effect: Effect::ReadOnly,
+        budget_class: BudgetClass::NoProviderCall,
+        version: CAPABILITY_VERSION,
+        description: "读取用户授权的已安装壁纸安全目录和短期目标句柄；需要打开本机 AI 面板",
+    },
+    #[cfg(feature = "desktop-host")]
+    Capability {
+        mcp_name: "wallpaper_switch_request",
+        handler: Handler::WallpaperSwitchRequest,
+        input_schema: InputSchema::WallpaperRequest(
+            hertz_wallpaper::external_requests::Operation::Switch,
+        ),
+        output_schema: OutputSchema::WallpaperReceipt,
+        scope: "wallpaper:request",
+        allowed_projection: super::wallpaper_request_schema::RECEIPT_PROJECTION,
+        effect: Effect::Mutating,
+        budget_class: BudgetClass::NoProviderCall,
+        version: CAPABILITY_VERSION,
+        description: "申请切换精确壁纸版本，必须提供目录目标句柄及 operationId；等待本机确认",
+    },
+    #[cfg(feature = "desktop-host")]
+    Capability {
+        mcp_name: "wallpaper_generate_request",
+        handler: Handler::WallpaperGenerateRequest,
+        input_schema: InputSchema::WallpaperRequest(
+            hertz_wallpaper::external_requests::Operation::Generate,
+        ),
+        output_schema: OutputSchema::WallpaperReceipt,
+        scope: "wallpaper:request",
+        allowed_projection: super::wallpaper_request_schema::RECEIPT_PROJECTION,
+        effect: Effect::Mutating,
+        budget_class: BudgetClass::NoProviderCall,
+        version: CAPABILITY_VERSION,
+        description: "申请生成壁纸；只创建待确认申请，本机查看数据、报价并确认后生成",
+    },
+    #[cfg(feature = "desktop-host")]
+    Capability {
+        mcp_name: "wallpaper_request_get",
+        handler: Handler::WallpaperRequestGet,
+        input_schema: InputSchema::WallpaperRequest(
+            hertz_wallpaper::external_requests::Operation::Get,
+        ),
+        output_schema: OutputSchema::WallpaperReceipt,
+        scope: "wallpaper:request",
+        allowed_projection: super::wallpaper_request_schema::RECEIPT_PROJECTION,
+        effect: Effect::ReadOnly,
+        budget_class: BudgetClass::NoProviderCall,
+        version: CAPABILITY_VERSION,
+        description: "查询本授权创建的壁纸申请和脱敏操作回执；不读取其它申请或文件",
+    },
     Capability {
         mcp_name: "stage_capabilities_get",
         handler: Handler::StageCapabilitiesGet,
@@ -751,7 +856,7 @@ pub(crate) async fn execute(
     let capability = find(&call.operation).ok_or_else(|| {
         ApiError::capability_unsupported(format!("未登记的能力: {}", call.operation))
     })?;
-    if !scope_satisfied(&ctx.scopes, capability.scope) {
+    if !capability.scopes_satisfied(&ctx.scopes) {
         return Err(ApiError::new(
             axum::http::StatusCode::FORBIDDEN,
             "scope_required",
@@ -766,6 +871,18 @@ pub(crate) async fn execute(
         ));
     }
     let result = match capability.handler {
+        Handler::WallpaperCatalogGet
+        | Handler::WallpaperSwitchRequest
+        | Handler::WallpaperGenerateRequest
+        | Handler::WallpaperRequestGet => {
+            super::wallpaper_requests::forward(
+                state,
+                ctx,
+                capability.handler.operation(),
+                &call.input,
+            )
+            .await
+        }
         Handler::StageCapabilitiesGet => {
             let input: StagePageInput = if call.input.is_null() {
                 StagePageInput::default()
@@ -1115,7 +1232,34 @@ mod tests {
         ensure_allowed_projection, find, library_search_page, outcome_json,
         validate_registered_output, ControlOutcome, CAPABILITIES,
     };
+    #[cfg(feature = "desktop-host")]
+    use hertz_wallpaper::external_requests::{Receipt, RequestState};
+    #[cfg(feature = "desktop-host")]
+    use hertz_wallpaper::generation::WallpaperGenerationKind;
     use serde_json::json;
+
+    #[test]
+    #[cfg(feature = "desktop-host")]
+    fn external_wallpaper_registry_requires_explicit_scopes_and_operation_identity() {
+        for (name, scope, mutating) in [
+            ("wallpaper_catalog_get", "wallpaper:catalog_read", false),
+            ("wallpaper_switch_request", "wallpaper:request", true),
+            ("wallpaper_generate_request", "wallpaper:request", true),
+            ("wallpaper_request_get", "wallpaper:request", false),
+        ] {
+            let entry = find(name).expect("external tool must be registered");
+            assert_eq!(entry.scope, scope);
+            assert_eq!(entry.effect == super::Effect::Mutating, mutating);
+            assert_eq!(entry.budget_class.as_str(), "no_provider_call");
+            assert_eq!(entry.input_schema.value()["additionalProperties"], false);
+            if mutating {
+                assert!(entry.input_schema.value()["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("operationId")));
+            }
+        }
+    }
 
     #[test]
     fn library_search_page_matches_advertised_bounds() {
@@ -1263,7 +1407,127 @@ mod tests {
         ));
         assert!(ensure_allowed_projection(search_capability, &leaked).is_err());
 
-        assert_eq!(CAPABILITIES.len(), 10);
+    }
+
+    #[test]
+    #[cfg(feature = "desktop-host")]
+    fn external_wallpaper_outputs_reject_private_and_malformed_fields() {
+        let catalog_capability = find("wallpaper_catalog_get").unwrap();
+        let catalog = json!({
+            "works": [{
+                "workKey": "local-00000000-0000-4000-8000-000000000001",
+                "packageHash": "a".repeat(64), "title": "Fixture wallpaper",
+                "tags": ["calm"], "kind": "builtin", "version": 1
+            }],
+            "targetHandle": "b".repeat(64), "expiresAt": 61, "nextCursor": null
+        });
+        assert!(validate_registered_output(
+            catalog_capability.output_schema,
+            &catalog
+        ));
+        ensure_allowed_projection(catalog_capability, &catalog).unwrap();
+        let mut empty_catalog = catalog.clone();
+        empty_catalog["works"] = json!([]);
+        assert!(validate_registered_output(
+            catalog_capability.output_schema,
+            &empty_catalog
+        ));
+        ensure_allowed_projection(catalog_capability, &empty_catalog).unwrap();
+        for field in ["path", "displayId", "devicePath", "proof"] {
+            let mut leaked = catalog.clone();
+            leaked["works"][0][field] = json!("private");
+            assert!(!validate_registered_output(
+                catalog_capability.output_schema,
+                &leaked
+            ));
+            assert!(ensure_allowed_projection(catalog_capability, &leaked).is_err());
+        }
+        let mut malformed_catalog = catalog;
+        malformed_catalog
+            .as_object_mut()
+            .unwrap()
+            .remove("targetHandle");
+        assert!(!validate_registered_output(
+            catalog_capability.output_schema,
+            &malformed_catalog
+        ));
+
+        let pending = Receipt {
+            request_id: "00000000-0000-4000-8000-000000000002".into(),
+            operation_id: "fixture:external".into(),
+            state: RequestState::PendingConfirmation,
+            output_kind: None,
+            job_id: None,
+            native_operation_id: None,
+            created_at: 1,
+            expires_at: 121,
+            error_code: None,
+        };
+        for (name, receipt) in [
+            ("wallpaper_switch_request", pending.clone()),
+            (
+                "wallpaper_generate_request",
+                Receipt {
+                    output_kind: Some(WallpaperGenerationKind::Builtin),
+                    ..pending.clone()
+                },
+            ),
+            (
+                "wallpaper_request_get",
+                Receipt {
+                    state: RequestState::Succeeded,
+                    output_kind: Some(WallpaperGenerationKind::Builtin),
+                    job_id: Some("original-generation-job".into()),
+                    ..pending.clone()
+                },
+            ),
+            (
+                "wallpaper_request_get",
+                Receipt {
+                    state: RequestState::Succeeded,
+                    native_operation_id: Some(pending.request_id.clone()),
+                    ..pending.clone()
+                },
+            ),
+        ] {
+            let capability = find(name).unwrap();
+            let output = serde_json::to_value(receipt).unwrap();
+            assert!(
+                validate_registered_output(capability.output_schema, &output),
+                "{name}"
+            );
+            ensure_allowed_projection(capability, &output).unwrap();
+            for field in ["path", "grantId", "credential", "proof", "configuration"] {
+                let mut leaked = output.clone();
+                leaked[field] = json!("private");
+                assert!(
+                    !validate_registered_output(capability.output_schema, &leaked),
+                    "{name}: {field}"
+                );
+                assert!(
+                    ensure_allowed_projection(capability, &leaked).is_err(),
+                    "{name}: {field}"
+                );
+            }
+            let mut malformed = output;
+            malformed.as_object_mut().unwrap().remove("requestId");
+            assert!(
+                !validate_registered_output(capability.output_schema, &malformed),
+                "{name}"
+            );
+        }
+
+    }
+
+    #[test]
+    fn registry_matches_the_available_product_form() {
+        assert_eq!(CAPABILITIES.len(), if cfg!(feature = "desktop-host") { 14 } else { 10 });
+        for name in ["wallpaper_catalog_get", "wallpaper_switch_request", "wallpaper_generate_request", "wallpaper_request_get"] {
+            assert_eq!(find(name).is_some(), cfg!(feature = "desktop-host"));
+        }
+        for scope in ["wallpaper:catalog_read", "wallpaper:request"] {
+            assert_eq!(super::SCOPES.contains(&scope), cfg!(feature = "desktop-host"));
+        }
         assert!(CAPABILITIES
             .iter()
             .all(|capability| capability.output_schema.value().is_object()

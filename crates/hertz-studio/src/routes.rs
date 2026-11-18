@@ -102,15 +102,6 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(ai_reject_proposal),
         )
         .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
-        .route("/v1/ai/wallpaper/pairings", get(ai_wallpaper_pending))
-        .route(
-            "/v1/ai/wallpaper/artifacts/{artifactId}/claim",
-            post(ai_wallpaper_artifact_claim),
-        )
-        .route(
-            "/v1/ai/wallpaper/pairings/{pairingId}/confirm",
-            post(ai_wallpaper_pair_confirm),
-        )
         .route("/v1/state", get(get_state))
         .route(
             "/v1/room",
@@ -353,7 +344,21 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/stage/pitch", post(stage_pitch))
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
-        // 独立形态的桌面歌词组件启动入口；组件固定来自服务同目录，不接受路径参数。
+        .layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    let desktop_management = Router::new();
+    #[cfg(feature = "desktop-host")]
+    let desktop_management = desktop_management
+        .route("/v1/ai/wallpaper/pairings", get(ai_wallpaper_pending))
+        .route(
+            "/v1/ai/wallpaper/artifacts/{artifactId}/claim",
+            post(ai_wallpaper_artifact_claim),
+        )
+        .route(
+            "/v1/ai/wallpaper/pairings/{pairingId}/confirm",
+            post(ai_wallpaper_pair_confirm),
+        )
+        // Standalone desktop commands reuse the original full-management authentication.
         .route("/v1/desktop/capabilities", get(desktop_capabilities))
         .route(
             "/v1/desktop/calibration-authorization",
@@ -391,6 +396,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
         .layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
+    #[cfg(feature = "desktop-host")]
     let ai_wallpaper = Router::new()
         .route(
             "/v1/ai/wallpaper/capabilities",
@@ -422,6 +428,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         ));
 
     // 桌面歌词桥：只读数据 + 显式窄播控，够不到主 token 组与受限门面。
+    #[cfg(feature = "desktop-host")]
     let desktop_lyrics = Router::new()
         .route("/v1/desktop-lyrics/snapshot", get(desktop_lyrics_snapshot))
         .route("/v1/desktop-lyrics/document", get(desktop_lyrics_document))
@@ -434,6 +441,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             require_desktop_lyrics_key,
         ));
 
+    #[cfg(feature = "desktop-host")]
     let calibration = Router::new()
         .route(
             "/v1/desktop-lyrics/calibration/{op}",
@@ -448,6 +456,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         ));
 
     // 壁纸只读桥：独立钥匙、独立路由组；只放行快照与事件流。
+    #[cfg(feature = "desktop-host")]
     let wallpaper = Router::new()
         .route("/v1/wallpaper/snapshot", get(wallpaper_snapshot))
         .route("/v1/wallpaper/events", get(wallpaper_events))
@@ -458,6 +467,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
     // 小窗播放（桌面宠物）桥：独立钥匙、独立路由组。只读快照与封面、
     // 显式窄播控与回主窗口；与桌面歌词同构，够不到主 token 组。
+    #[cfg(feature = "desktop-host")]
     let desktop_mini = Router::new()
         .route("/v1/desktop-mini/snapshot", get(desktop_mini_snapshot))
         .route("/v1/desktop-mini/cover", get(desktop_mini_cover))
@@ -471,12 +481,15 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             require_desktop_mini_key,
         ));
 
-    Router::new()
-        .route("/v1/health", get(health))
-        .merge(api)
-        .merge(crate::stage_media::resource_router())
-        .merge(ai_restricted)
+    let desktop_features = Router::new();
+    #[cfg(feature = "desktop-host")]
+    let desktop_features = desktop_features
         .merge(ai_wallpaper)
+        .route(
+            "/v1/ai/wallpaper/requests/accept",
+            post(ai_wallpaper_request_accept)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             "/v1/ai/wallpaper/pairings/register",
             post(ai_wallpaper_pair_register).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
@@ -484,7 +497,15 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(desktop_lyrics)
         .merge(calibration)
         .merge(wallpaper)
-        .merge(desktop_mini)
+        .merge(desktop_mini);
+
+    Router::new()
+        .route("/v1/health", get(health))
+        .merge(api)
+        .merge(crate::stage_media::resource_router())
+        .merge(ai_restricted)
+        .merge(desktop_management)
+        .merge(desktop_features)
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +682,7 @@ fn overlay_key_allows(path: &str) -> bool {
 }
 
 /// 桌面歌词钥匙只开快照、文档与窄播控；不开放主播放器 API。
+#[cfg(any(feature = "desktop-host", test))]
 fn desktop_lyrics_key_allows(path: &str) -> bool {
     matches!(
         path,
@@ -671,12 +693,14 @@ fn desktop_lyrics_key_allows(path: &str) -> bool {
 }
 
 /// 壁纸钥匙只开两条只读 GET；主 WS、播放、设置、曲库、AI 与歌词文档一律不放行。
+#[cfg(any(feature = "desktop-host", test))]
 fn wallpaper_key_allows(path: &str) -> bool {
     matches!(path, "/v1/wallpaper/snapshot" | "/v1/wallpaper/events")
 }
 
 /// 桌面歌词的原生宿主鉴权。用独立 `Authorization: Desktop <key>`，
 /// 不和 Bearer token、浮层钥匙或受限 grant 混用。
+#[cfg(any(feature = "desktop-host", test))]
 async fn require_desktop_lyrics_key(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
@@ -705,6 +729,7 @@ async fn require_desktop_lyrics_key(
     }
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn require_calibration_key(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
@@ -722,6 +747,7 @@ async fn require_calibration_key(
     }
     next.run(request).await
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn calibration_narrow(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(op): axum::extract::Path<String>,
@@ -731,12 +757,14 @@ async fn calibration_narrow(
         state.lyrics_calibration.receive(&state, &op, body).await?,
     ))
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn calibration_ui(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(state.lyrics_calibration.ui(&state, body)?))
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn calibration_authorization_get(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -748,9 +776,11 @@ async fn calibration_authorization_get(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) struct CalibrationAuthorization {
     pub(crate) enabled: bool,
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn calibration_authorization_set(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CalibrationAuthorization>,
@@ -763,6 +793,7 @@ async fn calibration_authorization_set(
 }
 
 /// 壁纸的原生宿主鉴权。`Authorization: Wallpaper <key>` 与其余凭据互不通用。
+#[cfg(any(feature = "desktop-host", test))]
 async fn require_wallpaper_key(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
@@ -786,6 +817,7 @@ async fn require_wallpaper_key(
 }
 
 /// 小窗钥匙只开快照、封面与窄播控/回主窗口；主播放器 API 一律不放行。
+#[cfg(any(feature = "desktop-host", test))]
 fn desktop_mini_key_allows(path: &str) -> bool {
     matches!(
         path,
@@ -798,6 +830,7 @@ fn desktop_mini_key_allows(path: &str) -> bool {
 
 /// 小窗（桌面宠物）的原生宿主鉴权。`Authorization: Desktop <desktop-mini-key>`
 /// 与歌词/壁纸钥匙互不通用；control/restore 强制 POST，其余只收 GET。
+#[cfg(any(feature = "desktop-host", test))]
 async fn require_desktop_mini_key(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
@@ -890,10 +923,12 @@ async fn get_overlay_key(State(state): State<Arc<AppState>>) -> ApiResult<Json<s
     Ok(Json(overlay_key_payload(&state)?))
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 const DESKTOP_CONTROL_BODY_BYTES: usize = crate::desktop::CONTROL_BODY_BYTES;
 #[cfg(test)]
 use crate::desktop::CONTROL_COMMANDS as DESKTOP_CONTROL_COMMANDS;
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_capabilities(
     State(state): State<Arc<AppState>>,
     Query(query): Query<crate::desktop::CapabilitiesQuery>,
@@ -905,6 +940,7 @@ async fn desktop_capabilities(
     )
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_lyrics_control(
     State(state): State<Arc<AppState>>,
     Json(request): Json<crate::desktop::ControlRequest>,
@@ -915,6 +951,7 @@ async fn desktop_lyrics_control(
         .map(Json)
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn launch_desktop_lyrics(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -924,6 +961,7 @@ async fn launch_desktop_lyrics(
         .map(Json)
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn launch_desktop_wallpaper(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -933,12 +971,14 @@ async fn launch_desktop_wallpaper(
         .map(Json)
 }
 /// 桌面歌词轻量快照：500 ms 轮询用，永不等待取词。
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::desktop_lyrics::snapshot(&state).await)
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(feature = "desktop-host", test))]
 struct DesktopPlaybackRequest {
     action: String,
     session: String,
@@ -948,6 +988,7 @@ struct DesktopPlaybackRequest {
     position_ms: Option<u64>,
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_lyrics_playback(
     State(state): State<Arc<AppState>>,
     Json(request): Json<DesktopPlaybackRequest>,
@@ -1009,6 +1050,7 @@ async fn desktop_lyrics_playback(
 }
 
 /// 小窗快照：轻量投影 + 主窗口可见性回传，500ms 轮询用。
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_mini_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::desktop_mini::snapshot(&state).await)
 }
@@ -1020,6 +1062,7 @@ struct CoverQuery {
 }
 
 /// 小窗封面：`?key=` 是曲目 uuid，准入与 `/v1/tracks/{id}/cover` 同一套。
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_mini_cover(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CoverQuery>,
@@ -1028,6 +1071,7 @@ async fn desktop_mini_cover(
 }
 
 /// 小窗窄播控（play/pause/toggle/next/previous/restore）。
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_mini_control(
     State(state): State<Arc<AppState>>,
     Json(request): Json<crate::desktop_mini::MiniControlRequest>,
@@ -1036,6 +1080,7 @@ async fn desktop_mini_control(
 }
 
 /// 小窗请求回主窗口：广播 expand-capsule，不新增订阅协议。
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_mini_restore(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1044,10 +1089,12 @@ async fn desktop_mini_restore(
 }
 
 /// 壁纸只读快照：播放真值 + 最新一帧 64 段频谱；不含曲名、路径或账号。
+#[cfg(any(feature = "desktop-host", test))]
 async fn wallpaper_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::wallpaper::snapshot(&state).await)
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn wallpaper_events(
     ws: axum::extract::ws::WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -1057,12 +1104,14 @@ async fn wallpaper_events(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) struct DesktopDocumentQuery {
     key: String,
     vocal_schema_version: Option<u64>,
 }
 
 /// 桌面歌词完整文档：documentKey 与当前文档不符时返回 409，不串曲。
+#[cfg(any(feature = "desktop-host", test))]
 async fn desktop_lyrics_document(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DesktopDocumentQuery>,
@@ -1233,6 +1282,7 @@ async fn ai_create_job(
     ))
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_capabilities(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1243,11 +1293,13 @@ async fn ai_wallpaper_capabilities(
 }
 
 #[derive(Clone)]
+#[cfg(any(feature = "desktop-host", test))]
 struct WallpaperPrincipal {
     id: String,
     session: bool,
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn require_wallpaper_ai(
     State(state): State<Arc<AppState>>,
     mut request: Request<axum::body::Body>,
@@ -1309,6 +1361,7 @@ async fn require_wallpaper_ai(
     next.run(request).await
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_pair_register(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -1322,9 +1375,11 @@ async fn ai_wallpaper_pair_register(
         crate::ai::wallpaper_pairing::register(&state, body).await?,
     ))
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_pending(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::ai::wallpaper_pairing::pending(&state).await)
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_pair_confirm(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1333,6 +1388,7 @@ async fn ai_wallpaper_pair_confirm(
         crate::ai::wallpaper_pairing::confirm(&state, &id).await?,
     ))
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_disconnect(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1343,6 +1399,7 @@ async fn ai_wallpaper_disconnect(
     crate::ai::facade::revoke_grant(&state, &principal.id).await?;
     Ok(Json(serde_json::json!({"disconnected":true})))
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_job(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1352,6 +1409,7 @@ async fn ai_wallpaper_job(
         crate::ai::wallpaper_artifacts::job(&state, &principal.id, &id).await?,
     ))
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_artifact_read(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1359,6 +1417,7 @@ async fn ai_wallpaper_artifact_read(
 ) -> ApiResult<Response> {
     crate::ai::wallpaper_artifacts::read(&state, &principal.id, &id).await
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_artifact_delete(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1374,6 +1433,7 @@ struct ArtifactClaim {
     grant_id: String,
     expected_claim_revision: i64,
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_artifact_claim(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1391,9 +1451,11 @@ async fn ai_wallpaper_artifact_claim(
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(feature = "desktop-host", test))]
 struct WallpaperCancel {
     expected_state_revision: i64,
 }
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_cancel(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1407,6 +1469,7 @@ async fn ai_wallpaper_cancel(
     ))
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_quote(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1416,6 +1479,7 @@ async fn ai_wallpaper_quote(
     Ok(Json(quote))
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_asset_set(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1428,12 +1492,14 @@ async fn ai_wallpaper_asset_set(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(feature = "desktop-host", test))]
 struct AiWallpaperSubmitRequest {
     quote_id: String,
     request_id: String,
     idempotency_key: Option<String>,
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn ai_wallpaper_submit_job(
     State(state): State<Arc<AppState>>,
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
@@ -1698,8 +1764,27 @@ pub struct CapabilityCallRequest {
 async fn ai_capabilities_call(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Arc<crate::ai::facade::GrantContext>>,
-    Json(body): Json<CapabilityCallRequest>,
+    bytes: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let value = crate::ai::strict_json::parse(&bytes, 1024 * 1024, 128)
+        .map_err(|_| bad_request("能力信封 JSON 不合法、重复字段或超过上界"))?;
+    if value["operation"]
+        .as_str()
+        .is_some_and(|name| crate::ai::wallpaper_requests::operation(name).is_some())
+        && (bytes.len() > 16 * 1024
+            || value.as_object().is_none_or(|fields| {
+                fields.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "operation" | "clientOperationId" | "client_operation_id" | "input"
+                    )
+                })
+            }))
+    {
+        return Err(bad_request("壁纸申请信封字段或长度不合法"));
+    }
+    let body: CapabilityCallRequest =
+        serde_json::from_value(value).map_err(|_| bad_request("能力信封字段不合法"))?;
     let call = crate::ai::capability::CapabilityCall {
         operation: body.operation,
         client_operation_id: body.client_operation_id,
@@ -1707,6 +1792,18 @@ async fn ai_capabilities_call(
     };
     let result = crate::ai::capability::execute(&state, &ctx, call).await?;
     Ok(Json(result))
+}
+
+#[cfg(any(feature = "desktop-host", test))]
+async fn ai_wallpaper_request_accept(
+    State(state): State<Arc<AppState>>,
+    bytes: Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let value = crate::ai::strict_json::parse(&bytes, 16 * 1024, 16).map_err(|_| unauthorized())?;
+    let confirmation = serde_json::from_value(value).map_err(|_| unauthorized())?;
+    Ok(Json(
+        crate::ai::wallpaper_requests::accept(&state, confirmation).await?,
+    ))
 }
 
 /// `x-client-operation-id` 请求头：短写幂等键的客户端部分（技术路线 R2-P）。
@@ -2661,6 +2758,7 @@ async fn post_ui_notice(
     Json(body): Json<UiNoticeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     match body.action.as_str() {
+        #[cfg(feature = "desktop-host")]
         "main-visibility" => {
             crate::desktop_mini::note_main_visibility(
                 body.hidden != Some(true),

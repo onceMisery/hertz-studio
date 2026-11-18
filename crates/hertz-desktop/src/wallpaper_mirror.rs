@@ -161,6 +161,9 @@ impl App {
     }
 
     fn dispatch_mirror_prepares(&mut self) {
+        if self.wallpaper_community.preparing {
+            return;
+        }
         let tickets: Vec<_> = self
             .desktop
             .mirrors
@@ -224,7 +227,11 @@ impl App {
         }
     }
 
-    pub(super) fn install_mirror_playlist(&mut self, playlist: Playlist) {
+    pub(super) fn install_mirror_playlist(
+        &mut self,
+        playlist: Playlist,
+        reference: Option<&FixedVersion>,
+    ) {
         let id = self.desktop.configuration.main().id.clone();
         let unchanged = self
             .desktop
@@ -250,11 +257,11 @@ impl App {
             {
                 return;
             }
-            group.playback.initial();
+            group.playback.initial_at(reference);
         } else if let Ok(mut playback) =
             GroupPlayback::new(source, self.wallpaper_generation.max(1), now)
         {
-            playback.initial();
+            playback.initial_at(reference);
             self.desktop.mirrors.insert(
                 id,
                 MirrorRuntime {
@@ -494,9 +501,20 @@ impl App {
         for key in keys {
             self.with_desktop(&key, |app| app.send_mirror_clock(now));
         }
-        if self.wallpaper_apply.is_none() {
-            for group in self.desktop.mirrors.values_mut() {
-                group.playback.tick(now);
+        if self.wallpaper_apply.is_none() && !self.wallpaper_community.preparing {
+            let mut cutpoints = Vec::new();
+            for (id, group) in &mut self.desktop.mirrors {
+                let current = group.playback.current().cloned();
+                if group.playback.tick(now).is_some() {
+                    if let Some(current) = current {
+                        cutpoints.push((id.clone(), current));
+                    }
+                }
+            }
+            for (id, current) in cutpoints {
+                if self.try_community_group_cutpoint(&id, &current) {
+                    break;
+                }
             }
         }
         self.dispatch_mirror_prepares();

@@ -158,9 +158,14 @@ impl AiReceipts<'_> {
             return Err(JobError::new("ai_artifact_expired", "候选已到期或期限无效"));
         }
         Self::expire_in(&mut tx).await?;
-        let (records, count, held): (i64,i64,i64) = sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(state IN ('preparing','failed','previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('preparing','failed','previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
+        super::super::ai_receipt_budget::ensure_room(
+            &mut tx,
+            super::super::ai_receipt_budget::Reservation::Candidate,
+        )
+        .await?;
+        let (count, held): (i64,i64) = sqlx::query_as("SELECT COALESCE(SUM(state IN ('preparing','failed','previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('preparing','failed','previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
             .fetch_one(&mut *tx).await.map_err(database)?;
-        if records >= 500 || count >= 8 || held.saturating_add(bytes as i64) > 256 * 1024 * 1024 {
+        if count >= 8 || held.saturating_add(bytes as i64) > 256 * 1024 * 1024 {
             return Err(JobError::new(
                 "candidate_capacity_exceeded",
                 "候选数量或实际文件容量已达上限，请先保存或删除并结束预览",

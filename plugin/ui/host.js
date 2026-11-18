@@ -347,7 +347,25 @@
     return { status: 'requested' };
   }
 
+  var desktopEnabled = false;
+  // form:desktop
+  desktopEnabled = !dbx;
+  // form:end
+  // The raw development page uses the same capability boundary as generated UI.
+  if (!desktopEnabled) {
+    document.querySelectorAll('[data-desktop-feature]').forEach(function (node) {
+      if (node.contains(document.activeElement)) {
+        var adjacent = document.querySelector('[data-view="settings"]') || document.getElementById('bar-play');
+        if (adjacent) adjacent.focus({ preventScroll: true });
+      }
+      node.inert = true;
+      node.hidden = true;
+      node.remove();
+    });
+  }
+
   window.hertzHost = {
+    desktopEnabled: desktopEnabled,
     /// 是否跑在 DBX 插件沙箱里。传输层据此在 HTTP 与 invoke 之间选一条。
     isDbx: !!dbx,
     dbx: dbx,

@@ -73,7 +73,7 @@ function loadHost({ baseURI, inDbx }) {
     setTimeout,
     clearTimeout,
     console: { warn: () => {}, log: () => {}, error: () => {} },
-    document: { baseURI },
+    document: { baseURI, querySelectorAll: () => [] },
   };
   if (inDbx) {
     sandbox.window = sandbox;

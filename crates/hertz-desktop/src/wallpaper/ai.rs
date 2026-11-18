@@ -256,7 +256,7 @@ pub(crate) fn digest(value: &impl Serialize) -> String {
     crate::config_journal::digest(&serde_json::to_vec(value).expect("native serializable fact"))
 }
 
-fn random_256() -> Result<String> {
+pub(crate) fn random_256() -> Result<String> {
     #[link(name = "bcrypt")]
     extern "system" {
         fn BCryptGenRandom(
@@ -272,6 +272,112 @@ fn random_256() -> Result<String> {
         return Err(JobError::new("identity_unavailable", "系统随机源暂不可用"));
     }
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub(crate) struct ExternalCandidate {
+    pub action: Action,
+    pub kind: &'static str,
+    pub tags: Vec<String>,
+}
+pub(crate) struct ExternalCatalog {
+    pub items: Vec<ExternalCandidate>,
+    pub next_cursor: Option<u32>,
+}
+
+/// Project only facts qualified by the original native catalog owners. A cursor
+/// counts inspected installed versions, so filtered pages remain bounded.
+pub(crate) async fn external_catalog(
+    jobs: Arc<ImportJobs>,
+    input: hertz_wallpaper::external_requests::CatalogRequest,
+    context: CatalogContext,
+) -> Result<ExternalCatalog> {
+    let mut cursor = input.cursor.unwrap_or(0);
+    let mut items = Vec::new();
+    let mut more = true;
+    let page_end = cursor.saturating_add(128).min(20_000);
+    while items.len() < input.limit as usize && cursor < page_end && more {
+        let count = (input.limit as usize - items.len())
+            .min(32)
+            .min((page_end - cursor) as usize);
+        let rows: Vec<Row> = sqlx::query_as("SELECT w.work_key,p.package_hash,w.title,w.description,v.version,p.manifest_json,v.version_key,w.source_id,(SELECT COUNT(*) FROM versions av JOIN packages ap ON ap.package_hash=av.package_hash WHERE av.work_key=w.work_key AND ap.state='installed') AS versions FROM works w JOIN versions v ON v.work_key=w.work_key JOIN packages p ON p.package_hash=v.package_hash WHERE w.archived=0 AND p.state='installed' AND v.release_id IS NULL AND length(CAST(p.manifest_json AS BLOB))<=?1 ORDER BY v.version_key LIMIT ?2 OFFSET ?3")
+            .bind(hertz_wallpaper::MAX_MANIFEST_BYTES as i64).bind(count as i64).bind(cursor as i64)
+            .fetch_all(jobs.library().pool()).await.map_err(|e| JobError::database(e.to_string()))?;
+        more = rows.len() == count;
+        for row in rows {
+            cursor += 1;
+            if !matches!(row.source_id.as_str(), "local" | "unsigned-import") {
+                continue;
+            }
+            let Ok(manifest) =
+                hertz_wallpaper::validate_manifest_bytes(row.manifest_json.as_bytes())
+            else {
+                continue;
+            };
+            if !permission_eligible(
+                &manifest,
+                &context.configuration,
+                &context.binding.target_group_id,
+            ) || !type_budget_eligible(&manifest, &context)
+            {
+                continue;
+            }
+            let kind = match &manifest.content {
+                hertz_wallpaper::Content::Builtin { .. } => "builtin",
+                hertz_wallpaper::Content::Image { .. } => "image",
+                hertz_wallpaper::Content::Video { .. } => "video",
+                _ => continue,
+            };
+            let source = Arc::clone(&jobs);
+            let checked = context.clone();
+            let hash = row.package_hash.clone();
+            if !tokio::task::spawn_blocking(move || {
+                verify_installed_budget(&source, &hash, &checked)
+            })
+            .await
+            .map_err(|_| JobError::new("worker_unavailable", "目录包核验已退出"))?
+            {
+                continue;
+            }
+            let permission_digest =
+                digest(&json!({"permissions":manifest.permissions,"license":manifest.license}));
+            let action_digest = digest(
+                &json!({"binding":context.binding.context_digest,"group":context.binding.target_group_id,
+                "work":row.work_key,"package":row.package_hash,"permission":permission_digest,"operation":"replaceSelection"}),
+            );
+            let title: String = row
+                .title
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(120)
+                .collect();
+            let tags = row
+                .description
+                .split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | ';' | '；'))
+                .filter(|s| !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control))
+                .take(8)
+                .map(str::to_owned)
+                .collect();
+            items.push(ExternalCandidate {
+                action: Action {
+                    action_id: random_256()?,
+                    target_group_id: context.binding.target_group_id.clone(),
+                    work_key: row.work_key,
+                    package_hash: row.package_hash,
+                    title,
+                    version: row.version as u32,
+                    permission_digest,
+                    action_digest,
+                    reasons: vec![],
+                },
+                kind,
+                tags,
+            });
+        }
+    }
+    Ok(ExternalCatalog {
+        items,
+        next_cursor: (more && cursor < 20_000).then_some(cursor),
+    })
 }
 
 #[derive(Deserialize)]

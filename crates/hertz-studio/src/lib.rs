@@ -22,12 +22,16 @@ pub mod complete;
 pub mod config;
 pub mod daily;
 pub mod data_owner;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod desktop;
-pub mod desktop_bridge;
+#[cfg(all(windows, target_arch = "x86_64", feature = "desktop-host"))]
+pub(crate) mod desktop_authorization;
 pub(crate) mod desktop_control;
 /// 播放器进程内桌面宿主（歌词窗口、设置窗口、托盘与退出的唯一 owner）。
 pub mod desktop_host;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod desktop_lyrics;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod desktop_mini;
 pub mod desktop_tray;
 pub mod diag;
@@ -37,6 +41,7 @@ pub(crate) mod feed_xml;
 pub mod history;
 pub(crate) mod idempotency;
 pub(crate) mod lyrics;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod lyrics_calibration;
 pub mod online;
 mod online_play;
@@ -58,6 +63,7 @@ pub(crate) mod stage_project;
 pub mod state;
 pub mod system_media;
 pub mod ticket;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod wallpaper;
 mod window_focus;
 pub mod window_lifecycle;

@@ -25,7 +25,7 @@ pub(crate) const V2_COMMANDS: &[&str] = &[
     "wallpaper-preview-renew",
     "wallpaper-apply",
     // 小窗播放（桌面宠物）：开关（进/出小窗，宠物态由配置决定）与素材文件夹。
-    // 仅独立形态受理（DBX 的 handle_pipe_command 里显式拒绝）。
+    // 桌面功能只接受独立播放器来源。
     "mini-toggle",
     "open-pet-assets",
 ];

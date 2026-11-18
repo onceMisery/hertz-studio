@@ -1,0 +1,11 @@
+.external-wallpaper-requests[hidden]{display:none}
+.external-wallpaper-requests{display:grid;gap:14px}
+.external-request-list{margin:0;padding:0;display:grid;gap:16px;list-style:none}
+.external-request-list li{min-width:0;display:grid;gap:10px;border-top:1px solid var(--line);padding-block:14px}
+.external-request-list p{margin:0;overflow-wrap:anywhere;line-height:1.6;font-size:12px}
+.external-request-list strong{font-size:13px;overflow-wrap:anywhere}
+.external-request-brief{white-space:pre-wrap}
+.external-request-list button{min-block-size:32px}
+.external-request-list button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(pointer:coarse){.external-request-list button{min-block-size:48px}}
+@media(max-width:420px){.external-request-list .ai-toolbar{align-items:stretch}}

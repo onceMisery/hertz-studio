@@ -320,13 +320,20 @@
     applyPreferences(false);
     refs.settingsNav = make('nav', 'hz-settings-nav', id('view-settings')); refs.settingsNav.setAttribute('role', 'tablist'); refs.settingsNav.setAttribute('aria-label', '设置分类');
     id('view-settings').querySelector('.col-head').after(refs.settingsNav);
-    [['appearance', '外观'], ['playback', '播放'], ['lyrics', '歌词'], ['desktop', '桌面'], ['connection', '连接'], ['tools', '工具']].forEach(function (entry) {
+    var categories = [['appearance', '外观'], ['playback', '播放'], ['lyrics', '歌词'], ['connection', '连接'], ['tools', '工具']];
+    // form:desktop
+    if (window.hertzHost.desktopEnabled) categories.splice(3, 0, ['desktop', '桌面']);
+    // form:end
+    categories.forEach(function (entry) {
       var b = button(refs.settingsNav, '', entry[1], '', function () { selectSettings(entry[0]); }); b.textContent = entry[1]; b.dataset.category = entry[0]; b.setAttribute('role', 'tab');
     });
     refs.settingsGroups = Array.from(id('view-settings').children).filter(function (group) { return group.classList.contains('set-group') && group.id !== 'desktop-lyrics-settings'; });
     refs.settingsGroups.forEach(function (group) {
       var title = group.querySelector('.set-title').textContent, originalHidden = group.hidden;
-      group.dataset.hzCategory = group.id === 'desktop-settings-group' ? 'desktop' : /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
+      group.dataset.hzCategory = /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
+      // form:desktop
+      if (group.id === 'desktop-settings-group') group.dataset.hzCategory = 'desktop';
+      // form:end
       group.dataset.hzAvailable = String(!originalHidden && !(window.hertzHost && window.hertzHost.isDbx && ['overlay-group', 'video-export-group', 'desktop-lyrics-settings'].includes(group.id)));
       cleanup.push(function () { group.hidden = originalHidden; delete group.dataset.hzCategory; delete group.dataset.hzAvailable; });
     });
@@ -339,9 +346,12 @@
     selectSettings(settingsTab);
   }
   function selectSettings(category) {
+    var selected = Array.from(refs.settingsNav.children).find(function (tab) { return tab.dataset.category === category; }) || refs.settingsNav.firstElementChild;
+    category = selected.dataset.category;
     settingsTab = category;
     refs.settingsNav.querySelectorAll('button').forEach(function (tab) { var active = tab.dataset.category === category; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1; });
     refs.settingsGroups.forEach(function (group) { group.hidden = group.dataset.hzAvailable === 'false' || group.dataset.hzCategory !== category; });
+    if (document.activeElement && document.activeElement.closest('[hidden]')) selected.focus({ preventScroll: true });
     window.dispatchEvent(new CustomEvent('hertz-settings-category', { detail: { category: category } }));
   }
   function setQueue(open, trigger) {

@@ -8,6 +8,12 @@ store 仓库的 `CONTRIBUTING.md` + `schemas/plugin-candidate.schema.json`；本
 `hertz-plugin-standard-v<version>`；Full 通过手动 release workflow 取得检视产物。文末的 0.1.0
 联调与首次提交属于历史记录，不能作为当前版本的宿主、声音、账号或上架状态证据。
 
+## 当前插件功能边界
+
+2026-11-18 当前形态边界：桌面歌词、桌面壁纸、桌面宠物/原生小窗、桌面校准和壁纸 AI 配对属于独立播放器的 `desktop-host`。Standard/Full DBX 插件保留音乐播放、普通歌词、沉浸舞台及舞台素材；插件不编译原生桌面运行时，不注册桌面管理/数据/校准/壁纸 AI 路由，生成界面不包含桌面入口。旧 DBX profile 和授权文件保留为历史数据，不据其恢复连接或授权。独立宿主遇到旧 DBX 活动来源会在切换/创建窗口前拒绝；从独立播放器启动时使用播放器自己的数据目录。
+
+候选前运行 `node scripts/check-editions.js`：它实际编译 Standard/Full 暂存后端并检查依赖图和资源排除；再运行 `node scripts/check-dbx-desktop-settings-browser.js` 核对两版实际生成界面的 DOM、可访问性、网络请求、普通歌词和播放。真实 DBX 宿主、声卡与上架资格仍按下面的原流程取得，历史桌面 D3 不作为当前插件发布条件。
+
 ## 信任边界（先记住这条，别的都是细节）
 
 | 产物 | 归谁 | 放哪 |

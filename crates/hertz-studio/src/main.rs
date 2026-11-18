@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         Some(install_owner::InstallOwner::acquire()?)
     };
     let maintenance_args: Vec<String> = std::env::args().skip(1).collect();
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "desktop-host"))]
     if let Some(result) = hertz_desktop::wallpaper_maintenance(&maintenance_args) {
         println!("{}", result?);
         return Ok(());

@@ -8,7 +8,11 @@ use crate::wallpaper::{
 };
 
 impl App {
-    pub(super) fn install_playlist_snapshot(&mut self, playlist: Option<Playlist>) -> Option<u64> {
+    pub(super) fn install_playlist_snapshot(
+        &mut self,
+        playlist: Option<Playlist>,
+        reference: Option<&crate::wallpaper::playlist::FixedVersion>,
+    ) -> Option<u64> {
         let playlist = playlist?;
         let mut runner = Runner::new(
             playlist,
@@ -17,7 +21,7 @@ impl App {
                 .max(1),
         )
         .ok()?;
-        let first = runner.initial()?;
+        let first = runner.initial_at(reference)?;
         self.desktop.playlist = Some(runner);
         Some(first.token)
     }
@@ -107,6 +111,7 @@ impl App {
             return Err(JobError::new("playlist_not_active", "请先应用此轮播列表"));
         }
         if self.wallpaper_apply.is_some()
+            || self.wallpaper_community.preparing
             || self
                 .desktop
                 .runtimes
@@ -131,6 +136,9 @@ impl App {
     }
 
     pub(super) fn tick_wallpaper_playlist(&mut self) {
+        if self.wallpaper_community.preparing {
+            return;
+        }
         if self.is_mirror_target() {
             return;
         }
@@ -215,6 +223,11 @@ impl App {
             }
         }
         if let Some(switch) = runner.tick(Instant::now(), renderable && !failed) {
+            if let Some(current) = self.desktop.playlist.as_ref().and_then(|p| p.current()).cloned() {
+                if self.try_community_cutpoint(&current) {
+                    return;
+                }
+            }
             let _ = self.start_playlist_switch(switch);
         }
     }

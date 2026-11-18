@@ -179,7 +179,7 @@ pub(super) async fn save(
     receipts
         .freeze_image_save(id, &identity.title, &wrapped.sha256)
         .await?;
-    install_snapshot(request, wrapped, library, assets, probe, writer).await?;
+    install_snapshot(request, wrapped, library, assets, probe, writer, None).await?;
     library.ai_receipts_changed.notify_one();
     receipts.get(id).await
 }

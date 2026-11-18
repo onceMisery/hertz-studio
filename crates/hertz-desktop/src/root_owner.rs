@@ -245,8 +245,17 @@ impl RootOwner {
 /// Read-only OS close barrier. Legacy executables must remain stopped after
 /// this probe, which is released before our own SQLite connections open.
 pub(crate) fn probe_database_handles(root: &Path) -> Result<()> {
+    for database in ["wallpaper.db", "trust.db"] {
+        probe_named_database_handles(root, database)?;
+    }
+    Ok(())
+}
+
+/// Each admitted pool refunds only after its own physical SQLite handles exit.
+pub(crate) fn probe_named_database_handles(root: &Path, database: &str) -> Result<()> {
+    anyhow::ensure!(matches!(database, "wallpaper.db" | "trust.db"), "invalid database owner");
     for suffix in ["", "-wal", "-shm", "-journal"] {
-        let path = root.join(format!("wallpaper.db{suffix}"));
+        let path = root.join(format!("{database}{suffix}"));
         let file = match OpenOptions::new()
             .read(true)
             .share_mode(0)

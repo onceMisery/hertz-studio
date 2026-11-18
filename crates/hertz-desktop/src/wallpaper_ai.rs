@@ -151,6 +151,21 @@ impl App {
                 return;
             }
         };
+        if request.command.starts_with("wallpaper.ai.external.") {
+            let result = self.handle_external_settings(&request, owner);
+            match result {
+                Ok(None) => {}
+                result => self.send_wallpaper_management(
+                    reply,
+                    api::response(
+                        id.as_deref(),
+                        result.and_then(|value| value.ok_or_else(ai::stale)),
+                        None,
+                    ),
+                ),
+            }
+            return;
+        }
         if matches!(
             request.command.as_str(),
             "wallpaper.ai.receive"
@@ -192,11 +207,62 @@ impl App {
                 | "wallpaper.ai.generate.recover"
         ) {
             if request.command == "wallpaper.ai.generate.confirm" {
+                if request.payload.as_object().is_none_or(|fields| {
+                    fields.keys().any(|key| {
+                        !matches!(key.as_str(), "confirmationToken" | "externalRequestId")
+                    })
+                }) || request
+                    .payload
+                    .get("externalRequestId")
+                    .is_some_and(|id| !id.is_string())
+                {
+                    self.send_wallpaper_management(
+                        reply,
+                        api::response(
+                            id.as_deref(),
+                            Err(JobError::invalid_input("确认参数无效")),
+                            None,
+                        ),
+                    );
+                    return;
+                }
                 let token = request.payload["confirmationToken"].as_str().unwrap_or("");
-                match self.wallpaper_ai.generation.confirmation(owner, token) {
+                let external_id = request.payload["externalRequestId"]
+                    .as_str()
+                    .map(str::to_owned);
+                if let Some(external_id) = &external_id {
+                    if let Err(error) = self.validate_external_generation(external_id, owner) {
+                        self.wallpaper_ai.generation.invalidate_quote();
+                        self.send_wallpaper_management(
+                            reply,
+                            api::response(id.as_deref(), Err(error), None),
+                        );
+                        return;
+                    }
+                }
+                let confirmation =
+                    self.wallpaper_ai
+                        .generation
+                        .confirmation(owner, token)
+                        .map(|text| {
+                            external_id
+                                .as_ref()
+                                .and_then(|id| self.wallpaper_external.requests.get(id))
+                                .map_or_else(
+                                    || text.clone(),
+                                    |entry| {
+                                        format!("外部申请来源：{}\n\n{text}", entry.origin.label)
+                                    },
+                                )
+                        });
+                match confirmation {
                     Ok(text) if crate::native::confirm_wallpaper_generation(self.hwnd(), &text) => {
                     }
                     Ok(_) => {
+                        if let Some(external_id) = &external_id {
+                            self.reject_external_generation(external_id);
+                            self.wallpaper_ai.generation.invalidate_quote();
+                        }
                         self.send_wallpaper_management(
                             reply,
                             api::response(
@@ -218,20 +284,39 @@ impl App {
                         return;
                     }
                 }
+                if let Some(external_id) = external_id {
+                    let result = self.start_external_acceptance(
+                        request.clone(),
+                        owner,
+                        external_id,
+                        Some(token.to_owned()),
+                    );
+                    if let Err(error) = result {
+                        self.send_wallpaper_management(
+                            reply,
+                            api::response(id.as_deref(), Err(error), None),
+                        );
+                    }
+                    return;
+                }
             }
             let proxy = self.proxy.clone();
             let receiver = reply.clone();
             let response_id = id.clone();
-            let result = self.wallpaper_ai.generation.run(
+            let result = self.wallpaper_ai.generation.run_with_submission(
                 self.profile.clone(),
                 owner,
                 request.command,
                 request.payload,
-                move |result| {
-                    let _ = proxy.send_event(UserEvent::WallpaperManagement(
-                        receiver,
-                        api::response(response_id.as_deref(), result, None),
-                    ));
+                move |result, submission| {
+                    let _ = proxy.send_event(UserEvent::WallpaperExternal(Box::new(
+                        super::wallpaper_external_requests::Completion::GenerationObserved(
+                            receiver,
+                            response_id,
+                            result,
+                            submission,
+                        ),
+                    )));
                 },
             );
             if let Err(error) = result {
@@ -378,7 +463,7 @@ impl App {
         }
     }
 
-    fn start_ai_switch(
+    pub(super) fn start_ai_switch(
         &mut self,
         request: api::Request,
         owner: u64,
@@ -416,7 +501,7 @@ impl App {
     }
 
     pub(super) fn finish_ai_receipt(
-        &self,
+        &mut self,
         authority: &ai::Authority,
         result: &AiResult<serde_json::Value>,
     ) -> serde_json::Value {
@@ -425,6 +510,17 @@ impl App {
             .ok()
             .and_then(|value| value["saved"].as_bool())
             .unwrap_or(false);
+        self.record_external_outcome(
+            &authority.request_id,
+            if saved {
+                hertz_wallpaper::external_requests::RequestState::Succeeded
+            } else {
+                hertz_wallpaper::external_requests::RequestState::Failed
+            },
+            None,
+            Some(authority.request_id.clone()),
+            result.as_ref().err().map(|error| error.code.into()),
+        );
         let runtimes: Vec<_> = self
             .desktop
             .runtimes

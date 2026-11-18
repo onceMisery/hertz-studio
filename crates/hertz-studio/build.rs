@@ -52,6 +52,7 @@ fn main() {
         &source,
         &dest,
         std::env::var_os("CARGO_FEATURE_FULL").is_some(),
+        std::env::var_os("CARGO_FEATURE_DESKTOP_HOST").is_some(),
     )
     .unwrap();
     println!(

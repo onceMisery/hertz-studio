@@ -776,6 +776,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Held while any service task retains AppState, including shutdown work.
     pub(crate) _data_owner: Option<crate::data_owner::DataOwner>,
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) desktop: std::sync::OnceLock<Arc<crate::desktop::Desktop>>,
     /// Installed only by the native main-window host, before HTTP admission.
     pub(crate) native_window: std::sync::OnceLock<Arc<crate::window_lifecycle::WindowLifecycle>>,
@@ -796,8 +797,10 @@ pub struct AppState {
     /// 快照、封面与窄播控/回主窗口。插件形态（stdio）填空串即可。
     pub desktop_mini_key: String,
     /// 小窗快照自增序号：仅用于组件侧判新旧，不需要跨重启连续。
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) desktop_mini_seq: std::sync::atomic::AtomicU64,
     /// 最新一帧壁纸频谱；由既有 AudioEvent::Spectrum 消费方写入。
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) wallpaper: crate::wallpaper::Wallpaper,
     pub events: broadcast::Sender<WsEvent>,
     /// Ordered list of track ids the "next / previous" buttons walk through.
@@ -904,7 +907,9 @@ pub struct AppState {
     /// 自然失效；同一曲播放中导入新歌词要等换曲才反映（OBS 场景可接受）。
     pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
     /// 桌面歌词的只读快照/文档缓存；轻量快照不等待取词。
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) desktop_lyrics: crate::desktop_lyrics::DesktopLyrics,
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) lyrics_calibration: crate::lyrics_calibration::LyricsCalibration,
     /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
     /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
@@ -4657,6 +4662,7 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                 AudioEvent::Spectrum(bands) => {
                     // Desktop freshness follows actual PCM progress; the
                     // original spectrum broadcast keeps its existing behavior.
+                    #[cfg(feature = "desktop-host")]
                     state
                         .wallpaper
                         .observe_spectrum(&bands, &state.audio.snapshot());
@@ -4761,11 +4767,18 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         edition: crate::edition::NAME,
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         server_instance_id: state.server_instance_id.clone(),
-        desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty())
-            .then_some(crate::desktop_lyrics::PROTOCOL),
+        #[cfg(feature = "desktop-host")]
+        desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty()).then_some(crate::desktop_lyrics::PROTOCOL),
+        #[cfg(not(feature = "desktop-host"))]
+        desktop_lyrics_protocol: None,
+        #[cfg(feature = "desktop-host")]
         wallpaper_protocol: (!state.wallpaper_key.is_empty()).then_some(crate::wallpaper::PROTOCOL),
-        desktop_mini_protocol: (!state.desktop_mini_key.is_empty())
-            .then_some(crate::desktop_mini::PROTOCOL),
+        #[cfg(not(feature = "desktop-host"))]
+        wallpaper_protocol: None,
+        #[cfg(feature = "desktop-host")]
+        desktop_mini_protocol: (!state.desktop_mini_key.is_empty()).then_some(crate::desktop_mini::PROTOCOL),
+        #[cfg(not(feature = "desktop-host"))]
+        desktop_mini_protocol: None,
     };
     let path = state.data_dir.join("vmusicd.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&body)?).await?;
@@ -7293,10 +7306,18 @@ pub(crate) mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["port"], 4321);
-        assert_eq!(value["wallpaper_protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(value["wallpaper_protocol"], if cfg!(feature = "desktop-host") { serde_json::json!(crate::wallpaper::PROTOCOL) } else { serde_json::Value::Null });
+        state.desktop_lyrics_key = "b".repeat(64);
+        state.desktop_mini_key = "c".repeat(64);
+        write_discovery(&state, 4321).await.unwrap();
+        let all: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for field in ["desktop_lyrics_protocol", "wallpaper_protocol", "desktop_mini_protocol"] {
+            assert_eq!(all.get(field).is_some(), cfg!(feature = "desktop-host"), "{field}");
+        }
         assert_eq!(value["desktop_lyrics_protocol"], serde_json::Value::Null);
         state.audio.shutdown();
         handle.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 }

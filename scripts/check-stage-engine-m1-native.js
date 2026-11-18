@@ -99,7 +99,7 @@ async function start() {
 async function embedded() {
   const helper = path.join(output, 'edition-ui.exe'), expectedUi = path.join(output, 'expected-ui');
   execFileSync('rustc', ['--edition=2021', path.join(root, 'build-support/edition-ui.rs'), '-o', helper], { windowsHide: true });
-  execFileSync(helper, [path.join(root, 'plugin/ui'), expectedUi, edition], { windowsHide: true });
+  execFileSync(helper, [path.join(root, 'plugin/ui'), expectedUi, edition, 'desktop'], { windowsHide: true });
   require('./minify-ui').minifyUi(expectedUi);
   report.buildOwners = Object.fromEntries(['build-support/edition-ui.rs', 'scripts/minify-ui.js', 'crates/hertz-studio/build.rs']
     .map(file => [file, hash(fs.readFileSync(path.join(root, file)))]));

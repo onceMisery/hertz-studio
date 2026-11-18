@@ -641,6 +641,7 @@ async fn resolve_media(
     cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedSelection> {
     request.validate()?;
+    jobs.library().trust().security_check(&request.package_hash)?;
     cancelled(&cancel)?;
     if !jobs
         .library()
@@ -673,6 +674,7 @@ async fn resolve_media(
             ));
         }
         let package = source.assets().read_installed_manifest(&hash)?;
+        source.library().trust().activation_check(&hash,matches!(package.manifest.content,hertz_wallpaper::Content::Web { .. }))?;
         cancelled(&source_cancel)?;
         if matches!(
             package.manifest.content,

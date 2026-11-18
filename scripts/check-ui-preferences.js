@@ -29,7 +29,7 @@ function boot(options = {}) {
     console: { warn: (...args) => warnings.push(args) },
     setTimeout(fn, ms) { const timer = setTimeout(() => { timers.delete(timer); fn(); }, ms); timers.add(timer); return timer; },
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); },
-    document: { createElement: () => ({ click() { calls.push(['click']); }, remove() {} }), body: { appendChild() {} } }
+    document: { querySelectorAll: () => [], createElement: () => ({ click() { calls.push(['click']); }, remove() {} }), body: { appendChild() {} } }
   };
   context.window = context;
   if (options.native) context.localStorage = options.native;

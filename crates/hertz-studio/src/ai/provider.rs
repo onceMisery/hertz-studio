@@ -15,6 +15,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod openai_wallpaper;
+
 const RESPONSE_BYTES: usize = 256 * 1024;
 pub(super) const REQUEST_BYTES: usize = 128 * 1024;
 const OUTPUT_TOKENS: u64 = 512;
@@ -47,6 +49,10 @@ pub(super) fn configured(config: &AiConfig) -> Arc<dyn StageIntentProvider> {
             Err(reason) => Arc::new(Unavailable(reason)),
         },
         "openai" => match OpenAi::new(&config.model) {
+            Ok(provider) => Arc::new(provider),
+            Err(reason) => Arc::new(Unavailable(reason)),
+        },
+        "openai-compatible" => match OpenAi::compatible(&config.origin, &config.model) {
             Ok(provider) => Arc::new(provider),
             Err(reason) => Arc::new(Unavailable(reason)),
         },
@@ -417,6 +423,7 @@ impl StageIntentProvider for Ollama {
 
 #[derive(Clone)]
 struct OpenAi {
+    id: &'static str,
     endpoint: Url,
     model: String,
     client: Client,
@@ -435,10 +442,21 @@ impl OpenAi {
         }
         let endpoint = Url::parse(OPENAI_ENDPOINT).map_err(|_| "invalid OpenAI endpoint")?;
         Ok(Self {
+            id: "openai",
             endpoint,
             model: model.into(),
             client: openai_client()?,
             pricing: Some(openai_token_only_quote()),
+        })
+    }
+
+    fn compatible(origin: &str, model: &str) -> Result<Self, &'static str> {
+        let mut endpoint = compatible_origin(origin)?;
+        endpoint.set_path("/v1/responses");
+        Ok(Self {
+            id: "openai-compatible",
+            endpoint,
+            ..Self::new(model)?
         })
     }
 
@@ -469,6 +487,7 @@ impl OpenAi {
             return Err("test endpoint must be a numeric loopback Responses URL");
         }
         Ok(Self {
+            id: "openai",
             endpoint,
             model: model.into(),
             client: openai_client()?,
@@ -621,12 +640,35 @@ impl OpenAi {
                 Err(_) => return Err("OpenAI response read failed".to_string()),
             }
         }
-        let mut reply = parse_openai_completion_with_pricing(&bytes, &self.model, false)?;
+        let parsed = parse_openai_completion_with_pricing(&bytes, &self.model, false);
         if !status.is_success() {
-            reply.text = Err(format!("OpenAI HTTP status {}", status.as_u16()));
+            return Ok(super::jobs::CompletionReply {
+                text: Err(format!("OpenAI HTTP status {}", status.as_u16())),
+                usage: parsed.ok().and_then(|reply| reply.usage),
+            });
         }
-        Ok(reply)
+        parsed
     }
+}
+
+/// One canonical base identity for compatible-provider transport and key storage.
+pub(super) fn compatible_origin(input: &str) -> Result<Url, &'static str> {
+    let invalid = "OpenAI-compatible origin must be an explicit public HTTPS /v1 base URL";
+    if input.len() > 2048 || input.chars().any(char::is_whitespace) {
+        return Err(invalid);
+    }
+    let parsed = Url::parse(input).map_err(|_| invalid)?;
+    if parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "/v1" | "/v1/")
+    {
+        return Err(invalid);
+    }
+    let mut origin =
+        crate::public_net::public_url(input, crate::public_net::SchemePolicy::HttpsOnly)
+            .map_err(|_| invalid)?;
+    origin.set_path("/v1");
+    Ok(origin)
 }
 
 fn ensure_input_budget(bytes: &[u8], quote: &PriceQuote) -> Result<(), &'static str> {
@@ -654,7 +696,7 @@ fn openai_token_only_quote() -> PriceQuote {
 
 impl StageIntentProvider for OpenAi {
     fn id(&self) -> &'static str {
-        "openai"
+        self.id
     }
 
     fn endpoint_identity(&self) -> Option<&str> {
@@ -684,6 +726,66 @@ impl StageIntentProvider for OpenAi {
 
     fn requires_credential(&self) -> bool {
         true
+    }
+
+    fn supports_wallpaper_builtin(&self) -> bool {
+        self.ready()
+    }
+
+    fn supports_wallpaper_composition(&self) -> bool {
+        self.ready()
+    }
+
+    fn quote_wallpaper_builtin(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+    ) -> Result<PriceQuote, String> {
+        openai_wallpaper::quote(self, request, None)
+    }
+
+    fn quote_wallpaper_composition(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: &hertz_wallpaper::generation::composition::AssetSet,
+    ) -> Result<PriceQuote, String> {
+        openai_wallpaper::quote(self, request, Some(assets))
+    }
+
+    fn generate_wallpaper_builtin(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        pricing: PricingSnapshot,
+        credential: Option<super::credential::ProviderCredential>,
+        cancellation: super::jobs::ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::jobs::WallpaperReply> + Send>>
+    {
+        Box::pin(openai_wallpaper::generate(
+            self.clone(),
+            request.clone(),
+            None,
+            pricing,
+            credential,
+            cancellation,
+        ))
+    }
+
+    fn generate_wallpaper_composition(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: &hertz_wallpaper::generation::composition::AssetSet,
+        pricing: PricingSnapshot,
+        credential: Option<super::credential::ProviderCredential>,
+        cancellation: super::jobs::ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::jobs::WallpaperReply> + Send>>
+    {
+        Box::pin(openai_wallpaper::generate(
+            self.clone(),
+            request.clone(),
+            Some(assets.clone()),
+            pricing,
+            credential,
+            cancellation,
+        ))
     }
 
     fn quote(&self, brief: &str) -> Result<PriceQuote, String> {
@@ -1814,6 +1916,37 @@ mod tests {
             }
         }
         assert_eq!(calls.load(Ordering::SeqCst), 4);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn openai_completion_keeps_http_rejection_when_error_body_is_malformed() {
+        use axum::{http::StatusCode, routing::post};
+
+        let app = axum::Router::new().route(
+            "/v1/responses",
+            post(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    "{\"error\":{\"type\":\"forbidden_error\"}}event: response.failed\ndata: {}",
+                )
+            }),
+        );
+        let (origin, task) = server(app).await;
+        let provider = openai_for_server(&origin, Some(openai_quote()));
+        let reply = provider
+            .complete(
+                "classify".into(),
+                "{}".into(),
+                Some(super::super::credential::test_provider_credential(
+                    "fixture-openai-key",
+                )),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.text.unwrap_err(), "OpenAI HTTP status 403");
+        assert!(reply.usage.is_none());
         task.abort();
     }
 

@@ -510,6 +510,7 @@ pub(crate) struct AiRuntime {
     /// 壁纸生成 quote 内存态（§19.4）：重启即丢，不写任何持久层。
     wallpaper_quotes: Mutex<super::wallpaper_jobs::QuoteStore>,
     pub(super) wallpaper_pairings: Mutex<super::wallpaper_pairing::PendingStore>,
+    pub(super) wallpaper_request_proofs: Mutex<super::wallpaper_requests::ProofStore>,
     pub(super) wallpaper_session_deadlines: Mutex<HashMap<String, std::time::Instant>>,
     pub(super) wallpaper_artifacts: Arc<super::wallpaper_artifacts::Runtime>,
 }
@@ -545,6 +546,7 @@ impl AiRuntime {
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             wallpaper_quotes: Mutex::new(super::wallpaper_jobs::QuoteStore::default()),
             wallpaper_pairings: Mutex::new(super::wallpaper_pairing::PendingStore::default()),
+            wallpaper_request_proofs: Mutex::new(super::wallpaper_requests::ProofStore::default()),
             wallpaper_session_deadlines: Mutex::new(HashMap::new()),
             wallpaper_artifacts: Arc::new(super::wallpaper_artifacts::Runtime::default()),
         }

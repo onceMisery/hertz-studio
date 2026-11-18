@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Owned Windows service/desktop fixtures. No live provider or user process changes.
+// Owned Windows service/desktop fixtures. Live calls require an explicit isolated configuration.
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -20,10 +20,13 @@ const standalone = process.env.HERTZ_GENERATION_STANDALONE === '1';
 const ollamaFixture = process.env.HERTZ_GENERATION_OLLAMA_FIXTURE === '1';
 const imageFixture = process.env.HERTZ_GENERATION_IMAGE_FIXTURE === '1';
 const compositionFixture = process.env.HERTZ_GENERATION_COMPOSITION_FIXTURE === '1';
+const externalFixture = process.env.HERTZ_GENERATION_EXTERNAL_FIXTURE === '1';
+const compatibleLive = process.env.HERTZ_GENERATION_OPENAI_COMPATIBLE === '1';
+const compatible = compatibleLive ? require('./wallpaper-compatible-checks').configuration() : null;
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const checks = [], errors = [];
-let child, desktopChild, browser, mainBrowser, officialBrowser, page, providerFixture;
+let child, desktopChild, browser, mainBrowser, officialBrowser, page, providerFixture, externalChecks;
 async function until(read, label, timeout = 30000, interval = 100) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(interval); }
@@ -41,6 +44,8 @@ async function stopOwned(process) {
 }
 async function main() {
   assert.equal(process.platform, 'win32'); assert.ok(fs.existsSync(binary));
+  if (externalFixture) assert.equal(ollamaFixture || imageFixture || compositionFixture, false, 'External SDK acceptance uses the independent free builtin fixture');
+  if (compatibleLive) assert.equal(externalFixture || ollamaFixture || imageFixture, false, 'Live text acceptance uses its own explicit provider');
   fs.mkdirSync(output, { recursive: true });
   const probe = path.join(output, 'consent.ps1');
   fs.writeFileSync(probe, `\uFEFFparam([uint32]$TargetPid,[int]$Button)
@@ -68,6 +73,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
   const data = path.join(output, 'data'), desktop = path.join(output, 'desktop');
   const env = { ...process.env, VMUSIC_BACKEND: 'null', VMUSIC_SECRETS: 'memory',
     HERTZ_DESKTOP_CONFIG_DIR: desktop, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=0' };
+  delete env.HERTZ_SUBAPI_KEY;
   if (standalone) {
     const pipe = '\\\\.\\pipe\\hertz-desktop-control-' + (process.env.USERNAME || '').replace(/[^a-z0-9_-]/gi, '').slice(0, 32);
     try { await nativeRequest(pipe, { command: 'status' }); throw new Error('Existing standalone desktop host; leave it untouched.'); }
@@ -83,6 +89,10 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     assert.equal(ollamaFixture, false, 'image fixture has an independent provider configuration');
     fs.mkdirSync(data, { recursive: true });
     fs.writeFileSync(path.join(data, 'config.toml'), '[ai.image]\nprovider = "fake"\nmodel = "fixture-image-v1"\n');
+  }
+  if (compatibleLive) {
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(path.join(data, 'config.toml'), '[ai]\nprovider = "openai-compatible"\norigin = ' + JSON.stringify(compatible.origin) + '\nmodel = ' + JSON.stringify(compatible.model) + '\n');
   }
   child = spawn(binary, [...(standalone ? [] : ['--window']), '--bind', '127.0.0.1', '--port', '0', '--data-dir', data], {
     cwd: root, windowsHide: true, stdio: 'ignore', env,
@@ -124,6 +134,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       return waitJob(accepted.jobId);
     }
     assert.equal((await api('/v1/health')).backend, 'null');
+    if (compatibleLive) await require('./wallpaper-compatible-checks').storeCredential(api, compatible);
     await api('/v1/settings', 'PUT', { ai_generation_consent: true });
     if (standalone) desktopChild = spawn(desktopBinary, ['--settings', '--data-dir', data], { cwd: root, windowsHide: true, stdio: 'ignore', env });
     const readPort=file=>{try{const port=Number(fs.readFileSync(file,'utf8').split('\n')[0]);return port>0&&port<=65535&&port;}catch{return null;}};
@@ -138,7 +149,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     browser=await chromium.connectOverCDP('http://127.0.0.1:'+cdpPort);
     page = await until(() => browser.contexts().flatMap(context => context.pages()).find(page => page.url().includes('/settings.html')), 'native settings');
     page.on('pageerror', error => errors.push(error.message)); await page.waitForSelector('#generation-connect', { state: 'attached' });
-    await page.evaluate(() => {
+    async function observeGenerationPage() { await page.evaluate(() => {
       window.generationTrace = [];
       const apply = hertzWallpaperSettings.applyStatus;
       hertzWallpaperSettings.applyStatus = function (payload) { window.generationMediaPreview = payload.mediaPreview; return apply.call(this, payload); };
@@ -149,7 +160,8 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
         try { const receipt = await request.call(this, command, ...args); entry.done = true; return receipt; }
         catch (error) { entry.error = error.code; throw error; }
       };
-    });
+    }); }
+    await observeGenerationPage();
     const native = (command, payload = {}) => page.evaluate(async ({ command, payload }) => {
       try { return await hertzWallpaperSettings.requestManagement('wallpaper.ai.' + command, payload); }
       catch (error) { return error.receipt || { ok: false, error: { code: error.code, message: error.message } }; }
@@ -173,6 +185,14 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       builtin: hertzWallpaperSettings.currentBuiltin(),
     }));
     await page.locator('#wallpaper-generation > summary').click();
+    if (externalFixture) {
+      externalChecks = await require('./wallpaper-external-sdk-checks').createExternalChecks({
+        root, output, binary, dataDir: data, page, api, native, nativeStatus, management, execute, until, delay, probe,
+        ownerPid: standalone ? desktopChild.pid : child.pid, standalone, pass,
+      });
+      await externalChecks.beforePairing();
+      await observeGenerationPage();
+    }
     await page.locator('#generation-connect').click();
     const pairing = await until(async () => (await api('/v1/ai/wallpaper/pairings')).pending[0], 'pending pairing');
     assert.equal(pairing.nativePid, standalone ? desktopChild.pid : child.pid);
@@ -235,8 +255,10 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       await page.screenshot({ path: path.join(output, 'image-options.png'), fullPage: true });
       pass('image options are labelled, responsive and require explicit quotation');
     }
-    await page.locator('#generation-brief').fill('柔和夜色，宁静频谱'); await page.locator('#generation-quote').click();
-    await page.waitForSelector('#generation-confirm:enabled'); assert.match(await page.locator('#generation-price-text').innerText(), ollamaFixture || imageFixture ? /0 micro-USD/ : /免费/);
+    await page.locator('#generation-brief').fill(compatibleLive && compositionFixture
+      ? '使用选中的图片素材作为唯一图像节点，铺满1920x1080画布，opacity为0.8；夜色安静，不添加文本、模型或动画。'
+      : '柔和夜色，宁静频谱'); await page.locator('#generation-quote').click();
+    await page.waitForSelector('#generation-confirm:enabled'); assert.match(await page.locator('#generation-price-text').innerText(), compatibleLive ? /费用未知.*token/ : ollamaFixture || imageFixture ? /0 micro-USD/ : /免费/);
     if (imageFixture) assert.match(await page.locator('#generation-price-text').innerText(), /图片张数最多 1.*执行最多 180 秒.*最多 240 秒/);
     if (providerFixture) assert.equal(providerFixture.calls(), 0, 'quotation must not call Ollama');
     const before = await api('/v1/ai/jobs');
@@ -256,7 +278,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.locator('#generation-confirm').click();
     const denied = JSON.parse((await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', probe, '-TargetPid', String(standalone ? desktopChild.pid : child.pid), '-Button', '7'], { windowsHide: true, timeout: 25000, encoding: 'utf8' })).stdout.trim());
     assert.ok(denied.some(text => text.includes('default=7'))); assert.ok(denied.some(text => imageFixture ? text.includes('1536') && text.includes('1024') : compositionFixture ? text.includes('组合') : text.includes('coast') || text.includes('内置场景')));
-    assert.ok(denied.some(text => text.includes(ollamaFixture || imageFixture ? '0 micro-USD' : '免费') && text.includes(imageFixture ? '240 秒' : '90 秒')));
+    assert.ok(denied.some(text => text.includes(compatibleLive ? '费用未知' : ollamaFixture || imageFixture ? '0 micro-USD' : '免费') && text.includes(imageFixture ? '240 秒' : '90 秒')));
     await page.waitForFunction(() => window.generationConfirmationReceipt?.error?.code === 'generation_cancelled');
     assert.deepEqual(await api('/v1/ai/jobs'), before); pass('real native confirmation defaults to No and refusal creates no task');
     if (providerFixture) assert.equal(providerFixture.calls(), 0, 'refusal must not call Ollama');
@@ -280,7 +302,12 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.waitForFunction(() => window.heldGenerationReceipt);
     await page.locator('#wallpaper-generation > summary').click(); await page.evaluate(() => window.releaseGenerationReceipt());
     await page.locator('#wallpaper-generation > summary').click();
-    await until(async () => /候选已生成/.test(await page.locator('#generation-job').innerText()), 'retained submitted task');
+    await until(async () => {
+      const current = await nativeStatus();
+      if (current.job && ['failed', 'cancelled', 'interrupted'].includes(current.job.state))
+        throw new Error('Confirmed generation ended: ' + current.job.state + '/' + (current.job.failureCode || 'unknown'));
+      return /候选已生成/.test(await page.locator('#generation-job').innerText());
+    }, 'retained submitted task', 45000, 2100);
     const status = await nativeStatus(); assert.ok(status.job.jobId); assert.equal(status.submissionPending, false);
     assert.ok(!JSON.stringify(status).includes('bearer')); pass('close during submitted receipt and reopen retains native job');
     await page.locator('#generation-receive').click();
@@ -457,6 +484,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.locator('#tab-wallpaper').click(); await until(() => polling > paused, 'polling resumes'); pass('hidden settings tab stops polling and visible tab resumes');
     await page.locator('#wallpaper-generation > summary').click();
     await nativeStatus();
+    if (externalChecks) await externalChecks.run(saved);
     assert.equal((await native('disconnect')).ok, true);
     assert.equal((await nativeStatus()).connected, false);
     assert.ok((await api('/v1/ai/grants')).grants.every(row => row.delivery_mode !== 'native_session' || row.revoked));
@@ -465,8 +493,14 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       providerFixture.verify();
       pass('local Ollama schema, independent output limit and one confirmed provider request');
     }
+    if (compatibleLive) {
+      require('./wallpaper-compatible-checks').verifyUsage(data, output, status.job.jobId, compatible, compositionFixture);
+      const removed = await api('/v1/ai/provider-credential', 'DELETE');
+      assert.equal(removed.configured, false);
+      pass('live Responses candidate saved with one token-only usage entry and isolated credential removed');
+    }
     assert.deepEqual(errors, []); await page.screenshot({ path: path.join(output, 'generation.png'), fullPage: true });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: compositionFixture ? 'fake-composition' : imageFixture ? 'fake-image' : ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: compatibleLive ? 'openai-compatible' : compositionFixture ? 'fake-composition' : imageFixture ? 'fake-image' : ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
   } catch (error) {
     if (page && !page.isClosed()) await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
     const diagnostic = page && !page.isClosed() ? await page.evaluate(() => ({ visibility:document.visibilityState, trace:window.generationTrace,
@@ -475,8 +509,11 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed:false, mode:standalone?'standalone':'embedded', checks, errors, diagnostic, failure:String(error.message) }, null, 2));
     throw error;
   } finally {
+    let externalCleanupError;
+    if (externalChecks) { try { await externalChecks.close(); } catch (error) { externalCleanupError = error; } }
     if (officialBrowser) await officialBrowser.close();if (browser) await browser.close();if(mainBrowser)await mainBrowser.close(); await stopOwned(desktopChild); await stopOwned(child);
     if (providerFixture) await providerFixture.close();
+    if (externalCleanupError) throw externalCleanupError;
   }
 }
 main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

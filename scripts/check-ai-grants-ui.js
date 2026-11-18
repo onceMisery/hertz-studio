@@ -133,7 +133,7 @@ function createHarness(mode) {
     getElementById: (id) => nodes[id] || null,
     createElement: () => new FixtureNode(),
   };
-  const window = {};
+  const window = { hertzHost: { desktopEnabled: mode !== 'dbx' } };
   vm.runInNewContext(moduleSource, { window, document }, { filename: appPath });
   window.AiGrantSettings.init({
     transport,

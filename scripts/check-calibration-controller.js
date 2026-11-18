@@ -64,7 +64,7 @@ context = {
   isNpOpen: () => opened,
   syncNpLyrics() {},
 };
-context.window = { focus() {}, addEventListener() {}, NowPlaying: { showCalibration() {} } };
+context.window = { hertzHost: { desktopEnabled: true }, focus() {}, addEventListener() {}, NowPlaying: { showCalibration() {} } };
 vm.createContext(context);
 vm.runInContext(source.slice(start, end) + '\nthis.auditController = calibrationUi;', context);
 context.auditController.init();

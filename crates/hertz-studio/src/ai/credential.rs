@@ -4,6 +4,7 @@
 //! Provider-scoped storage and task credential lifecycle.
 //! No model API or network client lives here. Status only projects configured;
 //! legacy raw keys acquire a generation inside the same bounded storage work.
+use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -29,16 +30,16 @@ const KEYRING_TIMEOUT: Duration = Duration::from_secs(5);
 static SERVICE: LazyLock<Arc<Service>> =
     LazyLock::new(|| Arc::new(Service::new(crate::secrets::backend())));
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Target {
     provider: &'static str,
-    origin: &'static str,
+    origin: Cow<'static, str>,
 }
 
 impl Target {
     const OPENAI: Self = Self {
         provider: "openai",
-        origin: ORIGIN,
+        origin: Cow::Borrowed(ORIGIN),
     };
 
     fn from_config(config: &crate::config::AiConfig) -> Option<Self> {
@@ -47,19 +48,26 @@ impl Target {
                 .ok()
                 .map(|origin| Self {
                     provider: "stepfun",
-                    origin,
+                    origin: Cow::Borrowed(origin),
+                })
+        } else if config.provider == "openai-compatible" {
+            super::provider::compatible_origin(&config.origin)
+                .ok()
+                .map(|origin| Self {
+                    provider: "openai-compatible",
+                    origin: Cow::Owned(origin.into()),
                 })
         } else {
             // Keep the existing OpenAI preparation entry while using a local
-            // provider. Only explicit StepFun configuration changes the scope.
+            // provider. Cloud destinations require explicit configuration.
             Some(Self::OPENAI)
         }
     }
 
-    fn scope(self, owner: &str) -> String {
+    fn scope(&self, owner: &str) -> String {
         // Preserve the original OpenAI namespace, including legacy raw keys.
         let identity =
-            serde_json::to_vec(&("v1", owner, self.provider, self.origin)).expect("string tuple");
+            serde_json::to_vec(&("v1", owner, self.provider, &self.origin)).expect("string tuple");
         format!("ai_provider_cred_v1_{:x}", Sha256::digest(identity))
     }
 }
@@ -212,7 +220,7 @@ impl Service {
             .clone()
             .try_read_owned()
             .map_err(|_| busy())?;
-        let target = self.target.ok_or_else(unavailable)?;
+        let target = self.target.as_ref().ok_or_else(unavailable)?;
         let key = target.scope(owner);
         // The blocking owner retains the read guard after waiter loss/timeout.
         let (record, guard) = self
@@ -261,7 +269,7 @@ impl Service {
         timeout: Duration,
         guard: OwnedRwLockWriteGuard<()>,
     ) -> ApiResult<CredentialStatus> {
-        let target = self.target.ok_or_else(unavailable)?;
+        let target = self.target.as_ref().ok_or_else(unavailable)?;
         let key = target.scope(owner);
         let configured = self
             .blocking(timeout, move |backend| {
@@ -285,15 +293,15 @@ impl Service {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CredentialStatus {
     provider: &'static str,
-    origin: &'static str,
+    origin: Cow<'static, str>,
     configured: bool,
 }
 
 impl CredentialStatus {
-    fn new(target: Target, configured: bool) -> Self {
+    fn new(target: &Target, configured: bool) -> Self {
         Self {
             provider: target.provider,
-            origin: target.origin,
+            origin: target.origin.clone(),
             configured,
         }
     }
@@ -532,15 +540,16 @@ mod tests {
         let openai = service("openai", ORIGIN);
         let stepfun = service("stepfun", "https://api.stepfun.com/v1/");
         let plan = service("stepfun", "https://api.stepfun.com/step_plan/v1");
+        let compatible = service("openai-compatible", "https://api.openai.com/v1/");
+        let other_endpoint = service("openai-compatible", "https://models.example.com/v1");
         let mut identities = Vec::new();
-        for (index, (service, key)) in [
+        for (service, key) in [
             (&openai, "openai-fixture"),
             (&stepfun, "stepfun-fixture"),
             (&plan, "plan-fixture"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+            (&compatible, "compatible-fixture"),
+            (&other_endpoint, "other-endpoint-fixture"),
+        ] {
             assert_eq!(
                 service.snapshot("owner").await.err().unwrap().code,
                 "ai_credential_missing"
@@ -555,11 +564,11 @@ mod tests {
                 .await
                 .unwrap();
             let value = serde_json::to_value(status).unwrap();
+            assert_eq!(value["provider"], service.target.as_ref().unwrap().provider);
             assert_eq!(
-                value["provider"],
-                if index == 0 { "openai" } else { "stepfun" }
+                value["origin"],
+                service.target.as_ref().unwrap().origin.as_ref()
             );
-            assert_eq!(value["origin"], service.target.unwrap().origin);
             let lease = service.snapshot("owner").await.unwrap();
             identities.push(lease.identity());
             assert_eq!(lease.into_secret().as_ref(), key);
@@ -568,6 +577,8 @@ mod tests {
             (&stepfun, &identities[0]),
             (&plan, &identities[1]),
             (&openai, &identities[2]),
+            (&compatible, &identities[0]),
+            (&other_endpoint, &identities[3]),
         ] {
             assert_eq!(
                 service
@@ -601,6 +612,42 @@ mod tests {
             plan.snapshot("owner").await.unwrap().into_secret().as_ref(),
             "plan-fixture"
         );
+        assert_eq!(
+            service("openai-compatible", "https://API.OPENAI.COM:443/v1")
+                .snapshot("owner")
+                .await
+                .unwrap()
+                .into_secret()
+                .as_ref(),
+            "compatible-fixture"
+        );
+        compatible
+            .execute_locked(
+                "owner",
+                Action::Delete,
+                KEYRING_TIMEOUT,
+                compatible.exclusive().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            openai
+                .snapshot("owner")
+                .await
+                .unwrap()
+                .into_secret()
+                .as_ref(),
+            "openai-fixture"
+        );
+        assert_eq!(
+            other_endpoint
+                .snapshot("owner")
+                .await
+                .unwrap()
+                .into_secret()
+                .as_ref(),
+            "other-endpoint-fixture"
+        );
         // The old namespace is unchanged, so no migration can route an OpenAI
         // credential to the newly supported provider.
         let old_identity = serde_json::to_vec(&("v1", "owner", "openai", ORIGIN)).unwrap();
@@ -612,33 +659,42 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_provider_origin_cannot_read_or_store_a_credential() {
-        let service = Service {
-            target: Target::from_config(&crate::config::AiConfig {
-                provider: "stepfun".into(),
-                origin: "https://api.stepfun.com:9443/v1".into(),
-                model: "step-5-preview".into(),
-                ..Default::default()
-            }),
-            ..Service::new(Arc::new(MemoryStore::default()))
-        };
-        assert_eq!(
-            service.snapshot("owner").await.err().unwrap().code,
-            "ai_credential_unavailable"
-        );
-        assert_eq!(
-            service
-                .execute_locked(
-                    "owner",
-                    Action::Put("fixture-key".into()),
-                    KEYRING_TIMEOUT,
-                    service.exclusive().unwrap()
-                )
-                .await
-                .err()
-                .unwrap()
-                .code,
-            "ai_credential_unavailable"
-        );
+        for (provider, origin) in [
+            ("stepfun", "https://api.stepfun.com:9443/v1"),
+            ("openai-compatible", "http://127.0.0.1/v1"),
+            (
+                "openai-compatible",
+                "https://models.example.com/v1?key=fixture",
+            ),
+        ] {
+            let service = Service {
+                target: Target::from_config(&crate::config::AiConfig {
+                    provider: provider.into(),
+                    origin: origin.into(),
+                    model: "step-5-preview".into(),
+                    ..Default::default()
+                }),
+                ..Service::new(Arc::new(MemoryStore::default()))
+            };
+            assert_eq!(
+                service.snapshot("owner").await.err().unwrap().code,
+                "ai_credential_unavailable"
+            );
+            assert_eq!(
+                service
+                    .execute_locked(
+                        "owner",
+                        Action::Put("fixture-key".into()),
+                        KEYRING_TIMEOUT,
+                        service.exclusive().unwrap()
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                "ai_credential_unavailable"
+            );
+        }
     }
 
     #[test]
@@ -653,8 +709,8 @@ mod tests {
         assert!(Arc::ptr_eq(&openai.slots, &stepfun.slots));
         assert!(Arc::ptr_eq(&openai.lifecycle, &stepfun.lifecycle));
         assert_ne!(
-            openai.target.unwrap().scope("owner"),
-            stepfun.target.unwrap().scope("owner")
+            openai.target.as_ref().unwrap().scope("owner"),
+            stepfun.target.as_ref().unwrap().scope("owner")
         );
     }
 

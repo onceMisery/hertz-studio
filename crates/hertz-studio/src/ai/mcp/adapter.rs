@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use vmusic_core::PROTOCOL_VERSION;
 
 use super::discovery::{self, DiscoveryDoc};
-use crate::ai::capability::{find, scope_satisfied, Effect, CAPABILITIES, CAPABILITY_VERSION};
+use crate::ai::capability::{find, Effect, CAPABILITIES, CAPABILITY_VERSION};
 #[cfg(test)]
 use crate::ai::capability::{Handler, SCOPES};
 
@@ -325,7 +325,7 @@ fn input_schema(operation: &str) -> rmcp::model::JsonObject {
             .clone();
     };
     let mut schema = capability.input_schema.value();
-    if capability.effect == Effect::Mutating {
+    if capability.effect == Effect::Mutating && !capability.handler.is_wallpaper_request() {
         schema["properties"]["clientOperationId"] = json!({
             "type": "string", "minLength": 1, "maxLength": 128,
             "description": "可选幂等键；去除首尾空白后须非空且不超过 128 UTF-8 字节。同一动作重试用同一键，新动作用新键。"
@@ -361,7 +361,7 @@ pub(crate) fn tools_for(
         .iter()
         .filter(|cap| supported_capabilities.contains(cap.handler.operation()))
         // 伞 scope（playback:control）在这里同样隐含六种传输播控。
-        .filter(|cap| scope_satisfied(scopes, cap.scope))
+        .filter(|cap| cap.scopes_satisfied(scopes))
         .filter(|cap| !cap.handler.is_stage() || stage_tools_enabled)
         .map(|cap| {
             let mut annotations = ToolAnnotations::default();
@@ -378,7 +378,7 @@ pub(crate) fn tools_for(
                 json!({
                     "operation": cap.handler.operation(),
                     "handler": cap.handler.operation(),
-                    "requiredScopes": [cap.scope],
+                    "requiredScopes": cap.required_scopes(),
                     "allowedProjection": cap.allowed_projection,
                     "effect": cap.effect.as_str(),
                     "budgetClass": cap.budget_class.as_str(),
@@ -428,19 +428,25 @@ pub(crate) async fn call_tool(
     let mut arguments = arguments.cloned().unwrap_or_default();
     // clientOperationId 是适配层的调用身份（§5.2：每个新动作新键）；调用方
     // 不带就每次生成，绝不静默复用上一个键。
-    let client_operation_id = if capability.effect == Effect::Mutating {
-        match arguments.remove("clientOperationId") {
-            Some(Value::String(id)) => Some(id),
-            Some(_) => {
-                return error_result(json!({
-                    "code": "bad_request", "message": "clientOperationId 必须为字符串",
-                }));
+    let client_operation_id =
+        if capability.effect == Effect::Mutating && capability.handler.is_wallpaper_request() {
+            arguments
+                .get("operationId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else if capability.effect == Effect::Mutating {
+            match arguments.remove("clientOperationId") {
+                Some(Value::String(id)) => Some(id),
+                Some(_) => {
+                    return error_result(json!({
+                        "code": "bad_request", "message": "clientOperationId 必须为字符串",
+                    }));
+                }
+                None => Some(uuid::Uuid::new_v4().to_string()),
             }
-            None => Some(uuid::Uuid::new_v4().to_string()),
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     call_tool_with_operation_id(
         client,
         base_url,
@@ -529,6 +535,12 @@ pub(crate) fn unknown_result(
     client_operation_id: &str,
     message: String,
 ) -> CallToolResult {
+    if super::super::wallpaper_requests::operation(operation).is_some() {
+        return error_result(
+            json!({"outcome":"unknown","code":"unknown","operation":operation,
+            "operationId":client_operation_id,"message":"申请状态尚未确认；请使用相同 operationId 重查或重试"}),
+        );
+    }
     error_result(json!({
         "outcome": "unknown",
         "code": "unknown",
@@ -549,6 +561,18 @@ pub(crate) fn ensure_operation_id(
     };
     if capability.effect != Effect::Mutating {
         return Ok(None);
+    }
+    if capability.handler.is_wallpaper_request() {
+        let bytes = serde_json::to_vec(arguments).map_err(|_| {
+            error_result(json!({"code":"invalid_request","message":"申请不是合法 JSON"}))
+        })?;
+        let operation =
+            super::super::wallpaper_requests::operation(operation).ok_or_else(|| {
+                error_result(json!({"code":"invalid_request","message":"未登记的申请"}))
+            })?;
+        return hertz_wallpaper::external_requests::parse(operation.as_str(), &bytes)
+            .map(|request| request.operation_id().map(str::to_owned))
+            .map_err(|_| error_result(json!({"code":"invalid_request","message":"请提供合法 operationId 和申请字段；内容必须在边界内"})));
     }
     match arguments.get("clientOperationId") {
         Some(Value::String(id)) if !id.trim().is_empty() && id.len() <= 128 => Ok(Some(id.clone())),
@@ -597,6 +621,36 @@ mod tests {
     use super::*;
     use crate::state::AppState;
     use std::sync::Arc;
+
+    #[test]
+    fn external_tools_require_both_switch_scopes_and_never_invent_operation_ids() {
+        let supported = CAPABILITIES
+            .iter()
+            .map(|cap| cap.handler.operation().into())
+            .collect();
+        let scopes = ["wallpaper:request".to_owned()].into_iter().collect();
+        let tools = tools_for(&scopes, false, &supported);
+        assert_eq!(tools.len(), 2);
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != "wallpaper_switch_request"
+                && tool.name != "wallpaper_catalog_get"));
+        let mut args = json!({"brief":"quiet","outputKind":"builtin"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(ensure_operation_id("wallpaper_generate_request", &mut args).is_err());
+        assert!(!args.contains_key("clientOperationId") && !args.contains_key("operationId"));
+        args.insert("operationId".into(), json!("request-one"));
+        assert_eq!(
+            ensure_operation_id("wallpaper_generate_request", &mut args).unwrap(),
+            Some("request-one".into())
+        );
+        assert!(!input_schema("wallpaper_generate_request")["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("clientOperationId"));
+    }
 
     fn temp_data_dir() -> PathBuf {
         std::env::temp_dir().join(format!("vmusic-mcp-{}", uuid::Uuid::new_v4()))
@@ -1155,6 +1209,10 @@ mod tests {
         assert_eq!(tools.len(), CAPABILITIES.len());
 
         let handlers = [
+            Handler::WallpaperCatalogGet,
+            Handler::WallpaperSwitchRequest,
+            Handler::WallpaperGenerateRequest,
+            Handler::WallpaperRequestGet,
             Handler::StageCapabilitiesGet,
             Handler::StageIntentValidate,
             Handler::PlaybackSnapshotGet,
@@ -1195,9 +1253,22 @@ mod tests {
                 json!(capability.allowed_projection)
             );
             let mut expected = capability.input_schema.value();
-            if capability.effect == Effect::Mutating {
-                expected["properties"]["clientOperationId"] =
-                    actual["properties"]["clientOperationId"].clone();
+            if capability.effect == Effect::Mutating && !capability.handler.is_wallpaper_request() {
+                let operation_id = actual["properties"]
+                    .get("clientOperationId")
+                    .expect("legacy mutating tools advertise the adapter idempotency key");
+                assert_eq!(operation_id["type"], "string");
+                assert_eq!(operation_id["minLength"], 1);
+                assert_eq!(operation_id["maxLength"], 128);
+                expected["properties"]["clientOperationId"] = operation_id.clone();
+            } else {
+                assert!(actual["properties"].get("clientOperationId").is_none());
+                if capability.effect == Effect::Mutating {
+                    assert!(actual["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("operationId")));
+                }
             }
             assert_eq!(
                 actual,

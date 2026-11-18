@@ -1,0 +1,80 @@
+.community-workspace { display: block; min-width: 0; }
+.community-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.community-heading h2 { font-size: 20px; line-height: 1.3; }
+.community-heading .hint { margin-block: 8px 0; max-width: 58ch; }
+.community-message { min-height: 24px; margin-block: 20px; line-height: 1.65; overflow-wrap: anywhere; }
+.community-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 32px; }
+.community-columns > div { min-width: 0; }
+.community-section { border-block-start: 1px solid var(--line); padding-block: 20px; min-width: 0; }
+.community-section h3 { margin: 0 0 14px; font-size: 14px; font-weight: 600; color: inherit; }
+.community-section h4 { margin: 18px 0 10px; font-size: 13px; font-weight: 600; }
+.community-section > label, .community-form > label { display: block; font-size: 12px; margin-block-end: 6px; }
+.community-form { display: grid; gap: 8px; min-width: 0; }
+.community-form > button { justify-self: start; }
+.community-form > label { margin: 0; }
+.community-form .hint { margin: 0; }
+.community-workspace input[type=url], .community-workspace input[type=text], .community-workspace select {
+  width: 100%; color: inherit; background: var(--control); border: 1px solid #767369; border-radius: 6px;
+  font: inherit; font-size: max(1rem, 1em); min-block-size: 36px; padding: 8px 10px;
+}
+.community-workspace button { min-block-size: 32px; }
+.community-workspace :where(button, input, select, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.community-workspace input:invalid { border-color: #767369; }
+.community-workspace input:user-invalid, .community-workspace input[aria-invalid=true] { border-color: #e5a395; }
+.community-field-error { margin: 0; color: #e5a395; font-size: 12px; }
+.community-field-error:empty { display: none; }
+.community-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-start: 12px; }
+.community-actions button { font-size: 12px; }
+.community-actions button:active:not(:disabled) { transform: scale(.98); }
+.community-facts { display: grid; grid-template-columns: minmax(70px, .3fr) minmax(0, 1fr); gap: 8px 12px; margin-block: 12px 18px; font-size: 12px; }
+.community-facts dt { color: var(--muted); }
+.community-facts dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
+.community-code { display: block; font: 11px/1.7 "Cascadia Code", Consolas, monospace; overflow-wrap: anywhere; user-select: text; white-space: normal; }
+.community-state { margin-block: 14px 8px; font-size: 12px; }
+.community-state[data-state=stale], .community-notice { color: #eadba9; }
+.community-notice { padding: 12px 14px; border: 1px solid #786d46; border-radius: 6px; margin-block: 12px 18px; }
+.community-notice h3 { margin: 0 0 8px; color: inherit; font-size: 13px; }
+.community-notice .hint { color: inherit; }
+.community-notice button { margin-block-start: 10px; }
+.community-confirmation { border: 1px solid #786d46; border-radius: 6px; padding: 16px; margin-block: 18px; }
+.community-confirmation h3, .community-confirmation h4 { margin-block-start: 0; }
+.community-list { margin: 0; padding: 0; list-style: none; }
+.community-list > li { min-width: 0; padding-block: 16px; border-block-end: 1px solid var(--line); }
+.community-list > li:first-child { padding-block-start: 0; }
+.community-list h4 { margin: 0 0 6px; line-height: 1.5; overflow-wrap: anywhere; }
+.community-list p { margin-block: 6px; }
+.community-list .community-actions { margin-block-start: 8px; }
+.community-extra { margin-block-start: 16px; font-size: 12px; }
+.community-extra summary { cursor: pointer; padding-block: 6px; }
+.community-extra .community-form { margin-block-start: 12px; }
+.community-policy { margin-block-start: 12px; }
+.community-policy fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.community-policy legend { padding: 0; margin-block-end: 6px; font-size: 12px; color: var(--muted); }
+.community-choice { display: flex; align-items: center; gap: 8px; min-block-size: 32px; }
+.community-choice input { width: 17px; height: 17px; margin: 0; flex: none; accent-color: var(--accent); }
+.community-choice label { font-size: 12px; line-height: 1.5; cursor: pointer; padding-block: 6px; }
+.community-policy-note { min-height: 18px; }
+.community-differences { padding-inline-start: 18px; font-size: 12px; line-height: 1.75; }
+.community-record-progress { width: 100%; max-width: 240px; height: 6px; accent-color: var(--accent); }
+.community-loading { display: grid; gap: 8px; margin-block-end: 20px; }
+.community-loading span { display: block; block-size: 28px; max-inline-size: 420px; background: var(--control); border: 1px solid var(--line); border-radius: 4px; }
+.community-loading span:last-child { max-inline-size: 300px; }
+@media (max-width: 900px) { .community-columns { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+@media (max-width: 520px) {
+  .community-heading { flex-direction: column; }
+  .community-facts { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .community-facts dd { margin-block-end: 8px; }
+  .community-confirmation { padding: 12px; }
+  .tabs { gap: 16px; overflow-x: auto; }
+  .tabs button { flex: none; }
+}
+@media (pointer: coarse) {
+  .community-workspace :where(button, input[type=text], input[type=url], select), .community-choice, .community-extra summary { min-block-size: 48px; }
+  .community-choice label { padding-block: 14px; }
+}
+@media (prefers-reduced-motion: reduce) { .community-workspace button { transition: none; } }
+@media (forced-colors: active) {
+  .community-workspace :where(input, select, .community-notice, .community-confirmation) { border-color: CanvasText; }
+  .community-workspace :where(button, input, select, summary):focus-visible { outline-color: Highlight; }
+  .community-state[data-state=stale], .community-notice, .community-field-error { color: CanvasText; }
+}

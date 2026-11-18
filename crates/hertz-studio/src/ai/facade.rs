@@ -96,6 +96,7 @@ async fn pause_rotation_before_install(grant_id: &str) {
 #[derive(Debug, Clone)]
 pub(crate) struct GrantContext {
     pub grant_id: String,
+    pub credential_revision: String,
     pub scopes: BTreeSet<String>,
     pub policy_revision: i64,
     pub owner_instance_id: String,
@@ -436,6 +437,7 @@ async fn authenticate_mode(
         .await
         .map_err(store_error)?;
     Ok(GrantContext {
+        credential_revision: row.credential_digest.clone(),
         grant_id: row.grant_id,
         scopes: parse_scopes(&row.scopes).into_iter().collect(),
         policy_revision: instance.policy_revision,
@@ -465,7 +467,7 @@ pub(crate) fn context_json(ctx: &GrantContext, stage_tools_enabled: bool) -> Val
             "inputSchema": c.input_schema.value(),
             "outputSchema": c.output_schema.value(),
             "scope": c.scope,
-            "requiredScopes": [c.scope],
+            "requiredScopes": c.required_scopes(),
             "allowedProjection": c.allowed_projection,
             "effect": c.effect.as_str(),
             "budgetClass": c.budget_class.as_str(),
@@ -476,11 +478,87 @@ pub(crate) fn context_json(ctx: &GrantContext, stage_tools_enabled: bool) -> Val
     })
 }
 
+/// The caller holds grant_lifecycle through an external authorization decision.
+pub(super) async fn current_file_grant(
+    state: &Arc<AppState>,
+    ctx: &GrantContext,
+    scopes: &[&str],
+) -> Result<vmusic_store::ai::GrantRow, ApiError> {
+    let row = vmusic_store::ai::find_grant_by_id(&state.db, &ctx.grant_id)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(unauthorized)?;
+    if row.revoked
+        || row.delivery_mode != "file"
+        || row.credential_digest != ctx.credential_revision
+        || ctx.server_instance_id != state.server_instance_id
+    {
+        return Err(unauthorized());
+    }
+    let instance = vmusic_store::ai::get_or_create_instance(&state.db)
+        .await
+        .map_err(store_error)?;
+    if instance.owner_instance_id != ctx.owner_instance_id {
+        return Err(unauthorized());
+    }
+    let current: BTreeSet<String> = parse_scopes(&row.scopes).into_iter().collect();
+    if !scopes.iter().all(|scope| {
+        super::capability::scope_satisfied(&current, scope)
+            && super::capability::scope_satisfied(&ctx.scopes, scope)
+    }) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "scope_required",
+            "该授权缺少申请需要的权限",
+        ));
+    }
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ai::capability::{execute, CapabilityCall};
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn external_authorization_rejects_rotated_and_revoked_contexts() {
+        let (state, handle) = ai_state().await;
+        let (id, secret) = make_grant(&state, "external", &["playback:read"]).await;
+        let ctx = authenticate(&state, &secret).await.unwrap();
+        assert!(current_file_grant(&state, &ctx, &["playback:read"])
+            .await
+            .is_ok());
+        rotate_grant(&state, &id).await.unwrap();
+        assert!(current_file_grant(&state, &ctx, &["playback:read"])
+            .await
+            .is_err());
+        let secret = std::fs::read_to_string(credential_path(&state, &id)).unwrap();
+        let current = authenticate(&state, &secret).await.unwrap();
+        revoke_grant(&state, &id).await.unwrap();
+        assert!(current_file_grant(&state, &current, &["playback:read"])
+            .await
+            .is_err());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_authorization_rechecks_scope_and_instance() {
+        let (state, handle) = ai_state().await;
+        let (_, secret) = make_grant(&state, "external", &["playback:read"]).await;
+        let ctx = authenticate(&state, &secret).await.unwrap();
+        assert!(current_file_grant(&state, &ctx, &["library:read"])
+            .await
+            .is_err());
+        let mut stale = ctx.clone();
+        stale.server_instance_id = "old-server".into();
+        assert!(current_file_grant(&state, &stale, &["playback:read"])
+            .await
+            .is_err());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
 
     #[tokio::test]
     async fn stage_tools_require_scopes_and_switch_and_do_not_create_jobs() {
@@ -565,6 +643,7 @@ mod tests {
 
     fn ctx_of(grant_id: &str, scopes: &[&str]) -> GrantContext {
         GrantContext {
+            credential_revision: String::new(),
             grant_id: grant_id.to_string(),
             scopes: scopes.iter().map(|s| s.to_string()).collect(),
             policy_revision: 1,
@@ -950,7 +1029,29 @@ mod tests {
         );
         assert_eq!(value["instance"]["edition"], crate::edition::NAME);
         let capabilities = value["capabilities"].as_array().unwrap();
-        assert_eq!(capabilities.len(), 8);
+        assert_eq!(capabilities.len(), 12);
+        let operations: BTreeSet<_> = capabilities
+            .iter()
+            .map(|capability| capability["operation"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            operations,
+            BTreeSet::from([
+                "playback.snapshot_get",
+                "playback.pause",
+                "playback.resume",
+                "playback.next",
+                "playback.previous",
+                "playback.seek",
+                "playback.volume_set",
+                "library_search",
+                "wallpaper.catalog_get",
+                "wallpaper.switch_request",
+                "wallpaper.generate_request",
+                "wallpaper.request_get",
+            ])
+        );
+        assert_eq!(value["scopes"], json!(["playback:read"]));
         assert!(capabilities
             .iter()
             .all(|c| c["scope"].is_string() && c["operation"].is_string()));

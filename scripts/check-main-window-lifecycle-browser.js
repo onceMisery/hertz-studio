@@ -100,7 +100,8 @@ async function main() {
 
     await fixture();
     assert.equal(await page.locator('#window-lifecycle-behavior').inputValue(), 'hide');
-    assert.match(await page.locator('#window-lifecycle-setting').innerText(), /隐藏到托盘（默认）/);
+    assert.match(await page.locator('#window-lifecycle-setting').innerText(), /退出播放器（默认）/);
+    assert.match(await page.locator('#window-lifecycle-setting').innerText(), /隐藏到托盘/);
     await page.locator('#window-lifecycle-behavior').selectOption('quit');
     await page.waitForFunction(() => document.querySelector('#window-lifecycle-setting-status').textContent.includes('已保存'));
     await page.evaluate(() => { test.failPut = true; });

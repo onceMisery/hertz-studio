@@ -267,13 +267,14 @@ async function main() {
   mark('minimized geometry never replaces the normal placement, including graceful shutdown and the next visible restart');
 
   preserved = await saved(current, 'normal-before-hide');
-  assert.equal((await api('/v1/window/state')).closeBehavior, 'hide');
+  assert.equal((await api('/v1/window/state')).closeBehavior, 'quit');
+  await api('/v1/window/settings', 'PUT', { closeBehavior: 'hide' });
   native('close'); await stableNative('real WM_CLOSE hide', state => !state.visible);
   native('bounds', target(current)); await unchanged(preserved, 'hidden-resize-preserves-normal');
   await stopCurrent(); assert.deepEqual(readRow(mainProfile), preserved);
   await start('main'); current = await stableNative('restart after hidden shutdown');
   assert.ok(near(current.outerBounds, decode(preserved).normalBounds)); assertFitted(current, 'hidden restart');
-  mark('WM_CLOSE hides the main window; hidden move/resize and shutdown preserve the last visible normal bounds');
+  mark('default close quits; an explicit hide keeps WM_CLOSE hiding while hidden move/resize and shutdown preserve the last visible normal bounds');
 
   const beforeMax = await saved(current, 'normal-before-maximize');
   native('maximize'); const maximized = await stableNative('real native maximize', state => state.maximized);

@@ -25,6 +25,58 @@ use vmusic_core::{Track, TrackSource};
 type Client = RunningService<RoleClient, ClientConfig>;
 const BINARY: &str = env!("CARGO_BIN_EXE_hertz-studio");
 
+#[tokio::test]
+async fn official_sdk_wallpaper_tools_are_narrow_and_require_explicit_operation_ids() -> Result<()>
+{
+    let mut fixture = Fixture::new()?;
+    let result = timeout(Duration::from_secs(60), async {
+        let owner = fixture.start_owner().await?;
+        let data_dir = fixture.root.join("player");
+        let old_grant = owner.grant(&["playback:read"]).await?;
+        let old = fixture.connect(&data_dir, Some(&old_grant), ClientConfig::default()).await?;
+        let old_tools = old.list_tools(Default::default()).await?.tools;
+        ensure!(old_tools.iter().all(|tool| !tool.name.starts_with("wallpaper_")), "old scopes expanded");
+        tool_error(&call(&old,"wallpaper_catalog_get",json!({})).await?,"scope_required")?;
+        old.cancel().await?;
+        let request_grant = owner.grant(&["wallpaper:request"]).await?;
+        let request = fixture.connect(&data_dir, Some(&request_grant), ClientConfig::default()).await?;
+        let tools = request.list_tools(Default::default()).await?.tools;
+        ensure!(tools.len() == 2 && tools.iter().all(|tool| tool.name == "wallpaper_generate_request" || tool.name == "wallpaper_request_get"), "request-only scope published catalog or switch");
+        tool_error(&call(&request,"wallpaper_generate_request",json!({"brief":"quiet","outputKind":"builtin"})).await?,"invalid_request")?;
+        tool_error(&call(&request,"wallpaper_switch_request",json!({"operationId":"switch-one","workKey":"local-safe","packageHash":"a".repeat(64),"targetHandle":"b".repeat(64)})).await?,"scope_required")?;
+        request.cancel().await?;
+        let grant = owner.grant(&["wallpaper:catalog_read","wallpaper:request"]).await?;
+        let client = fixture.connect(&data_dir, Some(&grant), ClientConfig::default()).await?;
+        let tools = client.list_tools(Default::default()).await?.tools;
+        ensure!(tools.len() == 4, "wallpaper scope tool count");
+        for tool in &tools {
+            ensure!(tool.meta.as_ref().context("tool metadata")?.0["budgetClass"] == "no_provider_call", "provider side effect");
+            ensure!(tool.input_schema["additionalProperties"] == false, "open input schema");
+        }
+        let switched = tools.iter().find(|tool| tool.name == "wallpaper_switch_request").context("switch schema")?;
+        ensure!(switched.meta.as_ref().context("metadata")?.0["requiredScopes"] == json!(["wallpaper:request","wallpaper:catalog_read"]), "missing combined scope");
+        tool_error(&call(&client,"wallpaper_catalog_get",json!({})).await?,"desktop_unavailable")?;
+        tool_error(&call(&client,"wallpaper_generate_request",json!({"operationId":"one","brief":"quiet","outputKind":"builtin"})).await?,"desktop_unavailable")?;
+        let secret = std::fs::read_to_string(data_dir.join("ai/grants").join(format!("{grant}.key")))?;
+        let discovery: Value = serde_json::from_slice(&std::fs::read(data_dir.join("ai/ai-discovery.json"))?)?;
+        let duplicate = owner.http.post(format!("{}/v1/ai/capabilities/call",owner.base)).bearer_auth(secret.trim())
+            .header("x-server-instance-id", discovery["serverInstanceId"].as_str().context("server instance")?)
+            .header("content-type","application/json")
+            .body(r#"{"operation":"wallpaper_generate_request","input":{"operationId":"dup","brief":"first","brief":"second","outputKind":"builtin"}}"#)
+            .send().await?;
+        let duplicate_status = duplicate.status();
+        let duplicate_body: Value = duplicate.json().await?;
+        ensure!(duplicate_status == reqwest::StatusCode::BAD_REQUEST, "duplicate rejection status {duplicate_status}, code {}", duplicate_body["error"]["code"]);
+        ensure!(duplicate_body["error"]["code"] == "bad_request", "duplicate request did not reach original envelope validation");
+        owner.request(Method::DELETE,&format!("/v1/ai/grants/{grant}"),None).await?;
+        tool_error(&call(&client,"wallpaper_request_get",json!({"requestId":uuid::Uuid::new_v4().to_string()})).await?,"grant_revoked")?;
+        client.cancel().await?;
+        Ok::<_, anyhow::Error>(())
+    }).await;
+    fixture.cleanup().await?;
+    result.context("wallpaper SDK timeout")?
+}
+
 async fn fixture_request(
     socket: tokio::net::TcpStream,
 ) -> Result<(BufReader<tokio::net::TcpStream>, String)> {

@@ -50,9 +50,7 @@ pub(crate) fn client() -> Result<reqwest::blocking::Client> {
 }
 
 pub(crate) fn read_discovery(profile: &Profile) -> Result<Discovery> {
-    if crate::config::is_dbx(profile) {
-        bail!("DBX 来源不支持 HTTP 发现");
-    }
+    crate::config::require_standalone(profile)?;
     let path = std::path::Path::new(profile.data_dir()).join("vmusicd.json");
     let bytes = std::fs::File::open(&path)
         .map_err(anyhow::Error::from)

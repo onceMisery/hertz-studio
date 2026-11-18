@@ -1,5 +1,9 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-18 形态范围更新：桌面歌词、壁纸、桌宠/迷你窗、原生设置和校准交接、壁纸 AI 接线归独立播放器 `desktop-host`。DBX Standard/Full 不再编译或开放这些宿主/接口，也不装配专属 UI；原音乐、普通歌词、沉浸舞台及各自 StageMediaStore 保留。历史 DBX Profile/授权/设置域仍可读取并保留，不能再作为原生执行来源。本文的旧 DBX 桌面桥和在途分支说明是历史，现行边界及本机开发验证见 [DBX 退役说明](desktop-dbx.md)和[验收矩阵](release-validation.md)；G3-S 与社区 Web 执行门不变。
+
+2026-11-14 [组合时间线轨道](aegis/plans/2026-11-14-timeline-tracks-r62.md)已接通编译器 `ir.tracks`：新增纯 `animation.js`（二分区间、linear/easeInOut(j*t²(3-2t))/step 取左键、首末键 clamp），`plan.js` 校验 target slot/keys/easing/范围并对文本重排与粒子 count/seed 轨道 fail-closed；`runtime.js` 每帧按 timeChanged 将轨道值写入 numeric、按 slotDependencies 更新受影响节点并恢复 base（plan diff 仍比较作者/公开值，plan 替换时重置 visualTime）。真实 Rust IR + Chrome 像素验证 opacity 0.2→0.4→0.6→reverse 0.4→loop 0.2（124/170/203/170/124），纯求值 linear/ease/step/clamp 通过；三处变异（step 取右键、easeInOut 公式、paused 跳过轨道）均变红后还原。33 项 composition 检查通过；bindings 栈程序、效果图与 GPU 时间继续，组合运行门不变。
+
 2026-11-11 [GLB数值互操作](wallpaper-model-resources.md)在原workspace启用锁定serde_json的float_roundtrip，修复真实作者十进制数与JS JSON.parse的1ULP差异。16,412个真实GLB节点逐bit匹配，新增7项及包全部242项回归通过；原typed/finite/bounds/hash owner、包字节与HWPK1/Config5保持。没有新解析器或消费者容差，原ModelInput/jobs/完整成本与同renderer资格继续。
 
 2026-11-11 [GLB静态事实续接](wallpaper-model-resources.md)在原有界Schema中保留作者scene/node/children顺序、原TRS或matrix、声明数和逻辑BIN长度，以及显式/省略mode。原parents和children直接移入事实，node_count存储退出；node权重仍沿原owner。固定metadata visitor保留node/mesh pivot标记，另保留原接受的optional null/URI字段存在标记，供后续静态profile消费；不增加Value解析器或更改原格式合法性。pure235（static facts12）/desktop assets14、fmt/Clippy及loader102/合同/ADR通过，source/variant仍经完整流检查。ModelInput/原jobs、完整CPU/GPU成本及同renderer首帧继续，运行门保持。
@@ -138,11 +142,11 @@ AI 可在对应引擎闭环之后单独发布，但不能用“支持导入 AI �
 10. 目标屏消失立即 `surface.stop()`，没有空拓扑宽限；Windows 在模式切换、驱动重置、RDP 进出时可能短暂少报显示器。P0 加连续 3 次（约 750 ms）宽限，并把全屏/遮挡去抖做成非对称（进入慢、恢复快）。
 11. 壁纸页把质量写死 `quality:'low'`/`deviceTier:1`，没有自适应档位；电池降帧只作用于歌词窗口。P0 的电池停绘与 P1 的降档阶梯要分开实现，不能把歌词的 `frameCap` 当作壁纸已降档。
 
-### 2.3 与正在进行的 DBX 工作隔离
+### 2.3 历史 DBX 工作与现行独立宿主边界
 
-当前 DBX D0–D2 的共享 `Profile`、有界数据/管理管道、原生 feed 和设置流程已实现并通过独立审查，D3 配套候选与完整发布验收仍待完成。DBX 桌面来源由 [DBX 方案](./desktop-dbx.md) 负责，`manual` 启动、不增加插件网络 listener、不改变未连接时插件行为的约束继续有效。
+历史 DBX D0–D2 的共享 `Profile`、有界数据/管理管道、原生 feed 和设置流程曾实现并通过独立审查；当时 D3 的完整发布资格未完成，证据保留在[历史 DBX 方案](./desktop-dbx.md)。2026-11-18 用户要求移出 DBX 桌面功能，相关执行适配器已退役；独立播放器 `desktop-host` 继续拥有桌面功能，DBX 没有桌面来源接入或组件探测。
 
-本文不修改在途 DBX 代码。配置版本、共用 Profile 和 IPC 原语必须按 §4.3 的顺序整合，不能在两个分支上分别占用 schema v3，或复制第二套来源规范化代码。
+已有配置版本、历史 Profile 和共享 IPC 序列化身份保留，不清理旧授权或作品数据，也不将 DBX 设置自动转成独立来源。运行来源由原独立宿主校验；§4.3 的 v3/v4/v5 分配保留当时迁移顺序，不再代表存在并行的 DBX 桌面分支。
 
 ## 3. 总体架构与模块归属
 
@@ -238,7 +242,7 @@ AI 服务迁移在实施时使用根 migrations 的下一个空闲编号，已�
 
 ### 4.1 五类身份不可混用
 
-- `profile`：音乐来源，复用共用 Profile；包含 standalone/dbx、edition、规范化 DataDir，DBX 另含 pluginId。
+- `profile`：音乐来源，复用共用 Profile；执行时只接受 standalone、edition 与规范化 DataDir。历史 dbx/pluginId 序列化域保留供旧设置读取，不作为可选或可连接来源。
 - `workId`：作者写入包的逻辑 UUID，不单独证明作者或覆盖权限；本地索引另有随机 `workKey`，来源作品按 `(sourceId,remoteWorkId)` 映射。
 - `packageHash`：完整安装包 SHA-256，64 个小写十六进制字符；精确标识不可变字节。
 - `displayId`：显示器 device path 与 EDID 身份组成的持久键，不采用显示器枚举下标。
@@ -1395,27 +1399,38 @@ worker 只允许包内入口导航；新窗口、外部导航、下载、剪贴�
 
 JWKS 来自受信 issuer 元数据，缓存最多 1 小时；未知 kid 受刷新频率限制，不按每个恶意 token 发网络请求。发现/JWKS 响应有 64 KiB 上限、不跟随重定向，实际连接经过公网地址验证；私有部署须由管理员显式配置固定受信地址，不能让登录请求提供新 issuer 或 JWKS URL。
 
-账号主键为 `(issuer,sub)`，author/moderator/admin 由 Hub 库授予，不按 email 或客户端 role 声明授权。token 只存 Windows 凭据存储，键绑定 Hub 来源、issuer、clientId 和 sub；刷新在原生单槽执行，失败转需重新登录，不影响本地作品。退出登录清除访问/刷新 token，停止作者操作，不删除本地作品或其独立输入授权。
+原生固定地址策略从 HKLM 64 位视图 `SOFTWARE\Hertz\WallpaperCommunity\NetworkPolicy` 的 `PinnedDestinations` REG_SZ 读取，正文为 `[{"origin":"https://…","addresses":["确切 IP",…]}]`，最多 64 KiB、16 个 origin、每个 16 个 IP。key owner 与写权限仅允许 SYSTEM/Administrators；页面、Hub 发现响应或账号不能授予私网例外。每次连接固定实际地址，TLS 名称与证书验证保留，不跟随重定向、不使用代理或压缩。若 origin 是 literal IP，pin 必须只含该确切 IP。
+
+当前原生发现要求 authorization/token/JWKS 端点与 issuer 同 origin，并明确声明 PKCE S256；尚不支持跨 origin OIDC 端点或 opaque token。回环回调精确使用 `/oauth/callback`，接收完整 HTTP 头后才处理单次 state/code。默认登录不申请或保存刷新凭据；只有用户明确同意后台续期、且部署注册 `offline_access` 才保存刷新 token。提供商即使返回刷新 token，也不能替代用户同意。
+
+账号主键为 `(issuer,sub)`，author/moderator/admin 由 Hub 库授予，不按 email 或客户端 role 声明授权。访问 token 只保留在原生内存；经用户同意的刷新 token 存于 Windows 凭据存储，键绑定 Hub 来源、issuer、clientId 和 sub。刷新在原生单槽执行，失败转需重新登录，不影响本地作品。退出登录清除访问/刷新 token，停止作者操作，不删除本地作品或其独立输入授权。
 
 ### 17.2 最小服务 API
 
-路径为新社区服务的相对路径，不加入现有播放器 `/v1` 路由。
+以下路径属于社区服务自己的 HTTPS origin；播放器的管理服务仍使用自己的 origin 和权限。
 
 | 方法与路径 | 行为 |
 | --- | --- |
-| `GET /api/v1/auth/config` | 该部署的 issuer、public clientId、API audience 和 scope；不返回秘密 |
-| `GET /api/v1/works` | 已发布作品分页/标签/关键词；每页最多 50 |
-| `GET /api/v1/works/{id}` | 元数据和已发布版本，不返回审核私有材料 |
-| `POST /api/v1/works` | 作者创建作品身份，校验标题/许可 |
-| `POST /api/v1/works/{id}/uploads` | 申请单次上传槽，声明包长和 SHA-256 |
-| `PUT /api/v1/uploads/{id}/content` | 有界流式上传，只接受所有者及约定字节 |
-| `POST /api/v1/uploads/{id}/submit` | 完整校验后进入审核，不直接发布 |
-| `POST /api/v1/releases/{id}/review` | 审核通过/拒绝，管理员权限，记录理由 |
-| `GET /api/v1/works/{id}/release` | 已签名不可变发布清单，支持 ETag |
-| `GET /api/v1/packages/{hash}` | 已发布包，Range/ETag，限流 |
-| `GET /api/v1/revocations` | 已签名撤销清单与递增序号 |
-| `POST /api/v1/reports` | 有界举报，关联作品/版本/原因 |
-| `POST /api/v1/releases/{id}/revoke` | 管理员撤销、签名与审计 |
+| `GET /.well-known/hertz-wallpaper-community`、`GET /v1/auth/config` | 部署身份、issuer、public clientId、API audience、scope 和根指纹；不建立信任 |
+| `GET /v1/keys` | 完整离线根授权链，原生仍须确认或核对原根指纹 |
+| `GET /v1/works` | 已发布作品分页/关键词；每页最多 50 |
+| `POST /v1/works` | 作者创建作品身份，校验标题/许可 |
+| `GET /v1/me/works`、`GET /v1/me/releases` | 当前作者的作品与候选状态 |
+| `POST /v1/works/{work}/uploads` | 申请单次上传槽，声明包长和 SHA-256 |
+| `GET /v1/uploads/{id}` | 所属作者按原 uploadId 查询上传结果 |
+| `PUT /v1/uploads/{id}/content` | 有界流式上传，只接受所有者及约定字节 |
+| `POST /v1/uploads/{id}/submit` | 完整校验后进入审核，不直接发布 |
+| `GET /v1/releases/{id}`、`GET /v1/releases/{id}/package` | 作者或审核者读取隔离候选和包 |
+| `GET /v1/review-queue`、`POST /v1/releases/{id}/review` | 审核角色读取队列、绑定确切包/权限/正文审核 |
+| `POST /v1/releases/{id}/publish` | 登记发布操作，核对 Signer 独立审批并消费签名回执 |
+| `GET /v1/publications/{id}` | 按原操作 UUID/digest 恢复；未知签名结果只查询 |
+| `GET /v1/works/{work}/release` | 最新可公开版本的原始签名 JSON 信封与 ETag |
+| `GET /v1/works/{work}/package` | 最新公开包，Range/ETag，限流 |
+| `GET /v1/works/{work}/releases/{id}`、`GET /v1/works/{work}/releases/{id}/package` | 固定 releaseId 的签名信封与包，下载不重新选择 latest |
+| `GET /v1/revocations` | 已签名完整撤销清单与递增序号 |
+| `POST /v1/revocations/prepare`、`POST /v1/releases/{id}/revoke` | 构造完整清单、独立批准/签名与审计 |
+| `POST /v1/releases/{id}/withdraw` | 作者撤回未签名候选 |
+| `POST /v1/reports` | 有界举报，关联作品/版本/原因 |
 
 服务表为 users、works、releases、uploads、reviews、reports、revocations、audit_events；release 固定 packageHash、权限集合、作者、许可、单调版本和状态。上传单作者并发 1、全服务 4、30 分钟期限、512 MiB 上限；配额默认每作者 5 GiB，未提交对象 24 小时回收。公开浏览每 IP 120 次/分钟，上传申请 10 次/小时；下载并发每 IP 4，响应流背压有界。
 
@@ -1427,7 +1442,11 @@ JWKS 来自受信 issuer 元数据，缓存最多 1 小时；未知 kid 受刷�
 
 签名私钥不在上传/API 进程中加载。独立 signer 只接受两个类型化操作：签已审核 release、签已批准 revocation snapshot；根密钥离线，只负责授予有明确 purpose 与代际的发布/撤销公钥。桌面首次添加社区时显示并确认根公钥指纹；后续密钥轮换必须由已信任根链验证，不能从同一个被替换的下载响应重新信任新根。
 
+根授权链最多 256 KiB、128 代；每代绑定 hubId、generation、previousDigest、rootKeyId、release/revocations 两种用途公钥及可选 nextRoot。独立 `hertz-wallpaper-root` 只在显式交互终端使用离线 seed 签授权正文，并写入新的链文件；在线 Signer 没有根 seed 配置。Signer schema2 核对工作 seed、公钥链、最高代际与独立授权检查点，Hub 只保存公钥链和精确操作回执。发布丢响应后只查询原 UUID/正文摘要；若 Signer 只有 approved 而无 intent，须由配置的 Hub OS 主体显式签原 UUID，不能自动重派或重造正文。registered 表示已有意图但结果待恢复，Hub 保持 unknown。
+
 trust.db 持久保存每来源根身份、已验证密钥链与最高代际；release_watermarks 按 sourceId/remoteWorkId/channel 保存最高已接受版本及 hash。P3 只开放 stable 频道。同版本不同 hash 拒绝；低于水位的网络响应不能成为自动更新候选。用户显式选择已安装旧版本只改配置选择，不降低水位，不解除撤销；普通程序/库备份恢复也不回滚 trust.db。用户若主动清空全部本机信任数据，属于重新建信任，不能承诺记住清空前的历史。
+
+原生 trust.db 使用独立 application_id/schema、单连接写者、WAL 与 FULL 同步事务；已有库先以 SQLite 只读 committed 视图核对身份，包含尚未合并的 WAL，不能仅从主文件推断恢复状态。主文件和 sidecar 拒绝重定向，恢复行在 SQL 物化前有大小界限。根链/撤销/发布水位先完成安全事务，wallpaper.db 的来源、订阅和安装索引随后只作产品投影；原 ImportJobs/AssetStore 仍负责不可变安装。安全时间水位持久化，时钟回退显示陈旧；新社区 Web 的激活仍须同时满足新鲜撤销和 G3-S，当前执行入口保持关闭。
 
 撤销签名字节使用独立域 `HERTZ-WALLPAPER-REVOCATIONS-V1`＋LF＋同一规范化编码；正文固定 hubId、sequence、issuedAt、expiresAt、entries、keyId。sequence 单调递增，同序号不同摘要拒绝，过期清单不算最新；有效期最多 24 小时。entries 为 packageHash/reason/effectiveAt，不接受任意执行动作。完整清单上限 1 MiB，达到上限停止新增发布并要求协议升级，不截断漏项。
 
@@ -1440,6 +1459,10 @@ trust.db 持久保存每来源根身份、已验证密钥链与最高代际；re
 更新顺序：校验发布清单签名/版本 → 下载到 staging → 校验包与权限 → 安装新不可变版本 → 提示差异 → 用户确认或既定自动策略 → 新配置 revision 切换。权限增加、资源 kind 变成 web、最低协议变化均必须重新确认；自动策略不能替代授权。
 
 自动应用只在组轮播切点或下次启动执行，保留一个上一有效版本。失败保持新配置的失败事实，提供显式“回到上一版本”操作；回滚产生新的配置 revision，不偷偷倒退。旧版本有 active/draft/playlist 引用时不得清理。
+
+下载意图绑定 Config revision/摘要、显示拓扑、组选择、订阅 revision、原固定版本和可选 playlist revision。原轮播在确认、候选准备和 Config 提交前均重查；候选列表由原 Repository 新建，保留其它项目，直到 Config 提交才成为活动选择。准备的 reference 传给原单屏/镜像 runner，首帧回执和 decoder 交接沿原 owner。手工选择、已提交配置/拓扑/订阅/列表变化使旧意图持久标记 stale，候选保留供重新确认；编辑、保存、删除或列表事务的短暂占用只暂停自动操作，不误记为永久过期。
+
+社区更新 journal 区分下载、安装、待确认、ready、apply_requested、应用、失败与 stale。超时或重启只按原 requestId/jobId 和 Config command/digest/revision 收敛，不能从文件已下载推断配置已应用；所有终态对同候选 hash 去重，避免后台反复下载已失败或过期候选。设置入口显示完整根指纹、账号/续期选择、撤销陈旧/时钟回退、版本差异和原操作恢复；作者元数据只按文本展示。
 
 ## 18. 安装、升级与运维
 
@@ -1502,7 +1525,7 @@ flowchart LR
 - 图像文件暂存属于服务端 AI artifact store；安装后属于桌面 AssetStore，两者通过字节哈希交接而不是共享可写目录。服务不能直接修改 `wallpaper.db`，原生也不直接读取音乐数据库。
 - 同一 Windows 用户可以不连接 AI 服务而继续导入、编辑、播放本地作品；本地明确切换与确定性推荐也不依赖服务。
 
-**形态决定：**首版完整生成链路只连接用户显式选择、已经运行的 standalone Standard/Full 服务；没有服务时提示启动/连接，不自动拉起播放器。DBX 形态先保留原生本地推荐/切换和人工导入，不能扩大既有 DBX 只读 feed 或增加插件网络 listener。DBX 生成桥须在后续独立同步 DBX 合同并验收后开放，本轮不把 standalone 成功写成 DBX 成功。
+**形态决定：**完整壁纸生成、本地推荐/切换和人工导入属于独立播放器；生成只连接用户显式选择、已经运行的 standalone Standard/Full 服务，没有服务时提示启动/连接。2026-11-18 起 DBX 不再提供桌面壁纸能力或生成桥；其音乐与沉浸舞台业务保持原生命周期。
 
 原生与服务配对使用现有 grant 存储/撤销机制的**新增短会话交付模式**，不是读取或复用 `wallpaper-key`、overlay key、MCP key 或全权 discovery token：
 
@@ -1781,6 +1804,8 @@ P0-02/P0-03/P0-07 可并行；P0-04 的配置合入依赖共享 v3 身份迁移�
 | P3-06 运营与发布 | 配套打包、许可清单、备份恢复、隔离安全测试 | 服务真实部署、作者发布到另一台客户端使用的闭环 |
 
 P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须同时通过网页隔离与社区出口，不能只把页面入口隐藏后宣称全部完成。
+
+2026-11-18 订阅回滚源码续接：review 和申请共用原 Subscriptions 的确切版本选择，确认与 apply_requested 原子登记，允许正常 applied 后显式回滚；安全检查针对本次旧目标，未知申请不可覆盖。Config 收据联合匹配 requestId/digest/revision，同一已提交操作的迟到错误可补记且不重投影；原内容写门覆盖版本核对到申请，原 Library 引用检查加入未决 previous/apply hash，完成事务保留 journal 的回滚目标。已有 apply_rollback、实际 apply hash 和 rollbackAvailable 投影到可信设置界面；已知不可用/未通过安全检查的旧目标禁用回滚并提示核对/同步，最终激活、grant、能力和预算仍重查。playlist revision 沿原 u64 合同。只实施与限定格式化，当前 implemented/needs-verification，目标 active；没有编译、测试、GUI、服务、真实签名或恢复资格证据。
 
 ### 20.5 AI：复用底座，逐层增加能力
 

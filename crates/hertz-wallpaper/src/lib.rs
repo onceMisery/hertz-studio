@@ -11,6 +11,7 @@ pub mod ai;
 pub mod archive;
 pub mod catalog;
 pub mod document;
+pub mod external_requests;
 pub mod generation;
 #[cfg(feature = "image-prepare")]
 pub mod image_prepare;
@@ -25,6 +26,8 @@ pub mod model_structure;
 pub mod pairing;
 pub mod paths;
 pub mod properties;
+#[cfg(feature = "community-release")]
+pub mod release;
 mod resource_container_io;
 pub mod texture_container;
 

@@ -126,7 +126,10 @@ pass('控制面与托盘全部指向同一个进程内 owner');
 
 // —— 2. 唯一 owner 与依赖接线 ——
 assert.ok(lib.includes('pub mod desktop_host;'), 'lib.rs 未导出 desktop_host');
-assert.ok(studioCargo.includes('hertz-desktop = { path = "../hertz-desktop" }'), '播放器未依赖桌面宿主库');
+assert.ok(studioCargo.includes('hertz-desktop = { path = "../hertz-desktop", optional = true }'), '播放器未使用可选桌面宿主库');
+assert.ok(studioCargo.includes('desktop-host = ["dep:hertz-desktop"]'), '独立桌面 feature 未接线');
+const pluginCargo = read(path.join(ROOT, 'plugin/backend/Cargo.toml'));
+assert.ok(pluginCargo.includes('default-features = false'), 'DBX 不能启用独立桌面默认 feature');
 assert.ok(codeOnly(host).includes('start_embedded'), 'owner 未调用库入口');
 assert.ok(codeOnly(host).includes('pub fn shutdown()'), 'owner 缺少退出收口');
 assert.ok(codeOnly(host).includes('autostart_command'), '开机启动项未指向播放器');

@@ -1605,11 +1605,19 @@ pub(crate) fn dialog_error(message: &str) {
 }
 
 pub(crate) fn confirm_wallpaper_generation(hwnd: HWND, message: &str) -> bool {
+    confirm_wallpaper_action(hwnd, "Hertz 壁纸生成", message)
+}
+
+pub(crate) fn confirm_wallpaper_switch(hwnd: HWND, message: &str) -> bool {
+    confirm_wallpaper_action(hwnd, "Hertz 壁纸切换", message)
+}
+
+fn confirm_wallpaper_action(hwnd: HWND, title: &str, message: &str) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO,
     };
     let text = to_wide(message);
-    let title = to_wide("Hertz 壁纸生成");
+    let title = to_wide(title);
     unsafe {
         MessageBoxW(
             hwnd,

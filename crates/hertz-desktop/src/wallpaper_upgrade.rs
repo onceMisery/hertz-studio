@@ -48,16 +48,41 @@ fn sqlx_call_charge() -> Result<budget::SqlxPoolCharge> {
 pub(crate) struct AdmittedPool {
     pool: Option<SqlitePool>,
     root: PathBuf,
+    database: &'static str,
     charge: Option<budget::SqlxPoolCharge>,
 }
 
 impl AdmittedPool {
     fn new(pool: SqlitePool, root: PathBuf, charge: budget::SqlxPoolCharge) -> Self {
+        Self::for_database(pool, root, "wallpaper.db", charge)
+    }
+
+    pub(crate) fn for_database(pool: SqlitePool, root: PathBuf, database: &'static str, charge: budget::SqlxPoolCharge) -> Self {
         Self {
             pool: Some(pool),
             root,
+            database,
             charge: Some(charge),
         }
+    }
+
+    /// An identity preflight must release its actual database handles before a
+    /// writable pool opens the same files. Retain the admission on failed exit.
+    pub(crate) async fn close_before_reopen(mut self) -> Result<()> {
+        if let Some(pool) = self.pool.take() {
+            pool.close().await;
+            drop(pool);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !sqlite_physically_exited(&self.root, self.database) {
+                if std::time::Instant::now() >= deadline {
+                    if let Some(charge) = self.charge.take() { std::mem::forget(charge); }
+                    anyhow::bail!("SQLite identity preflight did not physically close");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        self.charge.take();
+        Ok(())
     }
 
     /// Explicit receipt: `SqlitePool::close` closes idle connections, and the
@@ -70,7 +95,7 @@ impl AdmittedPool {
             pool.close().await;
             drop(pool);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while !sqlite_physically_exited(&self.root) {
+            while !sqlite_physically_exited(&self.root, self.database) {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "SQLite owners did not physically exit"
@@ -86,8 +111,8 @@ impl AdmittedPool {
 /// `detach` removes a raw connection from `size()`. Every SQLite connection
 /// worker holds an OS file handle for this database (and its sidecars), so the
 /// exclusive OS probe is the physical exit receipt for all of them.
-fn sqlite_physically_exited(root: &Path) -> bool {
-    crate::root_owner::probe_database_handles(root).is_ok()
+fn sqlite_physically_exited(root: &Path, database: &str) -> bool {
+    crate::root_owner::probe_named_database_handles(root, database).is_ok()
 }
 
 impl Deref for AdmittedPool {
@@ -109,6 +134,7 @@ impl Drop for AdmittedPool {
         // shutdown SQLx documents for `close()` plus the size barrier for
         // checked-out connections, then refunds the prior fee.
         let root = self.root.clone();
+        let database = self.database;
         std::thread::Builder::new()
             .name("hertz-sqlite-close".into())
             .spawn(move || {
@@ -123,13 +149,13 @@ impl Drop for AdmittedPool {
                 drop(pool);
                 let exited = {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                    while !sqlite_physically_exited(&root) {
+                    while !sqlite_physically_exited(&root, database) {
                         if std::time::Instant::now() >= deadline {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
-                    sqlite_physically_exited(&root)
+                    sqlite_physically_exited(&root, database)
                 };
                 if exited {
                     drop(charge);
@@ -323,6 +349,9 @@ async fn reset_external_recovery(root: &Path, pool: &SqlitePool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
     crate::wallpaper::ai_receipts::AiReceipts::cleanup_revoked(&mut tx).await?;
+    sqlx::query("UPDATE ai_requests SET state='interrupted',terminal_at=?,error_code='database_restored' WHERE state IN ('pending_confirmation','accepted')")
+        .bind(crate::wallpaper::library::now_secs())
+        .execute(&mut *tx).await?;
     sqlx::query("DELETE FROM ai_asset_sets")
         .execute(&mut *tx)
         .await?;

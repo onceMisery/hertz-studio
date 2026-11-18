@@ -159,19 +159,12 @@ impl<'a> AiReceipts<'a> {
         if expiry <= now_secs() {
             return Err(JobError::new("ai_artifact_expired", "候选已到期"));
         }
-        // Receipts are bounded metadata. Keep terminal identities for replay,
-        // refusing new admissions rather than erasing a saved identity.
-        let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_receipts")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database)?;
-        if records >= 500 {
-            return Err(JobError::new(
-                "candidate_capacity_exceeded",
-                "候选历史已达上限",
-            ));
-        }
         Self::expire_in(&mut tx).await?;
+        super::ai_receipt_budget::ensure_room(
+            &mut tx,
+            super::ai_receipt_budget::Reservation::Candidate,
+        )
+        .await?;
         let (count,size):(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(state IN ('preparing','failed','previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('preparing','failed','previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
             .fetch_one(&mut *tx).await.map_err(database)?;
         let document_json =

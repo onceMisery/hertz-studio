@@ -101,6 +101,13 @@ pub(crate) struct Deletion {
 
 pub struct Library {
     pool: crate::wallpaper_upgrade::AdmittedPool,
+    trust: Arc<super::community::TrustStore>,
+    pub(crate) ai_request_inputs:
+        std::sync::Mutex<std::collections::BTreeMap<String, super::ai_requests::PendingRequest>>,
+    pub(crate) ai_requests_writer: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    pub(crate) ai_request_commit_hook:
+        std::sync::Mutex<Option<Arc<super::ai_requests::AdmitCommitHook>>>,
     pub(crate) ai_receipts_changed: tokio::sync::Notify,
     #[allow(dead_code)]
     path: PathBuf,
@@ -114,14 +121,24 @@ impl Library {
             .await
             .map_err(|error| JobError::database(format!("{error:#}")))?;
         let ai_receipts_changed = tokio::sync::Notify::new();
+        let trust = super::community::TrustStore::open(dir).await?;
         // One initial sweep discovers restored candidates; an empty library
         // has no recurring AI maintenance timer.
         ai_receipts_changed.notify_one();
-        Ok(Self {
+        let library = Self {
             pool,
+            trust,
             path,
             ai_receipts_changed,
-        })
+            ai_request_inputs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            ai_requests_writer: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            ai_request_commit_hook: std::sync::Mutex::new(None),
+        };
+        super::ai_requests::AiRequests::new(&library)
+            .recover_pending(now_secs())
+            .await?;
+        Ok(library)
     }
 
     /// Pool 句柄仅供同类内部的库间操作（崩溃恢复）使用。
@@ -129,10 +146,19 @@ impl Library {
         &self.pool
     }
 
+    pub(crate) fn trust(&self) -> &Arc<super::community::TrustStore> { &self.trust }
+    pub(crate) fn root(&self) -> &Path { self.path.parent().expect("library path has a root") }
+
     /// 安装事务（§7.2：BEGIN IMMEDIATE 插入作品/版本/包）。幂等规则：
     /// 相同 hash 再导入返回既有事实；同 work+version 不同 hash 拒绝；
     /// 来源内相同 workId 复用既有 work_key，不建立第二份作品。
     pub async fn install(&self, work: &InstallWork) -> Result<()> {
+        self.trust.security_check(&work.package_hash)?;
+        let release_id=if work.source_id!=LOCAL_SOURCE {
+            let receipt=self.trust.installed_receipt(&work.source_id,&work.package_hash).await?;
+            if receipt.body().work_id!=work.remote_work_id||receipt.body().version!=u64::from(work.version)||receipt.body().bytes!=work.package_bytes{return Err(JobError::new("release_package_mismatch","安装索引与受信回执不一致"));}
+            Some(receipt.body().release_id.clone())
+        } else {None};
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -239,6 +265,10 @@ impl Library {
             }
         }
         super::ai_receipts::AiReceipts::finish_image_install(&mut tx, work, &work_key).await?;
+        if let Some(release)=release_id {
+            sqlx::query("UPDATE versions SET release_id=?3 WHERE work_key=?1 AND version=?2 AND (release_id IS NULL OR release_id=?3)").bind(&work_key).bind(work.version as i64).bind(release).execute(&mut *tx).await.map_err(|e|JobError::database(e.to_string()))?;
+        }
+        super::community::subscriptions::Subscriptions::finish_install(&mut tx, work, &work_key).await?;
         tx.commit()
             .await
             .map_err(|error| JobError::database(error.to_string()))?;
@@ -396,6 +426,7 @@ impl Library {
         work_key: &str,
         package_hash: &str,
     ) -> Result<bool> {
+        self.trust.security_check(package_hash)?;
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=?1 AND v.package_hash=?2 AND p.state='installed')")
             .bind(work_key).bind(package_hash).fetch_one(&*self.pool).await
             .map_err(|error| JobError::database(error.to_string()))
@@ -408,6 +439,7 @@ impl Library {
         work_key: &str,
         package_hash: &str,
     ) -> Result<hertz_wallpaper::Manifest> {
+        self.trust.security_check(package_hash)?;
         let json: Option<String> = sqlx::query_scalar("SELECT p.manifest_json FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=?1 AND v.package_hash=?2 AND p.state IN ('installed','unavailable') AND length(CAST(p.manifest_json AS BLOB))<=?3 LIMIT 1")
             .bind(work_key).bind(package_hash).bind(hertz_wallpaper::MAX_MANIFEST_BYTES as i64)
             .fetch_optional(&*self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
@@ -453,6 +485,27 @@ impl Library {
         };
         if version.is_some() && targets.is_empty() {
             return Err(JobError::new("version_not_found", "作品版本不存在"));
+        }
+        for candidate in &targets {
+            let retained: bool = sqlx::query_scalar(concat!(
+                "SELECT EXISTS(SELECT 1 FROM community_subscriptions ",
+                "WHERE current_hash=?1 OR previous_hash=?1 ",
+                "UNION ALL SELECT 1 FROM community_updates ",
+                "WHERE (candidate_hash=?1 OR previous_hash=?1) ",
+                "AND state IN ('queued','downloading','installed','ready','awaiting_confirmation','apply_requested') ",
+                "UNION ALL SELECT 1 FROM community_updates ",
+                "WHERE apply_package_hash=?1 AND state='apply_requested')"
+            ))
+            .bind(&candidate.package_hash)
+            .fetch_one(self.pool())
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+            if retained {
+                return Err(JobError::new(
+                    "version_referenced",
+                    "订阅当前、上一有效版本或未决更新仍引用此包",
+                ));
+            }
         }
         let target_keys: HashSet<&str> =
             targets.iter().map(|row| row.version_key.as_str()).collect();

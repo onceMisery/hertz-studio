@@ -54,7 +54,7 @@ async function main() {
     await page.goto('http://127.0.0.1:' + server.address().port);
     await page.evaluate(({ lyrics, options }) => {
       Theme.init();
-      window.hertzHost = { isDbx: !!options.dbx };
+      window.hertzHost = { isDbx: !!options.dbx, desktopEnabled: !options.dbx };
       window.test = { calls: [], revision: 9, lyrics, editing: false, owner: null, holdApply: false, failApply: false };
       const t = window.test;
       t.snapshot = owner => ({ ok: true, revision: t.revision, lyricsConfig: structuredClone(t.lyrics),

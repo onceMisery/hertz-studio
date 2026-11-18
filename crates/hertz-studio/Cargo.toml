@@ -9,11 +9,13 @@ authors.workspace = true
 description = "The hertz-studio service binary: HTTP + WebSocket API and web UI"
 
 [features]
-default = []
+default = ["desktop-host"]
 full = ["dep:aes", "dep:cbc", "dep:num-bigint", "dep:num-traits"]
+# 桌面歌词、壁纸与小窗只由独立播放器承载；DBX sidecar 关闭默认 feature。
+desktop-host = ["dep:hertz-desktop"]
 # R5 原生主窗口原型（--window）：默认关——CI 三平台矩阵不引入 GTK/WebView2
 # 依赖；交付形态的默认开关在原型验证通过后于 R5 实施评审中定。
-native-window = ["dep:tao", "dep:wry", "dep:tray-icon", "dep:windows", "dep:webview2-com", "dep:windows-core-webview"]
+native-window = ["desktop-host", "dep:tao", "dep:wry", "dep:tray-icon", "dep:windows", "dep:webview2-com", "dep:windows-core-webview"]
 
 [dependencies]
 vmusic-core = { workspace = true }
@@ -101,7 +103,7 @@ windows = { version = "=0.61.1", optional = true, features = [
   "Win32_UI_Shell_Common",
 ] }
 # 桌面歌词/壁纸窗口已由播放器进程内直接调用，不再是配对的外部 exe。
-hertz-desktop = { path = "../hertz-desktop" }
+hertz-desktop = { path = "../hertz-desktop", optional = true }
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",

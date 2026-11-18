@@ -963,6 +963,9 @@ impl Request {
                     !matches!(
                         command.as_str(),
                         "wallpaper.apply"
+                            | "wallpaper.community.apply"
+                            | "wallpaper.community.auto"
+                            | "wallpaper.community.download"
                             | "wallpaper.ai.recommend"
                             | "wallpaper.ai.confirm"
                             | "config.commit"

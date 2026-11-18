@@ -23,8 +23,6 @@ mod config;
 #[cfg(windows)]
 mod config_journal;
 #[cfg(windows)]
-mod dbx_feed;
-#[cfg(windows)]
 mod feed;
 #[cfg(windows)]
 mod host;

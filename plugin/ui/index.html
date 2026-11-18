@@ -3,12 +3,18 @@
      Copyright (c) 2026 hertz-studio contributors
 
      HertzStudio Music Player 中文界面：既有业务 DOM，由响应式布局装配。 -->
-<html lang="zh-CN">
+<html lang="zh-CN" data-skin="hertz">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0b0d">
 <link rel="stylesheet" href="startup.css">
+<!-- 首帧主题：设计目录与主题机制在样式表之前同步加载，并在 <body> 解析前把
+     已保存的主题令牌写到 <html> 上。否则第一帧会先按 :root 默认配色（旧外观）
+     画一遍，等 app.js 启动后才跳成用户选择的主题。 -->
+<script src="design/design-themes.js"></script>
+<script src="themes.js"></script>
+<script>if (window.Theme) window.Theme.init();</script>
 <!-- 与原生窗口共用 Hertz 声波字母图标，内联后离线与插件宿主均可显示。 -->
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22256%22%20height%3D%22256%22%20viewBox%3D%220%200%20256%20256%22%3E%0A%20%20%3Ctitle%3EHertz%20Studio%3C%2Ftitle%3E%0A%20%20%3Crect%20x%3D%228%22%20y%3D%228%22%20width%3D%22240%22%20height%3D%22240%22%20rx%3D%2260%22%20fill%3D%22%23171719%22%2F%3E%0A%20%20%3Crect%20x%3D%228.5%22%20y%3D%228.5%22%20width%3D%22239%22%20height%3D%22239%22%20rx%3D%2259.5%22%20fill%3D%22none%22%20stroke%3D%22%23484746%22%2F%3E%0A%20%20%3Cg%20fill%3D%22%23f4f1e9%22%3E%0A%20%20%20%20%3Crect%20x%3D%2243%22%20y%3D%22108%22%20width%3D%2214%22%20height%3D%2240%22%20rx%3D%227%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%2276%22%20y%3D%2262%22%20width%3D%2220%22%20height%3D%22132%22%20rx%3D%2210%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%2291%22%20y%3D%22119%22%20width%3D%2274%22%20height%3D%2218%22%20rx%3D%229%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%22120%22%20y%3D%2294%22%20width%3D%2216%22%20height%3D%2268%22%20rx%3D%228%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%22160%22%20y%3D%2262%22%20width%3D%2220%22%20height%3D%22132%22%20rx%3D%2210%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%22199%22%20y%3D%22108%22%20width%3D%2214%22%20height%3D%2240%22%20rx%3D%227%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E">
 <title>Hertz Studio · 音乐播放器</title>
@@ -29,7 +35,9 @@
      消费方）。排在 style.css 之后、页面样式之前；页面 CSS 不得再藏全局 chrome。 -->
 <link rel="stylesheet" href="shell/shell.css">
 <link rel="stylesheet" href="now-playing.css">
-<link rel="stylesheet" href="desktop-lyrics-settings.css">
+<!-- form:desktop -->
+<link rel="stylesheet" data-desktop-feature href="desktop-lyrics-settings.css">
+<!-- form:end -->
 <link rel="stylesheet" href="stage.css">
 <link rel="stylesheet" href="creative.css">
 <link rel="stylesheet" href="stage3d.css">
@@ -1298,6 +1306,14 @@
               <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="stage:intent_validate"><span>校验舞台草稿</span></label>
               <p class="hint set-note">舞台工具还需要在工坊相关设置中单独开启。</p>
             </fieldset>
+<!-- form:desktop -->
+            <fieldset class="ai-grant-scope-group" data-desktop-feature>
+              <legend>壁纸申请</legend>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="wallpaper:catalog_read"><span>分享壁纸目录（标题与标签）</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="wallpaper:request"><span>提出壁纸申请（本机确认）</span></label>
+              <p class="hint set-note">需要打开本机壁纸 AI 面板。生成和切换均等待本机确认；申请权限不直接执行操作。</p>
+            </fieldset>
+<!-- form:end -->
           </div>
           <div class="set-row">
             <span></span>
@@ -1316,7 +1332,8 @@
         </div>
       </div>
 
-      <fieldset class="set-group dls-settings" id="desktop-lyrics-settings" tabindex="-1" aria-describedby="dls-intro">
+<!-- form:desktop -->
+      <fieldset class="set-group dls-settings" id="desktop-lyrics-settings" data-desktop-feature tabindex="-1" aria-describedby="dls-intro">
         <legend class="set-title">桌面歌词</legend>
         <div class="dls-heading">
           <p class="dls-note" id="dls-intro">让歌词留在桌面上。在这里调整样式，应用后生效。</p>
@@ -1402,7 +1419,7 @@
         </div>
         <p class="hint set-note" id="set-desktop-lyrics-note">随主播放器运行，支持透明置顶、锁定穿透和托盘找回。关闭主窗口后仍可显示，退出播放器时一同关闭。</p>
       </div>
-      <div class="set-group" id="desktop-settings-group">
+      <div class="set-group" id="desktop-settings-group" data-desktop-feature>
         <h2 class="set-title">桌面</h2>
         <div class="set-row" id="set-wallpaper-row">
           <label>桌面壁纸</label>
@@ -1428,33 +1445,8 @@
         <div class="set-actions" id="desktop-calibration-revoke-actions" hidden>
           <button type="button" class="btn" id="desktop-calibration-revoke-retry">重试撤销校准授权</button>
         </div>
-        <section id="dbx-desktop-settings" class="dbx-desktop-settings" aria-labelledby="dbx-desktop-title" tabindex="-1" hidden>
-          <h3 id="dbx-desktop-title">桌面歌词与壁纸（可选）</h3>
-          <p class="hint">连接后，允许独立桌面组件只读本插件的歌词与音乐响应数据。音乐来源切换、歌词与壁纸启用都由原生中心管理；打开设置或检测不会授权，也不会启用窗口。</p>
-          <p class="hint" id="dbx-desktop-status" role="status" aria-live="polite">尚未检测</p>
-          <dl id="dbx-desktop-facts" class="dbx-desktop-facts"></dl>
-          <p class="hint" id="dbx-desktop-result" role="status" aria-live="polite"></p>
-          <div class="set-actions dbx-desktop-actions">
-            <button type="button" class="btn" id="dbx-desktop-refresh">重新检测</button>
-            <button type="button" class="btn primary" id="dbx-desktop-connect" disabled>连接并授权</button>
-            <button type="button" class="btn" id="dbx-desktop-open" hidden>打开原生中心</button>
-            <button type="button" class="btn" id="dbx-desktop-revoke" disabled>撤销授权</button>
-          </div>
-          <details class="dbx-desktop-guide">
-            <summary>安装、升级与手动启动</summary>
-            <ol>
-              <li>从配套插件版本的发布说明获取 Windows 11 x64 桌面组件包，并核对 SHA-256。升级前先从托盘退出旧组件。</li>
-              <li>将完整组件包解压到 <code>%LOCALAPPDATA%\Hertz\Desktop\bin\</code>，保留 exe、desktop-component.json 和随包文档。</li>
-              <li>手动运行该目录的 <code>hertz-desktop.exe</code>，再点「重新检测」。DBX 不代为启动组件。</li>
-              <li>点「连接并授权」后，在原生中心选择本插件来源，并按需开启歌词或壁纸。</li>
-            </ol>
-            <p class="hint">安装指南（可选中文字，在浏览器打开）：</p>
-            <p><code id="dbx-desktop-guide-url" tabindex="0">https://github.com/onceMisery/hertz-studio/blob/main/docs/desktop-component-install.md</code></p>
-            <button type="button" class="btn" id="dbx-desktop-copy-guide">复制指南地址</button>
-            <p class="hint" id="dbx-desktop-copy-result" role="status"></p>
-          </details>
-        </section>
       </div>
+<!-- form:end -->
       <div class="set-group">
         <h2 class="set-title">歌词偏好</h2>
         <div class="set-row">
@@ -1940,10 +1932,10 @@
         <div class="set-row" id="window-lifecycle-setting" hidden>
           <label for="window-lifecycle-behavior">关闭主窗口</label>
           <select id="window-lifecycle-behavior" aria-describedby="window-lifecycle-setting-status" disabled>
-            <option value="hide">隐藏到托盘（默认）</option>
-            <option value="quit">退出播放器</option>
+            <option value="quit">退出播放器（默认）</option>
+            <option value="hide">隐藏到托盘</option>
           </select>
-          <p class="hint" id="window-lifecycle-setting-status" role="status">隐藏后音乐继续播放，可从系统托盘恢复主窗口。</p>
+          <p class="hint" id="window-lifecycle-setting-status" role="status">关闭主窗口时退出播放器；选择“隐藏到托盘”后音乐继续播放，可从系统托盘恢复。</p>
           <button type="button" class="btn tiny" id="window-lifecycle-retry" hidden>重新读取</button>
         </div>
         <div class="set-row">
@@ -2148,7 +2140,9 @@
 
   <div class="bar-right">
     <button id="bar-queue" class="ctrl" type="button" title="播放队列" aria-label="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button>
-    <button id="bar-desktop-settings" class="ctrl" type="button" title="桌面歌词设置" aria-label="桌面歌词设置" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
+<!-- form:desktop -->
+    <button id="bar-desktop-settings" data-desktop-feature class="ctrl" type="button" title="桌面歌词设置" aria-label="桌面歌词设置" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
+<!-- form:end -->
     <button id="bar-player-expand" class="ctrl" type="button" title="展开播放页" aria-label="展开播放页"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg></button>
     <button id="sleep-timer" class="btn-pill st-pill" title="睡眠定时器" aria-label="睡眠定时器" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>
@@ -2651,9 +2645,6 @@
 <!-- 独立封面墙与 Hertz 布局在宿主初始化之前登记生命周期。 -->
 <script defer src="cover-wall.js"></script>
 <script defer src="skins/skin.hertz.js"></script>
-<!-- 设计源（生成物）：内置主题目录数据，先于 themes.js 装载。 -->
-<script defer src="design/design-themes.js"></script>
-<script defer src="themes.js"></script>
 <script defer src="theme-picker.js"></script>
 <script defer src="anime-interactions.js"></script>
 <script defer src="perf-probe.js"></script>
@@ -3019,10 +3010,11 @@
     <button type="button" class="btn primary" id="window-lifecycle-approve" disabled>退出播放器</button>
   </div>
 </dialog>
-<script defer src="desktop-settings.js"></script>
-<script defer src="desktop-lyrics-settings.js"></script>
-<link rel="stylesheet" href="wallpaper-settings.css">
-<script defer src="wallpaper-settings.js"></script>
+<!-- form:desktop -->
+<script defer data-desktop-feature src="desktop-lyrics-settings.js"></script>
+<link rel="stylesheet" data-desktop-feature href="wallpaper-settings.css">
+<script defer data-desktop-feature src="wallpaper-settings.js"></script>
+<!-- form:end -->
 <script defer src="window-lifecycle.js"></script>
 <script defer src="window-sleep.js"></script>
 <script defer src="volume-controls.js"></script>

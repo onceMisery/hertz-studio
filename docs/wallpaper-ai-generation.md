@@ -1,8 +1,35 @@
 # Hertz 壁纸受管 AI：生成、推荐与切换实施记录
 
+2026-11-18 形态边界：本文的壁纸推荐/生成/配对与原生应用入口只属于独立播放器 `desktop-host`。DBX Standard/Full 不再注册壁纸 capability、桌面配对或壁纸 API/RPC，也不包含对应桌面 UI；原普通音乐、歌词与沉浸舞台业务保留。历史开发证据保持其原始候选范围，当前迁移验证见[验收矩阵](release-validation.md)。
+
 记录 A06 工作包（设计 docs/desktop-wallpaper.md §19/§20.5）各切片的实施与
 验收状态。AI-01 的批准实施细节见其检查点与 2026-11-09 的
 [壁纸设计主文档](desktop-wallpaper.md)条目；本表只汇总可核验事实。
+
+2026-11-17：显式 `openai-compatible` 文本配置复用原 Responses transport、
+任务 runner、报价与用量记录，为 builtin/composition 生成提供共同合同。
+非秘密配置写在选定 DataDir 的 `config.toml`：
+
+```toml
+[ai]
+provider = "openai-compatible"
+origin = "https://your-provider.example/v1"
+model = "your-explicit-model"
+```
+
+`origin` 只接受明确的公网 HTTPS `/v1` base URL；禁止用户信息、query、fragment、
+代理、重定向和自动重试。兼容 provider 的凭据按规范化 base URL 单独存入原秘密
+后端，不复用官方 OpenAI 或其它端点凭据；配置中不放 key。改配置后重启服务，
+在原凭据入口配置 key，再显式配对本机面板并查看报价/确认。未核定美元费率时
+金额保持未知，只限制输入/输出 token 并记录实际用量，不展示零价或美元封顶。
+该文本适配器不赋予图像生成资格。
+
+Windows 验收脚本的默认模式仍使用免费 fixture。明确设置
+`HERTZ_GENERATION_OPENAI_COMPATIBLE=1`、`HERTZ_SUBAPI_ORIGIN`、
+`HERTZ_SUBAPI_MODEL`、仅供隔离进程内存使用的 `HERTZ_SUBAPI_KEY` 才运行真实
+调用；组合验收同时设置 `HERTZ_GENERATION_COMPOSITION_FIXTURE=1`。
+真实模式沿同一原生默认 No/Yes、接收/预览/保存流程，核验唯一任务与 unpriced
+用量记录，报告不含凭据，结束后移除隔离秘密后端中的 key。
 
 | 切片 | 状态 | 证据 |
 | --- | --- | --- |
@@ -13,8 +40,8 @@
 | AI-02 切片 4：本地 Ollama builtin adapter | 2026-11-16 已实施，受控 Ollama HTTP fixture 的 Windows 内嵌/独立各十项通过 | 下文实现与验证边界；实际版本/模型质量未验收 |
 | AI-03 结果交付与入库 | 2026-11-16 builtin 候选链路已完成，Windows 内嵌/独立各九项真实验收通过 | 下文实现与验证边界 |
 | AI-04 图像 adapter 与计费 | 2026-11-16 已完成离线图像生成、原生接收/预览/明确保存；正式 OpenAI 模型与计费资格待验证 | [图像实施与配置](wallpaper-ai-image-generation.md)；Windows Standard/Full、内嵌/独立各通过图片与 builtin 回归 |
-| AI-05 声明式组合 | 未实施 | 设计 §19.3 |
-| AI-06 外部助手申请 | 未实施 | 设计 §19.2 |
+| AI-05 声明式组合 | 2026-11-16 已实施并推送，Windows 四组组合完整旅程通过 | [组合实施记录](wallpaper-ai-composition-generation.md)；最终 desktop 908 项通过、原生十二组 120 项通过 |
+| AI-06 外部助手申请 | 已实施；用户已停止后续验证，完整 SDK 与真实模型验收未完成 | 本文末尾 AI-06 实施记录；设计 §19.8 |
 
 ## 2026-11-16 AI-02 切片 1：生成合同纯数据层
 
@@ -245,3 +272,45 @@ token-only 模式的金额始终为 null；错误类型的收据不能把它改�
 Windows实测Standard/Full × 内嵌/独立 × composition/image/builtin共12组、120项断言全部通过，errors为空。四组组合完整执行生成→预览→保存→编辑/撤销→发布→原生文件导出→重新导入，核验导出包、全部声明文件、所选原稿SHA256与长度，以及精确原包许可/署名、库存身份及闭包引用。生成、预览和保存保持原桌面配置；重开、隐藏停查和撤权同样通过。
 
 证据在 `output/ai05-20261116/native-final-results.json`、各组 `composition-roundtrip.json`、`desktop-verified.log` 和两版Clippy/构建日志。实际模型质量、速度和正式计费资格不由fixture替代。外部助手接口为下一阶段AI-06，按用户要求使用官方MCP SDK验收。
+
+## 2026-11-17 AI-06：外部助手壁纸申请
+
+原 capability 注册表新增 `wallpaper_catalog_get`、`wallpaper_switch_request`、
+`wallpaper_generate_request`、`wallpaper_request_get` 四个窄工具。用户须明确授予
+`wallpaper:catalog_read` 或 `wallpaper:request`；旧 grant 不自动扩权。目录仅包含
+可用作品的标题、标签、类型、版本、包哈希及 60 秒有效的不透明目标句柄。
+每次调用、幂等回读和确认受理仍由原 grant owner 复核权限及凭据代际。
+
+申请经现有固定 Pipe/HostHandle 转发至已打开的本机壁纸 AI 面板，由实际
+服务 PID、实例、Profile 和原生代际验证；不启动桌面或抢焦点。未配对时生成
+申请显示连接入口，切换申请可以本地确认。隐藏、折叠、最小化或关闭面板停止
+新申请准入及轮询。生成复用原报价与原生默认 No 的确认，切换复用已展示动作的
+原生确认及原配置事务；创建申请不调用模型、不改变桌面。
+
+原 Library 的新增迁移 `0010_ai_requests.sql` 持久保存申请身份、摘要和脱敏
+回执；同 grant/operationId/载荷回读原申请，异载荷冲突、跨 grant 读取拒绝。
+全局最多 4 个活动申请，每 grant 每分钟最多 4 次，待确认申请 120 秒到期；
+终态回执保留 10 分钟，频率记录容量最多 1024；申请与候选元数据共用
+256 条/4 MiB 配额，在原事务中预留终态空间，不驱逐仍有效的回执。
+重启恢复不自动执行申请。
+实际任务或切换操作关联原回执，确定拒绝记 failed；先前投递不确定且连接已
+失效记 interrupted，保留已知 jobId。结果持久化失败由原受管槽保留并重试，
+避免永久占用活动申请额度或暗中重发模型。
+
+文本 `openai-compatible` 的 builtin/composition 适配器沿原 Responses
+transport、runner、凭据后端和用量账本执行，端点凭据按规范化公网 HTTPS
+base URL 隔离。美元费率未知时只报价 token 限额并记录 unpriced 用量；
+该实现不证明图像模型资格或正式价格。
+
+已执行 Rust1.88 服务 AI 251 项、桌面库 931 项、壁纸库 103 项及官方 MCP SDK
+8 项测试；Standard/Full Clippy 与构建通过。前端 86 步、API 216 条及脚本登记
+通过。原生 SDK 首轮发现生成面板的目标组同步遗漏，已修正并重建；用户随后
+要求停止验证，因此修订后的完整原生 SDK 矩阵与旧生成路径回归尚未执行，
+不能宣称 AI-06 已完整验收。
+上述证据覆盖停止验证之前的 AI-06 源码，不覆盖随后新增的社区发布合同。
+
+本轮指定兼容端点的精确模型在 `/v1/models` 列出，但真实 Responses 调用被
+供应商以 HTTP 403 拒绝，原因是账号仅允许官方 Codex 客户端。因此该账号下
+尚未取得有效生成候选或可计量用量，不能声称真实模型验收通过。解除账号限制
+或使用允许第三方 API 调用的凭据后，才可继续上述显式 live 验收。非成功 HTTP
+响应即使正文不符合 JSON 合同，原 transport 仍保留确定的状态码；不推断费用。

@@ -15,7 +15,10 @@
 pub(crate) mod access;
 pub(crate) mod ai;
 pub(crate) mod ai_asset_sets;
+pub(crate) mod ai_receipt_budget;
 pub(crate) mod ai_receipts;
+pub(crate) mod ai_requests;
+pub(crate) mod external_requests;
 pub(crate) mod generation;
 
 // P1-02/P1-04/P1-06 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
@@ -34,6 +37,7 @@ pub(crate) mod audio_service;
 pub(crate) mod budget;
 pub(crate) mod builtin_plan;
 pub(crate) mod composition_plan;
+pub(crate) mod community;
 #[allow(dead_code)]
 pub(crate) mod config;
 #[allow(dead_code)] // AssetStore 的持久内容计量与单写者发布。

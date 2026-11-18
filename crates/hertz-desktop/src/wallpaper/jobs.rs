@@ -487,6 +487,7 @@ enum JobSource {
     ImagePreview(String, super::image_prepare::ImageTarget),
     ImageSave(String, String),
     Import(ImportSource),
+    Community(Box<super::community::subscriptions::DownloadIntent>),
     Prepare(super::target_planner::PrepareRequest),
     PrepareFont(FontPrepareRequest),
     PrepareFontGroup(FontGroupPrepareRequest),
@@ -724,6 +725,7 @@ pub(crate) struct ImportIdentity {
 impl ImportJobs {
     /// 启动 worker。`library` 与 `assets` 的所有权共享给任务管线。
     pub fn start(library: Library, assets: AssetStore, probe: ProbeClient) -> Self {
+        assets.bind_trust(Arc::clone(library.trust())).expect("one library trust owner per AssetStore");
         let budget = probe.budget_handle();
         // 每一个 caller 侧共享启动 owner 都在第一次分配前取得 prior 费用；
         // 准入失败是 fail-closed 启动错误，不构造“无 worker”的半对象。
@@ -833,6 +835,14 @@ impl ImportJobs {
         file: super::file_tokens::SelectedFile,
         identity: ImportIdentity,
     ) -> Result<JobId, JobError> {
+        self.submit_registered(job_id,JobSource::Import(ImportSource::Pinned(file)),identity).await
+    }
+
+    pub(crate) async fn submit_community(&self,job_id:String,intent:super::community::subscriptions::DownloadIntent,identity:ImportIdentity)->Result<JobId,JobError> {
+        self.submit_registered(job_id,JobSource::Community(Box::new(intent)),identity).await
+    }
+
+    async fn submit_registered(&self,job_id:String,source:JobSource,identity:ImportIdentity)->Result<JobId,JobError> {
         if let Some(existing) = self.library.import_operation(&identity.request_id).await? {
             if existing.payload_digest != identity.payload_digest {
                 return Err(JobError::new(
@@ -854,7 +864,7 @@ impl ImportJobs {
         }
         let request = self.reserve(
             job_id,
-            JobSource::Import(ImportSource::Pinned(file)),
+            source,
             None,
             0,
         )?;
@@ -1372,6 +1382,7 @@ async fn worker_loop(
                                 .await
                                 .map(JobOutput::Package)
                         }
+                        JobSource::Community(intent)=>community::run(&request,intent,&library,&assets,&probe,&writer).await.map(JobOutput::Package),
                         JobSource::Prepare(prepare) => {
                             run_prepare(&request, prepare, &library, &assets, &probe)
                                 .await
@@ -1653,6 +1664,8 @@ async fn run_receive_ai(
 mod ai_compositions;
 #[path = "jobs_ai_images.rs"]
 mod ai_images;
+#[path = "jobs_community.rs"]
+mod community;
 
 async fn run_import(
     request: &JobRequest,
@@ -1680,6 +1693,7 @@ async fn run_import(
             assets.snapshot_open_file(&request.job_id, &file.file, Some(&request.cancel))
         }
     }?;
+    library.trust().security_check(&receipt.sha256)?;
     let name = match source {
         ImportSource::Path(path) => path
             .file_name()
@@ -1693,7 +1707,7 @@ async fn run_import(
         super::raw_import::ensure_package(assets, library, receipt, name, &request.cancel).await;
     wrapping_workspace.finish();
     let receipt = wrapped?;
-    install_snapshot(request, receipt, library, assets, probe, writer).await
+    install_snapshot(request, receipt, library, assets, probe, writer, None).await
 }
 
 async fn install_snapshot(
@@ -1703,11 +1717,19 @@ async fn install_snapshot(
     assets: &AssetStore,
     probe: &ProbeClient,
     writer: &super::content_quota::Writer<'_>,
+    authorization: Option<&super::community::AcceptedRelease>,
 ) -> Result<String, JobError> {
     set_stage_bytes(&request.status, receipt.bytes);
     cancelled(&request.cancel)?;
     // ② Prepare：对固定快照做包校验（结构/路径/哈希），取 manifest 事实。
     let package = assets.validate_staged(&request.job_id)?;
+    library.trust().security_check(&package.package_hash)?;
+    if let Some(release)=authorization {
+        release.validate_package(&package,receipt.bytes)?;
+        if let JobSource::Community(intent)=&request.source {
+            super::community::subscriptions::Subscriptions::new(library).delta(&intent.plan.operation_id,&package,release).await?;
+        }
+    }
     if package.package_hash != receipt.sha256 {
         return Err(JobError::new(
             "hash_mismatch",
@@ -1744,6 +1766,7 @@ async fn install_snapshot(
         prepared.publish(assets, library).await?;
         cancelled(&request.cancel)?;
         library.mark_available(&package.package_hash).await?;
+        community::index(library,&package,receipt.bytes,authorization).await?;
         return Ok(package.package_hash.clone());
     }
     // ④ 空间峰值预检；现有 staging 已从实际可用空间扣除。
@@ -1796,20 +1819,8 @@ async fn install_snapshot(
         Err(error) => return Err(error),
     };
     // ⑦ 新发布和核验通过的孤立目录都必须完成索引事务。
-    library
-        .install(&crate::wallpaper::library::InstallWork {
-            remote_work_id: package.manifest.work_id.clone(),
-            work_key: format!("local-{}", package.manifest.work_id),
-            title: package.manifest.title.clone(),
-            description: package.manifest.description.clone(),
-            kind: content_kind,
-            package_hash: package.package_hash.clone(),
-            manifest_json: package.manifest_json.clone(),
-            package_bytes: receipt.bytes,
-            version: package.manifest.version,
-            source_id: LOCAL_SOURCE.into(),
-        })
-        .await?;
+    let _=content_kind;
+    community::index(library,&package,receipt.bytes,authorization).await?;
     Ok(package.package_hash)
 }
 
@@ -2103,15 +2114,18 @@ async fn read_prepare_source(
     hash: &str,
     source: Option<&super::assets::VerifiedPackageSource>,
 ) -> Result<super::assets::StagedPackage, JobError> {
+    library.trust().security_check(hash)?;
     if source.is_none_or(|s| matches!(s.location(), super::assets::PackageLocation::Installed))
         && !library.is_installed(hash).await?
     {
         return Err(JobError::new("asset_not_found", "准备资源已被移除"));
     }
-    match source {
+    let package=match source {
         Some(s) => assets.read_source(s),
         None => assets.read_installed_manifest(hash),
-    }
+    }?;
+    library.trust().activation_check(hash,matches!(package.manifest.content,hertz_wallpaper::Content::Web{..}))?;
+    Ok(package)
 }
 
 async fn qualify_inspected_font(
@@ -2264,6 +2278,13 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
                 if row.state == "unavailable" {
                     library.mark_available(&row.package_hash).await?;
                 }
+                // A library backup can retain the physical package but omit its
+                // source/version projection. Independent trust receipts rebuild
+                // those facts through the same original install transaction.
+                if !library.trust().receipts_for_hash(&row.package_hash).await?.is_empty(){
+                    let package=assets.read_installed_manifest(&row.package_hash)?;
+                    community::recover(library,assets,&package).await?;
+                }
             }
             _ => {
                 library.mark_unavailable(&row.package_hash).await?;
@@ -2277,20 +2298,7 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
         // 孤立目录：核验 original.hwpkg 的 hash 与投影后恢复入库。
         if matches!(assets.verify_installed(&hash), Ok(Some(_))) {
             let package = assets.read_installed_manifest(&hash)?;
-            let result = library
-                .install(&crate::wallpaper::library::InstallWork {
-                    remote_work_id: package.manifest.work_id.clone(),
-                    work_key: format!("local-{}", package.manifest.work_id),
-                    title: package.manifest.title.clone(),
-                    description: package.manifest.description.clone(),
-                    kind: manifest_kind(&package.manifest),
-                    package_hash: hash.clone(),
-                    manifest_json: package.manifest_json.clone(),
-                    package_bytes: assets.installed_bytes(&hash)?,
-                    version: package.manifest.version,
-                    source_id: LOCAL_SOURCE.into(),
-                })
-                .await;
+            let result = community::recover(library, assets, &package).await;
             if let Err(error) = result {
                 if error.code != "version_hash_conflict" {
                     return Err(error);
@@ -2315,7 +2323,7 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
     Ok(())
 }
 
-fn manifest_kind(manifest: &hertz_wallpaper::manifest::Manifest) -> String {
+pub(crate) fn manifest_kind(manifest: &hertz_wallpaper::manifest::Manifest) -> String {
     match &manifest.content {
         hertz_wallpaper::manifest::Content::Image { .. } => "image",
         hertz_wallpaper::manifest::Content::Video { .. } => "video",

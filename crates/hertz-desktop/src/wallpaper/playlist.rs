@@ -287,8 +287,16 @@ impl Runner {
         switch
     }
     pub(crate) fn initial(&mut self) -> Option<Switch> {
+        self.initial_at(None)
+    }
+
+    pub(crate) fn initial_at(&mut self, reference: Option<&FixedVersion>) -> Option<Switch> {
         if self.current.is_none() && self.pending.is_none() && self.failed.is_none() {
-            Some(self.start(0))
+            let index = match reference {
+                Some(reference) => self.playlist.items.iter().position(|item| item == reference)?,
+                None => 0,
+            };
+            Some(self.start(index))
         } else {
             None
         }

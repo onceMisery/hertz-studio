@@ -22,6 +22,7 @@ const detail = index.slice(index.indexOf('<div id="np-scrim"'), index.indexOf('<
 const receiverStart=app.indexOf('const np = {');
 const receiver = app.slice(receiverStart, app.indexOf('// 胶囊播放器',receiverStart));
 assert.ok(receiver.includes('const calibrationUi ='));
+assert.ok(!receiver.includes('hertzCalibrationHandoff') && !receiver.includes("op: 'handoff'"), 'DBX handoff is retired');
 const startup = 'async ' + fn('startApp') + '\nasync ' + fn('startFloatingCapsule');
 const css = ['design/design-base.css', 'components/button.css', 'style.css', 'now-playing.css'].map(file => fs.readFileSync(path.join(ui, file), 'utf8')).join('\n');
 const head = `<html lang="zh-CN" data-skin="hertz"><meta charset="utf-8"><style>${css}</style><body>
@@ -31,7 +32,7 @@ const setup = `
 const $ = id => document.getElementById(id);
 const state = { connected:true, current:{id:'first',title:'当前歌曲'}, snapshot:{track_id:'first',generation:1,playing:false,position_ms:0,duration_ms:5000} };
 const ui = {volume:$('volume')};
-window.fixture = { calls:[], pending:null, claimed:false, gate:true, delay:0, done:null, waiter:null, registration:0, receivers:{}, marker:'cc85b861-64ae-4e25-9364-e2dd02c7f063',
+window.fixture = { calls:[], pending:null, claimed:false, gate:true, delay:0, done:null, waiter:null, registration:0,
   doc:{source:'imported',user_offset_ms:500,lines:[{start_ms:0,end_ms:5000,text:'校准当前歌曲'}]}, dbx:false, floating:false,
   enqueue(id='request',remaining=4500) { this.pending={version:1,requestId:id,bindingId:'fixture-binding',requestSequence:1,remainingMs:remaining,session:'fixture-session',trackId:state.current.id,generation:String(state.snapshot.generation)};this.remaining=remaining;this.claimed=false;this.done=null; },
   changeTrack() { state.current={id:'second',title:'下一首'};state.snapshot={...state.snapshot,track_id:'second',generation:2};document.dispatchEvent(new CustomEvent('playback:snapshot',{detail:state.snapshot})); },
@@ -42,26 +43,19 @@ let transport = {
   async post(url,body){fixture.calls.push({method:'POST',url,body:structuredClone(body)});
     if(url.includes('calibration-authorization')){fixture.gate=body.enabled;if(fixture.failConsent)throw Error('本次校准已停用，但持久撤销未完成，请重试撤销');return{authorized:fixture.gate};}
     if(url!='/v1/desktop/calibration-ui')throw Error('Unexpected mutation '+url);
-    if(body.op==='register'){
-      if(fixture.requiredMarker&&body.handoff&&body.handoff!==fixture.requiredMarker)throw Error('wrong handoff');
-      const id='receiver-'+(++fixture.registration);fixture.receivers[id]=body.handoff||'';
-      const reply={receiverId:id,session:'fixture-session'};
-      if(body.handoff&&body.handoff===fixture.registerHold){fixture.registerHold=null;return await new Promise((resolve,reject)=>fixture.registerWaiter={receiverId:id,resolve:()=>resolve(reply),reject:()=>reject(Error('old registration failed'))});}
-      return reply;
-    }
+    if(body.op==='register')return{receiverId:'receiver-'+(++fixture.registration),session:'fixture-session'};
     if(body.op==='renew'||body.op==='unregister')return{renewed:true};
     if(body.op==='claim'){
-      if(!fixture.pending||fixture.claimed||fixture.requiredMarker&&(fixture.receivers[body.receiverId]!==fixture.requiredMarker||body.handoff!==fixture.requiredMarker))return{intent:null};
+      if(!fixture.pending||fixture.claimed)return{intent:null};
       fixture.claimed=true;const reply={intent:structuredClone(fixture.pending),remainingMs:fixture.remaining};
       if(fixture.claimHold){fixture.claimHold=false;return await new Promise(resolve=>fixture.claimWaiter=()=>resolve(reply));}
       if(fixture.claimDelay)await new Promise(resolve=>setTimeout(resolve,fixture.claimDelay));return reply;
     }
     if(!fixture.gate||!fixture.pending||body.requestId!==fixture.pending.requestId||state.current.id!==fixture.pending.trackId)throw Error('expired intent');
     if(body.op==='validate'){if(fixture.validateDelay){const delay=fixture.validateDelay;fixture.validateDelay=0;await new Promise(resolve=>setTimeout(resolve,delay));}return{valid:true,remainingMs:fixture.validateRemaining||fixture.remaining};}
-    if(body.op==='handoff')return{handoff:fixture.marker};
     if(body.op==='complete'){fixture.done=structuredClone(body);fixture.pending=null;return{state:body.result};}
     throw Error('Unexpected UI op '+body.op);
-  },put(){throw Error('Offset write forbidden in UI handoff');}
+  },put(){throw Error('Offset write forbidden in desktop calibration');}
 };
 window.Online={loadLyricDoc:()=>transport.get('/v1/tracks/online/lyrics')};
 const Stage={kick(){},coverUrl(){return'';},gate(){},lyrics(){return null;},presentation(){return{position:0,track:state.current};}};
@@ -87,7 +81,8 @@ async function main() {
     await page.evaluate(async options => {
       fixture.dbx = !!options.dbx; fixture.floating = !!options.floating;
       transport.kind = fixture.dbx ? 'dbx' : 'server';
-      if (fixture.dbx) { window.hertzHost = { isDbx:true,async hydrate(){} }; window.HertzCapsuleOnly=fixture.floating; window.dbxPlugin={context:{},onInit(fn){fixture.initContext=fn;fn(this.context);},onContext(fn){fixture.contextListener=fn;},openWorkbench:async(...args)=>{fixture.calls.push({method:'BRIDGE',args});}}; }
+      window.hertzHost = { isDbx:fixture.dbx, desktopEnabled:!fixture.dbx,async hydrate(){} };
+      if (fixture.dbx) { window.HertzCapsuleOnly=fixture.floating; window.dbxPlugin={context:{},onInit(fn){fixture.initContext=fn;fn(this.context);},onContext(fn){fixture.contextListener=fn;},openWorkbench:async(...args)=>{fixture.calls.push({method:'BRIDGE',args});}}; }
       if(options.online)state.current={id:'online:netease:510',title:'在线歌曲',source:'netease',onlineId:'510'};
       if(options.vocal)fixture.doc.lines[0].vocal={agentIds:['a'],role:'lead'};
       fixture.holdConsent=!!options.holdConsent;
@@ -95,11 +90,11 @@ async function main() {
       if(fixture.floating) await startApp();
       else calibrationUi.init();
     }, options);
-    await page.waitForFunction(() => fixture.registration > 0);
+    if (!options.dbx) await page.waitForFunction(() => fixture.registration > 0);
     return page;
   }
   try {
-    for (const options of [{}, { online:true }, { vocal:true }, { dbx:true }]) {
+    for (const options of [{}, { online:true }, { vocal:true }]) {
       await player(options); await page.evaluate(() => fixture.enqueue());
       await page.waitForFunction(() => fixture.done !== null, null, { timeout: 6000 }).catch(async e=>{
         await page.screenshot({path:path.join(output,'failure.png')});
@@ -108,64 +103,18 @@ async function main() {
       const done = await page.evaluate(() => ({result:fixture.done,focus:document.activeElement.id,visible:document.visibilityState,hasFocus:document.hasFocus(),writes:fixture.calls.filter(c=>c.method==='PUT'||c.url&&/player\/|lyrics\/offset/.test(c.url)),bridge:fixture.calls.filter(c=>c.method==='BRIDGE')}));
       assert.equal(done.result.result, 'shown'); assert.equal(done.focus, 'np-lyric-offset-down'); assert.equal(done.visible, 'visible'); assert.equal(done.hasFocus, true); assert.deepEqual(done.writes, []);
       assert.equal(await page.locator('#np-tools').isVisible(), true); assert.equal(await page.locator('#np-lyric-offset').isVisible(), true);
-      if(options.dbx)assert.deepEqual(done.bridge[0].args, ['fixture.player',{}, {target:'tab'}]);
       mark('Original detail and offset focus: '+JSON.stringify(options));
     }
     await page.screenshot({ path: path.join(output, 'player-calibration.png') });
-    await player({ dbx:true, floating:true });
-    assert.equal(await page.evaluate(() => fixture.calls.some(c=>c.method==='STARTUP'&&c.name==='floating-snapshot-ready')),true);
-    assert.equal(await page.evaluate(() => fixture.calls.find(c=>c.body?.op==='register').body.kind),'floating');
-    mark('Production startApp floating branch initializes the calibration receiver after its source snapshot');
-    await page.evaluate(() => fixture.enqueue());
-    await page.waitForFunction(() => fixture.calls.some(c=>c.method==='BRIDGE'));
-    assert.equal(await page.locator('#np-modal').isVisible(), false); assert.equal(await page.evaluate(() => fixture.done), null);
-    assert.equal(await page.evaluate(() => fixture.calls.filter(c=>c.method==='BRIDGE').length), 1);
-    assert.deepEqual(await page.evaluate(() => fixture.calls.find(c=>c.method==='BRIDGE').args), ['fixture.player', {hertzCalibrationHandoff:'cc85b861-64ae-4e25-9364-e2dd02c7f063'}, {target:'tab'}]);
-    mark('Floating DBX page forwards once through the existing workbench bridge and cannot confirm shown');
-    await player({dbx:true});
-    await page.evaluate(() => { fixture.requiredMarker=fixture.marker;fixture.enqueue('target'); });
-    await page.waitForTimeout(850);
-    assert.equal(await page.locator('#np-modal').isVisible(), false);
-    await page.evaluate(() => fixture.contextListener({hertzCalibrationHandoff:'1a85b861-64ae-4e25-9364-e2dd02c7f063'}));
-    await page.waitForTimeout(100);
-    assert.equal(await page.locator('#np-modal').isVisible(), false);
-    await page.evaluate(() => fixture.contextListener({hertzCalibrationHandoff:fixture.marker}));
-    await page.waitForFunction(() => fixture.done !== null, null, {timeout:6000});
-    assert.equal(await page.evaluate(() => fixture.done.result), 'shown');
-    assert.ok(await page.evaluate(() => fixture.calls.some(c=>c.body?.op==='register'&&c.body.handoff===fixture.marker)&&fixture.calls.some(c=>c.body?.op==='claim'&&c.body.handoff===fixture.marker)));
-    mark('Only the target receiving the SDK workbench context marker registers and claims the handoff');
-    for (const oldResult of ['reject','resolve']) {
-      await player({dbx:true});
-      await page.evaluate(() => {
-        const oldMarker='1a85b861-64ae-4e25-9364-e2dd02c7f063';
-        fixture.requiredMarker=oldMarker;fixture.registerHold=oldMarker;
-        fixture.contextListener({hertzCalibrationHandoff:oldMarker});
-      });
-      await page.waitForFunction(() => !!fixture.registerWaiter);
-      await page.evaluate(() => {fixture.requiredMarker=fixture.marker;fixture.enqueue('new-context-B');fixture.contextListener({hertzCalibrationHandoff:fixture.marker});});
-      await page.waitForFunction(() => fixture.done?.requestId==='new-context-B',null,{timeout:6000});
-      await page.evaluate(oldResult => fixture.registerWaiter[oldResult](),oldResult);
-      await page.waitForTimeout(850);
-      const result=await page.evaluate(() => ({done:fixture.done,markers:fixture.calls.filter(c=>c.body?.op==='register').map(c=>c.body.handoff),oldReceiver:fixture.registerWaiter.receiverId,unregistered:fixture.calls.filter(c=>c.body?.op==='unregister').map(c=>c.body.receiverId)}));
-      assert.equal(result.done.result,'shown');
-      assert.deepEqual(result.markers,['','1a85b861-64ae-4e25-9364-e2dd02c7f063','cc85b861-64ae-4e25-9364-e2dd02c7f063']);
-      if(oldResult==='resolve')assert.ok(result.unregistered.includes(result.oldReceiver));
-      mark('Old registration '+oldResult+' cannot clear a newer SDK context or receiver');
+    for (const floating of [false, true]) {
+      await player({ dbx:true, floating });
+      await page.evaluate(() => fixture.enqueue());
+      await page.waitForTimeout(900);
+      assert.equal(await page.evaluate(() => fixture.registration), 0);
+      assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c => c.url?.includes('/v1/desktop/') || c.method === 'BRIDGE')), []);
+      assert.equal(await page.locator('#np-modal').isVisible(), false);
+      mark('DBX '+(floating ? 'floating' : 'main')+' page has no desktop receiver, handoff or calibration requests');
     }
-    await player({dbx:true});
-    await page.evaluate(() => {
-      fixture.requiredMarker='1a85b861-64ae-4e25-9364-e2dd02c7f063';fixture.claimHold=true;fixture.enqueue('old-context-A');
-      fixture.contextListener({hertzCalibrationHandoff:fixture.requiredMarker});
-    });
-    await page.waitForFunction(() => !!fixture.claimWaiter);
-    await page.evaluate(() => {fixture.requiredMarker=fixture.marker;fixture.enqueue('new-context-B');fixture.contextListener({hertzCalibrationHandoff:fixture.marker});});
-    await page.waitForFunction(() => fixture.done?.requestId==='new-context-B',null,{timeout:6000});
-    await page.evaluate(() => fixture.claimWaiter());
-    await page.waitForTimeout(850);
-    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(c=>c.body?.op==='register').map(c=>c.body.handoff)),['','1a85b861-64ae-4e25-9364-e2dd02c7f063','cc85b861-64ae-4e25-9364-e2dd02c7f063']);
-    assert.equal(await page.evaluate(() => fixture.calls.some(c=>c.body?.op==='validate'&&c.body.requestId==='old-context-A')),false);
-    assert.equal(await page.evaluate(() => fixture.done.requestId),'new-context-B');
-    mark('Old claim success cannot reactivate an intent or clear the newer receiver');
     for (const hop of ['claim','validate']) {
       await player();
       await page.evaluate(hop => {fixture.enqueue('late-reply',hop==='claim'?60:4500);if(hop==='claim')fixture.claimDelay=120;else{fixture.validateDelay=120;fixture.validateRemaining=60;}},hop);

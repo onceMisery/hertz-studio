@@ -286,7 +286,7 @@
     if (!document) { resetDocument(); render(); stopLoop(); return; }
     if (state.source !== 'ok' || !state.snapshot || state.snapshot.lyrics?.status !== 'ready'
       || document.documentKey !== state.snapshot.lyrics.documentKey) return;
-    // Native HTTP and DBX share full validation. The embedded page also refuses
+    // The standalone source validates full documents. The embedded page also refuses
     // unknown schema instead of silently applying the ordinary recent-start path.
     if ((document.vocalSchemaVersion != null && document.vocalSchemaVersion !== 1)
       || (document.lines || []).some(line => line.vocal) && document.vocalSchemaVersion !== 1) {
@@ -644,7 +644,7 @@
   function updateControls() {
     updateCalibration();
     const available = state.lyricsControl !== false && state.active && !state.locked && state.source === 'ok' && state.snapshot?.track && positionAt(performance.now()) != null && !state.pendingControl;
-    for (const id of ['play', 'previous', 'next']) $(id).title = state.lyricsControl === false ? 'DBX 来源仅供读取，请在 DBX 中控制播放' : '';
+    for (const id of ['play', 'previous', 'next']) $(id).title = state.lyricsControl === false ? '当前来源未提供播控，请在播放器中操作' : '';
     $('play').disabled = !available;
     $('previous').disabled = !available || targetLine(-1) == null;
     $('next').disabled = !available || targetLine(1) == null;

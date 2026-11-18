@@ -55,7 +55,7 @@
       entry.timer = setTimeout(function () {
         managementRequests.delete(id);
         reject(Object.assign(new Error('操作结果尚未确认，请查询原操作。'), { code: 'receipt_timeout', requestId: id }));
-      }, ['wallpaper.file.pick', 'wallpaper.export.pick'].includes(command) ? 300000 : command.startsWith('wallpaper.ai.') ? 65000 : command === 'wallpaper.draft.publish' ? 30000 : 5000);
+      }, ['wallpaper.file.pick', 'wallpaper.export.pick'].includes(command) ? 300000 : command === 'wallpaper.community.login' ? 310000 : command === 'wallpaper.community.apply' ? 65000 : command.startsWith('wallpaper.community.') ? 30000 : command.startsWith('wallpaper.ai.') ? 65000 : command === 'wallpaper.draft.publish' ? 30000 : 5000);
       managementRequests.set(id, entry);
       try { window.ipc.postMessage(JSON.stringify({ protocol: 2, requestId: id, command: command, payload: payload || {}, expectedRevision: expectedRevision })); }
       catch (error) { managementRequests.delete(id); clearTimeout(entry.timer); error.requestId = id; reject(error); }
@@ -181,7 +181,14 @@
   function applyManagement(receipt) {
     if (!receipt || receipt.protocol !== 2) return;
     var waiting = managementRequests.get(receipt.requestId);
-    if (!waiting) return;
+    if (!waiting) {
+      if (window.hertzWallpaperCommunity) window.hertzWallpaperCommunity.acceptReceipt(receipt);
+      return;
+    }
+    if (waiting.command === 'wallpaper.community.login' && receipt.ok && receipt.result && receipt.result.loginPending) {
+      if (window.hertzWallpaperCommunity) window.hertzWallpaperCommunity.loginPending(receipt);
+      return;
+    }
     managementRequests.delete(receipt.requestId); clearTimeout(waiting.timer);
     if (receipt.ok) {
       waiting.resolve(receipt);
@@ -1218,13 +1225,13 @@
   Object.keys(lyricsFields).forEach(function (id) { $(id).addEventListener('input', function () { if (!draft) return; if (this.validity && !this.validity.valid || this.type === 'number' && this.value === '') { dirty = true; this.setAttribute('aria-invalid', 'true'); status('请填写有效的字号或描边宽度。', true); syncControls(); return; } this.removeAttribute('aria-invalid'); var field = lyricsFields[id]; draft.lyrics[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : this.value; changed(false); }); });
   document.querySelectorAll('[data-preset]').forEach(node => node.addEventListener('click', function () { if (!draft) return; Object.assign(draft.lyrics, presets[node.dataset.preset]); changed(false); renderForm(); }));
   function setTab(tab) {
-    if (!['wallpaper','lyrics','runtime'].includes(tab)) return;
+    if (!['wallpaper','lyrics','runtime','community'].includes(tab)) return;
     if (activeTab !== tab) document.querySelector('main').scrollTop = 0;
     activeTab = tab;
     document.querySelectorAll('[data-tab]').forEach(function (node) { var active = node.dataset.tab === tab; node.setAttribute('aria-selected', String(active)); node.tabIndex = active ? 0 : -1; $('panel-' + node.dataset.tab).hidden = !active; });
     if (tab !== 'wallpaper') releaseNativePreview();
   }
-  document.querySelectorAll('[data-tab]').forEach(node => { node.addEventListener('click', () => setTab(node.dataset.tab)); node.addEventListener('keydown', function (event) { var tabs = ['wallpaper','lyrics','runtime'], index = tabs.indexOf(activeTab), target = event.key === 'ArrowRight' ? tabs[(index+1)%3] : event.key === 'ArrowLeft' ? tabs[(index+2)%3] : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[2] : null; if (target) { event.preventDefault(); setTab(target); $('tab-' + target).focus(); } }); });
+  document.querySelectorAll('[data-tab]').forEach(node => { node.addEventListener('click', () => setTab(node.dataset.tab)); node.addEventListener('keydown', function (event) { var tabs = ['wallpaper','lyrics','runtime','community'], index = tabs.indexOf(activeTab), target = event.key === 'ArrowRight' ? tabs[(index+1)%tabs.length] : event.key === 'ArrowLeft' ? tabs[(index+tabs.length-1)%tabs.length] : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[tabs.length-1] : null; if (target) { event.preventDefault(); setTab(target); $('tab-' + target).focus(); } }); });
   ['dark','light'].forEach(name => $('bg-' + name).addEventListener('click', function () { $('lyrics-preview').classList.toggle('light', name === 'light'); ['dark','light'].forEach(value => $('bg-' + value).setAttribute('aria-pressed', String(value === name))); }));
   $('profile').addEventListener('change', updateProfilePath);
   $('audio-retry').addEventListener('click', function () { send('audio-retry'); });
@@ -1302,6 +1309,11 @@
     choosePlaylist: choosePlaylist,
     currentGroupId: function () { return selectedGroupId; },
     currentAiContext: function () { return { groupId: selectedGroupId, revision: latest && latest.revision, profile: latest && latest.profile }; },
+    currentCommunityContext: function () { return { groupId: selectedGroupId, revision: latest && latest.revision, profile: latest && latest.profile, ready: ready,
+      dirty: dirty, pending: pending || editing, selection: draft && mainGroup(draft.wallpaper) && mainGroup(draft.wallpaper).selection,
+      presentation: draft && mainGroup(draft.wallpaper) && mainGroup(draft.wallpaper).presentation,
+      groups: saved && saved.wallpaper ? saved.wallpaper.groups.map(function (group) { return { id: group.id, name: group.id + ' · ' + group.displays.length + ' 个显示器' }; }) : [] }; },
+    chooseGroup: selectGroup,
     currentRuntime: function () { return selectedRuntime(latest); },
     currentBuiltin: function () { var state = draft && builtin(draft.wallpaper); return state ? Object.assign({ title: sceneLabel(state.sceneId) }, clone(state)) : null; },
     releasePreview: releaseNativePreview,

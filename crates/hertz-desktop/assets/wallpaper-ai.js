@@ -122,11 +122,14 @@
   let candidates = [], candidateKey = '', receiving = null, previewing = null;
   let thumbnailQueue = Promise.resolve();
   let generationContext = JSON.stringify(settings.currentAiContext());
+  let externalRequest = null;
   function node(tag, text, id) { const value = document.createElement(tag); if (text) value.textContent = text; if (id) value.id = 'generation-' + id; return value; }
   const body = panel.querySelector('.ai-body');
   const quoteForm = node('form', '', 'form'); quoteForm.setAttribute('aria-label', '壁纸生成报价');
   const sceneLabel = el('scene').closest('label'), briefLabel = el('brief').closest('label'), quoteTools = el('quote').closest('.ai-toolbar');
   sceneLabel.before(quoteForm); quoteForm.append(sceneLabel, briefLabel, quoteTools);
+  const externalSource = node('p', '', 'external-source'); externalSource.className = 'hint'; externalSource.hidden = true;
+  quoteForm.before(externalSource);
   el('scene').name = 'scene'; el('brief').name = 'brief'; el('brief').required = true; el('quote').type = 'submit';
   el('brief').setAttribute('aria-describedby', 'generation-type-info');
   let capability = null;
@@ -262,7 +265,12 @@
       const result = await request(command, payload);
       if (current === epoch && visible()) await success(result);
     } catch (error) {
-      if (current === epoch && visible()) status(error.message || '操作未完成，请重试原操作。');
+      if (current === epoch && visible()) {
+        if (command === 'generate.confirm' && ['generation_cancelled', 'ai_target_changed', 'grant_revoked'].includes(error.code)) {
+          externalRequest = null; externalSource.hidden = true; invalidateQuote();
+        }
+        status(error.message || '操作未完成，请重试原操作。');
+      }
     } finally {
       busy = false; controls(); schedule();
     }
@@ -438,8 +446,12 @@
       });
     } else action('generate.quote', { brief: el('brief').value, output: outputSpec() }, showQuote);
   });
-  el('confirm').addEventListener('click', () => action('generate.confirm', { confirmationToken: quote && quote.confirmationToken }, result => {
-    job = result.job || result; quote = null; el('job').textContent = phases[job.state] || '任务已受理。'; status('本次请求已提交。');
+  el('confirm').addEventListener('click', () => action('generate.confirm', {
+    confirmationToken: quote && quote.confirmationToken,
+    ...(externalRequest ? { externalRequestId: externalRequest.requestId } : {})
+  }, result => {
+    job = result.job || result; quote = null; externalRequest = null; externalSource.hidden = true;
+    el('job').textContent = phases[job.state] || '任务已受理。'; status('本次请求已提交。');
   }));
   el('cancel').addEventListener('click', () => action('generate.cancel', { jobId: job.jobId, expectedStateRevision: job.stateRevision }, result => {
     job = result; el('job').textContent = phases[job.state] || '取消结果已返回。';
@@ -458,5 +470,18 @@
     generationContext = next; ++epoch; stop(); stopCandidatePreview(); ready = false; capability = null; quote = null; assetSnapshot = null; if (visible()) refresh();
   });
   window.addEventListener('pagehide', () => { stop(); stopCandidatePreview(); });
+  window.hertzWallpaperGeneration = {
+    openExternal(request) {
+      if (busy || !['builtin', 'image', 'composition'].includes(request.outputKind)) throw new Error('当前生成操作尚未结束，请稍后打开申请。');
+      externalRequest = request; externalSource.hidden = false;
+      externalSource.textContent = '外部申请来源：' + request.label + '。请检查描述、类型与素材，再查看报价。';
+      el('brief').value = request.brief; el('brief').setCustomValidity('');
+      el('kind-' + request.outputKind).checked = true;
+      panel.open = true; invalidateQuote(); controls();
+      if (!el('brief').disabled) el('brief').focus();
+      else if (!el('connect').hidden) el('connect').focus();
+      else panel.querySelector('summary').focus();
+    }
+  };
   controls();
 })();

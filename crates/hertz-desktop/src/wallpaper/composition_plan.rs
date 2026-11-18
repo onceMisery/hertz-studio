@@ -484,6 +484,7 @@ pub(crate) async fn resolve_source(
     cancel: Arc<AtomicBool>,
 ) -> Result<PreparedComposition> {
     let package_hash = package.package_hash.clone();
+    jobs.library().trust().security_check(&package_hash)?;
     check_cancel(&cancel)?;
     let (compiled, final_values, document_pin) =
         read_document(jobs.assets(), &package, &properties)?;

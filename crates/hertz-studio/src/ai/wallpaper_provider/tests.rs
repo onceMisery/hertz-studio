@@ -142,7 +142,8 @@ fn wallpaper_requests_derive_every_selected_scene_from_the_native_catalog() {
         model: "explicit-model".into(),
         ..Default::default()
     });
-    assert!(!provider.supports_wallpaper_builtin());
+    assert!(provider.supports_wallpaper_builtin());
+    assert!(provider.supports_wallpaper_composition());
 }
 
 #[tokio::test]

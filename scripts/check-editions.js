@@ -32,6 +32,15 @@ for (const edition of ['standard', 'full']) {
   }
   const backend = fs.readFileSync(path.join(dir, 'backend/Cargo.toml'), 'utf8');
   assert.equal(backend.includes('features = ["full"]'), edition === 'full');
+  assert.match(backend, /hertz-studio = .*default-features = false/, edition + ': desktop-host stays disabled');
+  for (const file of ['desktop-settings.js', 'desktop-lyrics-settings.js', 'desktop-lyrics-settings.css', 'wallpaper-settings.js', 'wallpaper-settings.css']) {
+    assert.equal(fs.existsSync(path.join(dir, 'ui', file)), false, edition + ': retired ' + file);
+  }
+  for (const id of ['dbx-desktop-settings', 'desktop-settings-group', 'desktop-lyrics-settings', 'bar-desktop-settings', 'desktop-calibration-consent']) {
+    assert(!html.includes('id="' + id + '"'), edition + ': retired control ' + id);
+  }
+  assert(!html.includes('form:'));
+  assert(!fs.readFileSync(path.join(dir, 'ui/app.js'), 'utf8').includes('calibrationUi'));
   // Resolve the generated independent Cargo root, then compile the real API
   // consumer: staging alone can pass while it silently selects registry ZIP.
   const host = /^host: (.+)$/m.exec(execFileSync('rustc', ['-vV'], { encoding: 'utf8' }))[1];
@@ -39,13 +48,23 @@ for (const edition of ['standard', 'full']) {
   const graph = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1',
     '--manifest-path', wrapperCargo, '--filter-platform', host, '--locked', '--offline'],
   { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+  const packages = new Map(graph.packages.map(item => [item.id, item]));
+  const nodes = new Map(graph.resolve.nodes.map(item => [item.id, item]));
+  const visited = new Set(), pending = [graph.resolve.root];
+  while (pending.length) {
+    const id = pending.pop(); if (visited.has(id)) continue; visited.add(id);
+    const pkg = packages.get(id);
+    assert(!['hertz-desktop', 'tao', 'wry', 'tray-icon', 'webview2-com'].includes(pkg.name), edition + ': native runtime dependency ' + pkg.name);
+    pending.push(...nodes.get(id).deps.map(dep => dep.pkg));
+  }
   const contract = graph.packages.find(item => item.name === 'hertz-wallpaper');
   const consumer = graph.resolve.nodes.find(item => item.id === contract.id);
   const zipDependency = consumer.deps.find(item => item.name === 'zip');
   const zipSource = graph.packages.find(item => item.id === zipDependency.pkg);
   assert.equal(path.resolve(zipSource.manifest_path), path.join(root, 'vendor/zip/Cargo.toml'),
     edition + ': package contract must consume the original bounded ZIP patch');
-  execFileSync('cargo', ['check', '--manifest-path', wrapperCargo, '-p', 'hertz-wallpaper',
+  execFileSync('cargo', ['check', '--manifest-path', wrapperCargo, '-p', 'dbx-plugin-hertz',
+    '--target-dir', path.join(root, 'target'),
     '--locked', '--offline'], { cwd: root, stdio: 'inherit' });
   assert(!html.includes('edition:'));
   assert.equal(staged[edition].version, '0.3.4');

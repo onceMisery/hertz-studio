@@ -106,9 +106,7 @@ fn call(
     {
         return Err("timeout");
     }
-    if crate::config::is_dbx(profile) {
-        return crate::dbx_feed::calibration_call(profile, session, op, body, deadline, cancel);
-    }
+    crate::config::require_standalone(profile).map_err(|_| "receiver-unavailable")?;
     let discovery = crate::bridge::read_discovery(profile).map_err(|_| "receiver-unavailable")?;
     if discovery.server_instance_id.as_deref() != Some(session)
         || (profile.edition() != "custom"

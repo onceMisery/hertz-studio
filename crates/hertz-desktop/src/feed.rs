@@ -30,9 +30,7 @@ where
 
 /// Explicit toolbar actions use the narrow desktop endpoint; credentials stay native.
 pub(crate) fn control(profile: &Profile, payload: &serde_json::Value) -> Result<()> {
-    if crate::config::is_dbx(profile) {
-        bail!("DBX 来源仅支持歌词读取，请在 DBX 中控制播放");
-    }
+    crate::config::require_standalone(profile)?;
     let Some(session) = payload["session"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -244,7 +242,7 @@ impl DocumentError {
     }
 }
 
-/// The only admission gate for full lyric documents, used by HTTP and DBX.
+/// The admission gate for full lyric documents from the standalone source.
 pub(crate) fn parse_document(
     value: serde_json::Value,
     expected_key: &str,
@@ -489,9 +487,7 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new(profile: Profile) -> Result<Self> {
-        if crate::config::is_dbx(&profile) {
-            bail!("DBX 来源必须使用私有管道读取");
-        }
+        crate::config::require_standalone(&profile)?;
         Ok(Self {
             client: bridge::client()?,
             profile,

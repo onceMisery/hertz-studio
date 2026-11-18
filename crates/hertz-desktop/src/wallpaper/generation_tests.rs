@@ -106,11 +106,20 @@ fn status_retires_missing_discovery_and_changed_service_generation() {
             let mut state = lock(&service.state);
             state.connection = Some(c.clone());
             state.job = Some(json!({"jobId":"old-grant-job","state":"running"}));
-            state.submission = Some(json!({"idempotencyKey":"old-grant-key"}));
+            state.submission =
+                Some(json!({"requestId":"old-grant-request","idempotencyKey":"old-grant-key"}));
         }
+        let mut outcome = None;
         let status = service
-            .perform(c.profile, 1, "wallpaper.ai.status", json!({}))
+            .perform_with_submission(c.profile, 1, "wallpaper.ai.status", json!({}), &mut outcome)
             .unwrap();
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.request_id, "old-grant-request");
+        assert!(outcome.interrupted);
+        assert_eq!(
+            outcome.retired_service_instance.as_deref(),
+            Some("fixture-service")
+        );
         assert_eq!(status["connected"], false);
         assert_eq!(status["job"], Value::Null);
         assert_eq!(status["submissionPending"], false);
@@ -309,7 +318,13 @@ fn listener_consumes_complete_post_before_returning_service_receipt() {
 
 #[test]
 fn uncertain_server_error_keeps_original_submission_for_recovery() {
-    for (status, code, retained) in [(500, "internal", true), (404, "quote_unknown", false)] {
+    for (recovering, status, code, retained) in [
+        (true, 500, "internal", true),
+        (true, 404, "quote_unknown", false),
+        (true, 409, "quote_provider_changed", false),
+        (true, 403, "grant_revoked", true),
+        (false, 403, "grant_revoked", false),
+    ] {
         let body = serde_json::to_vec(&json!({"error":{"code":code,"message":"fixture"}})).unwrap();
         let mut response = format!(
             "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\n\r\n",
@@ -334,26 +349,85 @@ fn uncertain_server_error_keeps_original_submission_for_recovery() {
             state.submission = Some(
                 json!({"quoteId":"original","requestId":"original","idempotencyKey":"original"}),
             );
+            if !recovering {
+                state.submission = None;
+                state.quote = Some(Quote {
+                    owner: 1,
+                    token: "original".into(),
+                    quote_id: "original".into(),
+                    request_id: "original".into(),
+                    idempotency_key: "original".into(),
+                    summary: json!({}),
+                    expires: Instant::now() + Duration::from_secs(60),
+                    description: String::new(),
+                    specification: String::new(),
+                    asset_set_id: None,
+                });
+            }
         }
         let (sender, receiver) = std::sync::mpsc::channel();
         service
-            .run(
+            .run_with_submission(
                 c.profile,
                 1,
-                "wallpaper.ai.generate.recover".into(),
-                json!({}),
-                move |result| {
-                    sender.send(result).unwrap();
+                if recovering {
+                    "wallpaper.ai.generate.recover"
+                } else {
+                    "wallpaper.ai.generate.confirm"
+                }
+                .into(),
+                if recovering {
+                    json!({})
+                } else {
+                    json!({"confirmationToken":"original"})
+                },
+                move |result, submission_pending| {
+                    sender.send((result, submission_pending)).unwrap();
                 },
             )
             .unwrap();
-        assert!(receiver
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .is_err());
-        assert_eq!(lock(&service.state).submission.is_some(), retained);
+        let (result, submission_pending) = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(result.is_err());
+        let submission_pending = submission_pending.unwrap();
+        assert_eq!(submission_pending.request_id, "original");
+        assert_eq!(submission_pending.pending, retained);
+        assert_eq!(
+            submission_pending.interrupted,
+            recovering && code == "grant_revoked"
+        );
+        if code != "grant_revoked" {
+            assert_eq!(lock(&service.state).submission.is_some(), retained);
+        }
+        let _ = service.retire_profile();
+        // The delivery fact is independent of the retired mutable connection.
+        assert_eq!(submission_pending.pending, retained);
         assert!(!worker.join().unwrap().is_empty());
     }
+}
+
+#[test]
+fn expired_confirmation_reports_no_submission_to_the_external_owner() {
+    let service = NativeGeneration::new();
+    let mut c = connection();
+    c.bearer = Some("c".repeat(64));
+    c.expires = Some(Instant::now() + Duration::from_secs(120));
+    lock(&service.state).connection = Some(c.clone());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    service
+        .run_with_submission(
+            c.profile,
+            1,
+            "wallpaper.ai.generate.confirm".into(),
+            json!({"confirmationToken":"expired"}),
+            move |result, pending| {
+                sender.send((result, pending)).unwrap();
+            },
+        )
+        .unwrap();
+    let (result, pending) = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(result.unwrap_err().code, "quote_expired");
+    assert!(pending.is_none());
+    assert!(lock(&service.state).submission.is_none());
 }
 
 #[tokio::test]
@@ -780,7 +854,7 @@ async fn retired_submission_receipt(status: u16) {
     tokio::task::spawn_blocking(move || received_rx.recv_timeout(Duration::from_secs(5)).unwrap())
         .await
         .unwrap();
-    service.retire_profile();
+    let _ = service.retire_profile();
     release_tx.send(()).unwrap();
     let result =
         tokio::task::spawn_blocking(move || done_rx.recv_timeout(Duration::from_secs(5)).unwrap())

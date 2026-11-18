@@ -2,6 +2,7 @@
 // The player owns navigation and geometry; the native host owns the editor.
 (function () {
   'use strict';
+  if (window.hertzHost && !window.hertzHost.desktopEnabled) return;
   var transport, root, surface, notice, retry, requested = false, mounted = false;
   var confirmed = false, scheduled = 0, loading = 0, attempt = 0, last = '';
   var activeTab = 'wallpaper';

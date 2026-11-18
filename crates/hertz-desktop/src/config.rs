@@ -271,6 +271,14 @@ pub(crate) fn standalone(data_dir: PathBuf, edition: &str) -> Profile {
 pub(crate) fn is_dbx(profile: &Profile) -> bool {
     matches!(profile, Profile::Dbx { .. })
 }
+
+/// DBX identities remain readable as historical settings, with no executable desktop source.
+pub(crate) fn require_standalone(profile: &Profile) -> Result<()> {
+    if is_dbx(profile) {
+        bail!("DBX 桌面来源已退役，请从独立播放器启用桌面功能；独立宿主可用 --data-dir 指定播放器数据目录");
+    }
+    Ok(())
+}
 // Compatibility at the old management boundary only; stored schema v3 is strict.
 pub(crate) fn management_profile(value: serde_json::Value) -> Result<Profile> {
     if value.get("kind").is_some() {
@@ -925,6 +933,7 @@ fn lexical_profile(profile: &Profile) -> Profile {
 }
 /// Explicit switches require an existing absolute directory; persisted offline sources do not.
 pub(crate) fn normalize_profile(profile: Profile) -> Result<Profile> {
+    require_standalone(&profile)?;
     profile.normalized().context("来源身份或数据目录不可用")
 }
 
@@ -1839,6 +1848,35 @@ mod tests {
             plugin_id: hertz_desktop_ipc::profile::STANDARD_PLUGIN_ID.into(),
         }
     }
+    #[test]
+    fn retired_dbx_sources_are_rejected_without_losing_saved_domains() {
+        let legacy = dbx("legacy");
+        let mut config = Config::default();
+        config.activate_profile(legacy.clone()).unwrap();
+        config.lyrics.font_size = 47.0;
+        config.lyrics.enabled = true;
+        config.mini.reopen = true;
+        let original = encode_config(&config).unwrap();
+        let (mut restored, migrated) = parse_config(&original).unwrap();
+        assert!(!migrated);
+        assert!(require_standalone(restored.active_profile.as_ref().unwrap()).is_err());
+        assert!(normalize_profile(legacy.clone()).is_err());
+        assert_eq!(encode_config(&restored).unwrap(), original);
+        let saved = serde_json::to_value(&restored.profiles[0]).unwrap();
+        restored.activate_profile(profile("standalone")).unwrap();
+        let (restored, migrated) = parse_config(&encode_config(&restored).unwrap()).unwrap();
+        assert!(!migrated);
+        assert!(require_standalone(restored.active_profile.as_ref().unwrap()).is_ok());
+        let old_domain = restored
+            .profiles
+            .iter()
+            .find(|domain| same_profile(&domain.profile, &legacy))
+            .unwrap();
+        assert_eq!(serde_json::to_value(old_domain).unwrap(), saved);
+        assert_eq!(old_domain.lyrics.font_size, 47.0);
+        assert!(old_domain.lyrics.enabled && old_domain.mini.reopen);
+    }
+
     #[test]
     fn unbound_legacy_preferences_survive_dbx_then_bind_to_standalone() {
         let lyrics = LyricsConfig {

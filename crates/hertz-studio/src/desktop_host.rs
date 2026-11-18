@@ -11,27 +11,27 @@
 use serde_json::Value;
 use std::path::Path;
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, OnceLock,
 };
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 static HOST: OnceLock<Mutex<Option<Arc<hertz_desktop::HostHandle>>>> = OnceLock::new();
 /// 播放器 `--window` 自己有托盘时，宿主不再建第二个托盘图标。
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 static PLAYER_TRAY: AtomicBool = AtomicBool::new(false);
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 static SETTINGS_EVENTS: OnceLock<hertz_desktop::settings_embedding::SettingsEvents> =
     OnceLock::new();
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn set_settings_events(events: hertz_desktop::settings_embedding::SettingsEvents) {
     let _ = SETTINGS_EVENTS.set(events);
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn place_settings(
     placement: Option<hertz_desktop::settings_embedding::SettingsPlacement>,
 ) -> anyhow::Result<()> {
@@ -46,18 +46,18 @@ pub fn place_settings(
 
 /// 由原生主窗口在启动托盘时声明所有权；进程内只会有一个宿主。
 pub fn set_player_tray(enabled: bool) {
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "desktop-host"))]
     PLAYER_TRAY.store(enabled, Ordering::Release);
-    #[cfg(not(windows))]
+    #[cfg(not(all(windows, feature = "desktop-host")))]
     let _ = enabled;
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 fn registry() -> &'static Mutex<Option<Arc<hertz_desktop::HostHandle>>> {
     HOST.get_or_init(|| Mutex::new(None))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 fn current_handle() -> Option<Arc<hertz_desktop::HostHandle>> {
     registry()
         .lock()
@@ -66,7 +66,7 @@ fn current_handle() -> Option<Arc<hertz_desktop::HostHandle>> {
 }
 
 /// 确保宿主在**当前进程**运行；已运行则原样复用，退出过则重新拉起。
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn ensure_started(data_dir: &Path) -> anyhow::Result<()> {
     let mut guard = registry()
         .lock()
@@ -104,32 +104,32 @@ pub fn ensure_started(data_dir: &Path) -> anyhow::Result<()> {
 
 /// 直接下发一条管理命令；宿主没在跑时如实回「未运行」（REST 映射成
 /// `desktop_not_running`，UI 会走 launch 入口在同一进程里把它拉起来）。
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn command(name: &str, value: Option<Value>) -> anyhow::Result<Value> {
     let handle = current_handle().ok_or_else(|| anyhow::anyhow!("桌面歌词未运行"))?;
     handle.command(name, value).map_err(anyhow::Error::msg)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn is_running() -> bool {
     current_handle().is_some()
 }
 
 /// `--window` 形态下播放器的托盘线程代收了宿主自建菜单（小窗右键）的点击，
 /// 原样转回宿主自己的 `handle_menu`，不让这类动作因托盘合并而消失。
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn menu_event(id: &str) -> anyhow::Result<()> {
     let handle = current_handle().ok_or_else(|| anyhow::anyhow!("桌面歌词未运行"))?;
     handle.menu_event(id).map_err(anyhow::Error::msg)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 pub fn menu_event(_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
 /// 播放器退出前收口：先让宿主自己保存配置并销毁窗口，再继续服务优雅停机。
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop-host"))]
 pub fn shutdown() -> anyhow::Result<()> {
     let handle = registry().lock().ok().and_then(|mut guard| guard.take());
     let Some(handle) = handle else { return Ok(()) };
@@ -140,22 +140,22 @@ pub fn shutdown() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 pub fn ensure_started(_data_dir: &Path) -> anyhow::Result<()> {
     anyhow::bail!("桌面歌词窗口仅支持 Windows")
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 pub fn command(_name: &str, _value: Option<Value>) -> anyhow::Result<Value> {
     anyhow::bail!("桌面歌词未运行")
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 pub fn is_running() -> bool {
     false
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "desktop-host")))]
 pub fn shutdown() -> anyhow::Result<()> {
     Ok(())
 }

@@ -73,9 +73,8 @@ pub(crate) struct Snapshot {
     pub(crate) protocol: u32,
     /// 状态序号：离散播放状态帧（≤1 Hz）推进。
     pub(crate) seq: u64,
-    /// 频谱序号：频谱帧（≤30 Hz）推进；两者独立单调（§11.2）。DBX 宿主
-    /// 尚在 v1 形状（无该字段）——default 0 使其退化为仅状态序号去重，
-    /// 待 DBX 桥协议升级后自然获得双序号语义（§11.2 不扩大 DBX scope）。
+    /// 频谱序号：频谱帧（≤30 Hz）推进；两者独立单调（§11.2）。
+    /// 历史 v1 快照没有此字段，default 0 保留仅状态序号去重的解码语义。
     #[serde(default)]
     pub(crate) spectrum_seq: u64,
     pub(crate) server: ServerInfo,
@@ -155,9 +154,7 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new(profile: Profile) -> anyhow::Result<Self> {
-        if crate::config::is_dbx(&profile) {
-            anyhow::bail!("DBX 来源必须使用私有管道读取");
-        }
+        crate::config::require_standalone(&profile)?;
         Ok(Self {
             client: bridge::client()?,
             profile,
@@ -384,8 +381,8 @@ fn map_socket_error(error: tungstenite::Error) -> FeedError {
 
 pub(crate) fn validate(snapshot: &Snapshot) -> Result<(), FeedError> {
     let invalid = |message: &str| FeedError::new(ERR_INVALID, message);
-    // v2 是当前协议；v1 仍接受——DBX 宿主的已验收投影停在 v1（§11.2），
-    // 独立服务的协议门禁在 Feed::prepare 处已强制 PROTOCOL=2。
+    // v2 是当前来源协议；解码保留历史 v1 快照（§11.2）。
+    // 独立服务的发现准入在 Feed::prepare 处已强制 PROTOCOL=2。
     if !matches!(snapshot.protocol, 1 | 2) {
         return Err(invalid("快照协议不一致"));
     }
@@ -571,8 +568,7 @@ mod tests {
         server.join().unwrap();
     }
 
-    /// DBX 宿主仍发 v1 形状（无 spectrumSeq）：解析成功、验证通过、
-    /// 去重退化为状态序号单调（§11.2 不扩大 DBX scope）。
+    /// 历史 v1 形状（无 spectrumSeq）的解码与状态序号去重保持一致。
     #[test]
     fn v1_shaped_frames_degrade_to_status_seq_dedup() {
         let bands = vec!["0.5"; BANDS].join(",");

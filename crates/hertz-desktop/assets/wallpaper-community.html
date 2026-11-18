@@ -1,0 +1,102 @@
+<section id="panel-community" class="workspace community-workspace" role="tabpanel" aria-labelledby="tab-community" hidden>
+  <div class="community-heading">
+    <div><h2>社区壁纸</h2><p class="hint">订阅已签名的作品版本，下载后再决定应用到哪个显示组。</p></div>
+    <button id="community-refresh" type="button" data-community-read>刷新本机状态</button>
+  </div>
+  <p id="community-message" class="community-message" role="status" aria-live="polite">打开此页后读取已添加的社区。</p>
+  <div id="community-loading" class="community-loading" aria-hidden="true" hidden><span></span><span></span></div>
+  <div id="community-uncertain" class="community-notice" hidden>
+    <h3>正在核对原操作</h3>
+    <p id="community-uncertain-text" class="hint"></p>
+    <code id="community-uncertain-id" class="community-code"></code>
+    <button id="community-recover" type="button" data-community-read>查询原操作</button>
+  </div>
+  <div class="community-columns">
+    <div class="community-source-column">
+      <section class="community-section">
+        <h3 id="community-add-heading">添加社区</h3>
+        <form id="community-add-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-add-heading">
+          <label for="community-origin">社区 HTTPS 地址</label>
+          <p id="community-origin-help" class="hint">填写社区维护方提供的完整来源地址。首次添加时需要核对根公钥指纹。</p>
+          <input id="community-origin" name="origin" type="url" required maxlength="2048" autocomplete="url" autocorrect="off" autocapitalize="none" spellcheck="false" aria-describedby="community-origin-help community-origin-error" enterkeyhint="go">
+          <p id="community-origin-error" class="community-field-error"></p>
+          <button type="submit" data-community-mutation>读取来源与指纹</button>
+        </form>
+        <div id="community-root" class="community-confirmation" hidden>
+          <h4 id="community-root-heading" tabindex="-1">核对社区根公钥</h4>
+          <dl id="community-root-facts" class="community-facts"></dl>
+          <p class="hint">请与社区维护方通过独立渠道提供的指纹核对。接受这个根公钥后，本机会用它核对后续签名授权。</p>
+          <form id="community-root-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-root-heading">
+            <label for="community-root-input">完整 SHA-256 指纹</label>
+            <input id="community-root-input" name="fingerprint" type="text" required minlength="64" maxlength="64" pattern="[0-9a-fA-F]{64}" autocorrect="off" autocapitalize="none" spellcheck="false" aria-describedby="community-root-help community-root-error" enterkeyhint="done">
+            <p id="community-root-help" class="hint">填写全部 64 位十六进制字符。本次确认有效期为五分钟。</p>
+            <p id="community-root-error" class="community-field-error"></p>
+            <div class="community-actions"><button type="submit" class="primary" data-community-mutation>确认并添加此社区</button><button id="community-root-cancel" type="button">取消</button></div>
+          </form>
+        </div>
+      </section>
+      <section class="community-section">
+        <h3>当前社区</h3>
+        <label for="community-source">选择来源</label>
+        <select id="community-source" name="source" aria-describedby="community-source-help" disabled><option value="">尚未添加社区</option></select>
+        <p id="community-source-help" class="hint">各来源的作品身份和订阅分别保存。</p>
+        <div id="community-source-details" hidden>
+          <p id="community-freshness" class="community-state"></p>
+          <dl id="community-source-facts" class="community-facts"></dl>
+          <div class="community-actions"><button id="community-sync" type="button" data-community-mutation>同步安全清单</button><button id="community-browse" type="button" data-community-read>浏览已发布作品</button></div>
+          <h4>账号</h4>
+          <p id="community-account" class="hint"></p>
+          <div id="community-renew-choice" class="community-choice" hidden><input id="community-allow-refresh" name="allowRefresh" type="checkbox"><label for="community-allow-refresh">保持登录，允许登录提供方授权续期</label></div>
+          <div class="community-actions"><button id="community-login" type="button" data-community-mutation>在系统浏览器登录</button><button id="community-me" type="button" data-community-read hidden>检查登录状态</button><button id="community-logout" type="button" data-community-mutation hidden>退出此账号</button><button id="community-login-cancel" type="button" hidden>取消登录</button></div>
+          <p class="hint">公开作品可直接浏览。作者操作使用此社区的账号，登录不会授予桌面控制权限。</p>
+        </div>
+      </section>
+      <section class="community-section">
+        <h3>已发布作品</h3>
+        <p id="community-browse-empty" class="hint">选择社区后，点击“浏览已发布作品”。</p>
+        <ul id="community-works" class="community-list"></ul>
+        <button id="community-browse-more" type="button" data-community-read hidden>加载更多作品</button>
+        <details class="community-extra"><summary>按作品编号订阅</summary>
+          <form id="community-subscribe-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-subscribe-label">
+            <label id="community-subscribe-label" for="community-work-id">社区作品编号</label>
+            <input id="community-work-id" name="remoteWorkId" type="text" required maxlength="36" pattern="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" autocorrect="off" autocapitalize="none" spellcheck="false" aria-describedby="community-work-help">
+            <p id="community-work-help" class="hint">使用该来源的作品 UUID。订阅默认采用下载后提示应用的策略。</p>
+            <button type="submit" data-community-mutation>订阅此作品</button>
+          </form>
+        </details>
+      </section>
+    </div>
+    <div class="community-update-column">
+      <section class="community-section">
+        <h3>应用目标</h3>
+        <label for="community-target">显示组</label>
+        <select id="community-target" name="targetGroupId" aria-describedby="community-target-help" disabled><option value="">等待已保存的显示组</option></select>
+        <p id="community-target-help" class="hint">版本应用会保存一个新的配置版本。</p>
+        <p id="community-draft-note" class="community-notice hint" hidden>设置草稿会保留。更新后，请重新核对草稿再保存。</p>
+      </section>
+      <section class="community-section">
+        <h3>本机订阅</h3>
+        <p id="community-subscriptions-empty" class="hint">此社区还没有订阅。可从作品列表选择一个作品。</p>
+        <ul id="community-subscriptions" class="community-list"></ul>
+        <button id="community-subscriptions-more" type="button" hidden>显示更多订阅</button>
+      </section>
+      <section id="community-review" class="community-section community-confirmation" hidden>
+        <h3 id="community-review-heading" tabindex="-1">核对版本差异</h3>
+        <dl id="community-review-facts" class="community-facts"></dl>
+        <ul id="community-review-differences" class="community-differences"></ul>
+        <p id="community-review-note" class="hint"></p>
+        <form id="community-apply-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-review-heading">
+          <div class="community-choice"><input id="community-review-consent" name="consent" type="checkbox" required><label for="community-review-consent">我已核对确切版本、差异与所需权限</label></div>
+          <div class="community-actions"><button id="community-apply" type="submit" class="primary" data-community-mutation data-community-target>确认应用此版本</button><button id="community-review-cancel" type="button">取消</button></div>
+        </form>
+      </section>
+      <section class="community-section">
+        <h3>下载与应用记录</h3>
+        <p class="hint">安装完成和配置提交分别显示。超时后查询原操作，已知安全撤销始终阻止应用和回滚。</p>
+        <p id="community-updates-empty" class="hint">还没有下载或应用记录。</p>
+        <ul id="community-updates" class="community-list"></ul>
+        <button id="community-show-wallpaper" type="button">查看当前桌面画面</button>
+      </section>
+    </div>
+  </div>
+</section>

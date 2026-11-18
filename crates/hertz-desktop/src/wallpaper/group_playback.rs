@@ -261,11 +261,15 @@ impl GroupPlayback {
     }
 
     pub(crate) fn initial(&mut self) -> Option<Switch> {
+        self.initial_at(None)
+    }
+
+    pub(crate) fn initial_at(&mut self, reference: Option<&FixedVersion>) -> Option<Switch> {
         if self.transition.is_some() || self.failed {
             return None;
         }
         let switch = match &mut self.source {
-            Playback::Playlist(runner) => runner.initial()?,
+            Playback::Playlist(runner) => runner.initial_at(reference)?,
             Playback::Fixed { .. } => self.source.fixed_switch(),
         };
         Some(self.begin(switch))

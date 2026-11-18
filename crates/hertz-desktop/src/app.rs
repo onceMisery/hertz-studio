@@ -54,6 +54,14 @@ mod settings_presentation;
 mod wallpaper_ai;
 #[path = "wallpaper_apply.rs"]
 mod wallpaper_apply;
+#[path = "wallpaper_community.rs"]
+mod wallpaper_community;
+#[path = "wallpaper_community_updates.rs"]
+mod wallpaper_community_updates;
+#[path = "wallpaper_community_background.rs"]
+mod wallpaper_community_background;
+#[path = "wallpaper_community_security.rs"]
+mod wallpaper_community_security;
 #[path = "wallpaper_audio.rs"]
 mod wallpaper_audio;
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
@@ -61,6 +69,8 @@ mod wallpaper_audio;
 mod wallpaper_close_probe;
 #[path = "wallpaper_desktop.rs"]
 mod wallpaper_desktop;
+#[path = "wallpaper_external_requests.rs"]
+mod wallpaper_external_requests;
 #[path = "wallpaper_handoff.rs"]
 mod wallpaper_handoff;
 #[path = "wallpaper_mirror.rs"]
@@ -85,7 +95,6 @@ const HEARTBEAT_STALE: Duration = Duration::from_secs(10);
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum UserEvent {
-    Dbx(u64, Box<crate::dbx_feed::Message>),
     Feed(
         u64,
         Arc<AtomicBool>,
@@ -139,6 +148,8 @@ pub(crate) enum UserEvent {
         Box<Result<crate::wallpaper::ai::Catalog, crate::wallpaper::jobs::JobError>>,
     ),
     WallpaperManagement(ApiReply, serde_json::Value),
+    WallpaperCommunity(u64,crate::wallpaper::api::Request,Box<wallpaper_community::CommunityEvent>),
+    WallpaperExternal(Box<wallpaper_external_requests::Completion>),
     WorkPreviewReady(
         crate::wallpaper::api::Request,
         u64,
@@ -766,10 +777,7 @@ struct App {
     committed_config: Config,
     /// 全局恢复快捷键注册事务（§5.1）；None 仅在事务执行瞬间出现。
     hotkey: Option<crate::hotkey::Manager>,
-    dbx: Option<crate::dbx_feed::Controller>,
-    dbx_session: Option<String>,
     source_health: crate::management::SourceHealth,
-    wallpaper_last_update: Option<Instant>,
     wallpaper_audio: crate::wallpaper::audio_service::AudioService,
     wallpaper_audio_dispatch: wallpaper_audio::Dispatch,
     profile: Profile,
@@ -812,6 +820,8 @@ struct App {
     library_delete: Option<String>,
     settings_drafts: crate::wallpaper::settings_drafts::SettingsDrafts,
     wallpaper_ai: crate::wallpaper::ai::NativeAi,
+    wallpaper_external: crate::wallpaper::external_requests::NativeExternal,
+    wallpaper_community: wallpaper_community::CommunityState,
     settings_generation: u64,
     settings: Option<SettingsSurface>,
     settings_events: Option<crate::settings_embedding::SettingsEvents>,
@@ -908,7 +918,7 @@ impl App {
         let payload = serde_json::json!({
             "state": self.source_state,
             "message": self.source_message,
-            "capabilities": { "lyricsControl": !config::is_dbx(&self.profile) },
+            "capabilities": { "lyricsControl": true },
         });
         self.eval(&format!(
             "window.hertzLyrics && window.hertzLyrics.setSource({payload});"
@@ -1078,21 +1088,6 @@ impl App {
         self.send_document();
         self.send_snapshot();
         self.send_source();
-        self.recompute_visibility();
-    }
-
-    fn handle_document_failure(&mut self, error: crate::feed::DocumentError) {
-        if let Some(snapshot) = self.last_snapshot.as_mut() {
-            snapshot.lyrics.status = error.status().into();
-        }
-        self.current_document = None;
-        self.policy.no_content = true;
-        self.source_state = "ok";
-        self.source_message = Some(error.message().into());
-        self.send_snapshot();
-        self.send_document();
-        self.send_source();
-        self.place(true);
         self.recompute_visibility();
     }
 
@@ -1870,9 +1865,6 @@ impl App {
             self.retry_media_wallpaper(target);
             return;
         }
-        if let Some(dbx) = &self.dbx {
-            dbx.retry();
-        }
         log("wallpaper retry requested");
         self.desktop.recovery_terminal = false;
         self.desktop.recovery_attempts.clear();
@@ -2007,6 +1999,7 @@ impl App {
                 self.settings = Some(settings);
                 self.settings_drafts.set_owner(self.settings_generation);
                 self.wallpaper_ai.set_owner(self.settings_generation);
+                self.wallpaper_external.set_owner(self.settings_generation);
                 self.wallpaper_library
                     .set_settings_owner(self.settings_generation);
                 self.sync_settings_feed();
@@ -2035,6 +2028,8 @@ impl App {
         self.close_preview();
         self.settings_drafts.set_owner(0);
         self.wallpaper_ai.set_owner(0);
+        self.wallpaper_external.set_owner(0);
+        self.wallpaper_community.close_owner();
         self.wallpaper_library.set_settings_owner(0);
         self.settings_generation += 1;
         self.settings = None;
@@ -2060,10 +2055,6 @@ impl App {
         if self.config.active_profile.is_none() || self.feature_stops.wallpaper {
             return;
         }
-        if config::is_dbx(&self.profile) {
-            self.sync_dbx_feed();
-            return;
-        }
         if self.wallpaper_feed_stop.is_some() {
             return;
         }
@@ -2086,166 +2077,10 @@ impl App {
 
     fn sync_settings_feed(&mut self) {
         self.sync_lyrics_feed();
-        if config::is_dbx(&self.profile) {
-            self.sync_dbx_feed();
-            return;
-        }
         if !self.feature_stops.wallpaper && (self.settings.is_some() || self.wallpaper_running()) {
             self.ensure_wallpaper_feed();
         } else {
             self.stop_wallpaper_feed();
-        }
-    }
-
-    fn sync_dbx_feed(&mut self) {
-        if !config::is_dbx(&self.profile) {
-            return;
-        }
-        if self.dbx.is_none() {
-            self.dbx = Some(crate::dbx_feed::Controller::start(
-                self.profile.clone(),
-                self.source_generation,
-                self.proxy.clone(),
-            ));
-        }
-        self.dbx
-            .as_ref()
-            .unwrap()
-            .set_needs(crate::dbx_feed::Needs {
-                lyrics: self.lyrics_needed(),
-                wallpaper: !self.feature_stops.wallpaper
-                    && (self.wallpaper_running() || self.settings.is_some()),
-            });
-    }
-    fn handle_dbx(&mut self, message: crate::dbx_feed::Message) {
-        use crate::dbx_feed::Message;
-        use hertz_desktop_ipc::Scope;
-        match message {
-            Message::Session(session) => {
-                if self.dbx_session.as_deref() != Some(session.as_str()) {
-                    if self.lyrics_needed() {
-                        self.handle_feed_error("DBX 来源会话已变化，等待新快照".into());
-                    }
-                    self.handle_wallpaper_feed(Err(FeedError {
-                        code: "dbx_session_changed",
-                        message: "DBX 来源会话已变化".into(),
-                    }));
-                    self.dbx_session = Some(session);
-                }
-            }
-            Message::Lyrics {
-                started,
-                snapshot,
-                cached_document,
-            } => {
-                if !self.lyrics_needed()
-                    || started.elapsed() >= STALE_AFTER
-                    || self.dbx_session.as_deref() != Some(snapshot.server.session.as_str())
-                {
-                    return;
-                }
-                if self.last_snapshot.as_ref().is_some_and(|old| {
-                    old.server.session == snapshot.server.session && old.seq >= snapshot.seq
-                }) {
-                    return;
-                }
-                // A native expiry may have cleared the document during transport or
-                // event queueing. Reuse the authenticated cache only when this accepted
-                // snapshot needs it; ordinary snapshots never replay large JS documents.
-                let needs_document = self.current_document.is_none()
-                    || self.current_document_key != snapshot.lyrics.document_key
-                    || self.current_track.as_deref()
-                        != snapshot.track.as_ref().map(|track| track.id.as_str());
-                let document = cached_document
-                    .filter(|document| {
-                        needs_document
-                            && snapshot.lyrics.status == "ready"
-                            && document.document_key == snapshot.lyrics.document_key
-                    })
-                    .map(|document| (*document).clone());
-                self.source_health
-                    .accept(true, started, &snapshot.server.session);
-                self.last_update = started;
-                // The original handler owns presentation/offset semantics. Set t0 before
-                // dispatch so the first page delivery includes transport and native queue age.
-                self.handle_timed_update(
-                    crate::feed::FeedUpdate {
-                        snapshot,
-                        document,
-                        warning: None,
-                    },
-                    started,
-                );
-            }
-            Message::Wallpaper {
-                started,
-                mut snapshot,
-            } => {
-                if self.feature_stops.wallpaper
-                    || started.elapsed() >= STALE_AFTER
-                    || self.dbx_session.as_deref() != Some(snapshot.server.session.as_str())
-                {
-                    return;
-                }
-                if self.wallpaper_last.as_ref().is_some_and(|old| {
-                    old.server.session == snapshot.server.session && old.seq >= snapshot.seq
-                }) {
-                    return;
-                }
-                snapshot.received_at = Some(started);
-                self.wallpaper_last_update = Some(started);
-                self.source_health
-                    .accept(false, started, &snapshot.server.session);
-                self.handle_wallpaper_feed(Ok(snapshot));
-            }
-            Message::Document {
-                session,
-                key,
-                document,
-            } => {
-                if !self.lyrics_needed()
-                    || self.last_update.elapsed() >= STALE_AFTER
-                    || self.dbx_session.as_deref() != Some(session.as_str())
-                    || self.last_snapshot.as_ref().is_none_or(|snapshot| {
-                        snapshot.server.session != session
-                            || snapshot.lyrics.status != "ready"
-                            || snapshot.lyrics.document_key.as_deref() != Some(key.as_str())
-                    })
-                {
-                    return;
-                }
-                self.current_document_key = Some(key);
-                self.current_document = Some(document);
-                self.policy.no_content = self.last_snapshot.as_ref().is_none_or(|snapshot| {
-                    snapshot.track.is_none() || snapshot.lyrics.status != "ready"
-                }) || (self.vocal_document_mode()
-                    && self.config.lyrics.show_vocals
-                    && self.lyrics_vocal_geometry().capacity == 0);
-                self.place(true);
-                self.send_document();
-                self.recompute_visibility();
-            }
-            Message::Failure { scope, message } => {
-                if self.lyrics_needed() && (scope.is_none() || scope == Some(Scope::Lyrics)) {
-                    let permanent = [
-                        crate::feed::DocumentError::Unsupported,
-                        crate::feed::DocumentError::Invalid,
-                    ]
-                    .into_iter()
-                    .find(|error| error.message() == message);
-                    if let Some(error) = permanent {
-                        self.handle_document_failure(error);
-                    } else {
-                        self.handle_feed_error(message.into());
-                    }
-                }
-                if scope.is_none() || scope == Some(Scope::Wallpaper) {
-                    self.handle_wallpaper_feed(Err(FeedError {
-                        code: "dbx_source_unavailable",
-                        message: message.into(),
-                    }));
-                }
-            }
         }
     }
 
@@ -2392,14 +2227,13 @@ impl App {
             .map_err(|error| error.to_string())?;
         self.close_preview();
         self.settings_drafts.clear();
-        self.wallpaper_ai.generation.retire_profile();
+        if let Some(outcome) = self.wallpaper_ai.generation.retire_profile() {
+            self.observe_external_submission(&outcome, None);
+        }
         self.profile = profile;
         self.source_generation = next_generation;
         self.restart_mini_source(target);
-        self.dbx = None;
-        self.dbx_session = None;
         self.source_health = crate::management::SourceHealth::default();
-        self.wallpaper_last_update = None;
         self.lyrics_feed_stop.store(true, Ordering::Relaxed);
 
         self.stop_wallpaper_feed();
@@ -2684,6 +2518,9 @@ impl App {
         reply: ApiReply,
         target: &EventLoopWindowTarget<()>,
     ) {
+        if value.get("command").and_then(serde_json::Value::as_str).is_some_and(|command|command.starts_with("wallpaper.community.")) {
+            self.handle_community_management(value,reply,target);return;
+        }
         if value
             .get("command")
             .and_then(serde_json::Value::as_str)
@@ -3199,6 +3036,9 @@ impl App {
     }
 
     fn send_wallpaper_management(&mut self, reply: ApiReply, mut value: serde_json::Value) {
+        if value["ok"] == true {
+            self.observe_external_generation(&value["result"]);
+        }
         if value["configRevision"].is_null() {
             value["configRevision"] = value["result"]["configRevision"]
                 .as_u64()
@@ -3668,19 +3508,17 @@ impl App {
         self.mini_send_snapshot();
         self.mini_send_cover();
         self.mini_send_config();
-        if !config::is_dbx(&self.profile) {
-            spawn_mini_feed(
-                self.profile.clone(),
-                self.proxy.clone(),
-                self.source_generation,
-                self.mini_runtime.clone(),
-            );
-            if self.config.mini.reopen {
-                let action = self
-                    .mini_host
-                    .handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
-                self.apply_mini_action(action, target);
-            }
+        spawn_mini_feed(
+            self.profile.clone(),
+            self.proxy.clone(),
+            self.source_generation,
+            self.mini_runtime.clone(),
+        );
+        if self.config.mini.reopen {
+            let action = self
+                .mini_host
+                .handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
+            self.apply_mini_action(action, target);
         }
     }
 
@@ -4444,8 +4282,7 @@ impl App {
                 ) else {
                     return;
                 };
-                if config::is_dbx(&profile)
-                    || self.policy.locked
+                if self.policy.locked
                     || self.last_update.elapsed() > Duration::from_secs(2)
                 {
                     return;
@@ -4769,18 +4606,6 @@ impl App {
             .unwrap_or("");
         log(&format!("control command={command}"));
         let value = request.get("value");
-        if v2.is_none()
-            && config::is_dbx(&self.profile)
-            && !matches!(
-                command,
-                "status" | "wallpaper-status" | "wallpaper-settings" | "open-center"
-            )
-        {
-            return pipe_error_detail(
-                "source_target_required",
-                "此来源需要带明确目标的桌面管理协议",
-            );
-        }
         if self.position_edit.is_some()
             && !matches!(
                 command,
@@ -4824,11 +4649,9 @@ impl App {
                     self.settings_tab = tab.to_string();
                     self.settings_navigation = self.settings_navigation.wrapping_add(1);
                 }
-                // Legacy callers may open the current DBX center, but cannot nominate
-                // another source through the unscoped management envelope.
                 if let Some(v2) = v2 {
                     self.settings_candidate = Some(v2.target_profile.clone());
-                } else if !config::is_dbx(&self.profile) {
+                } else {
                     if let Some(profile) = value
                         .and_then(|value| value.get("profile"))
                         .and_then(|value| config::management_profile(value.clone()).ok())
@@ -4856,13 +4679,6 @@ impl App {
                 self.sync_tray();
             }
             "mini-toggle" => {
-                // DBX/Web 宿主走页内胶囊：小窗需要本机 HTTP 窄凭据，DBX 没有通道。
-                if config::is_dbx(&self.profile) {
-                    return pipe_error_detail(
-                        "unsupported_source",
-                        "DBX 形态不支持小窗播放，请使用页内胶囊",
-                    );
-                }
                 let action = if self.mini_host.phase == MiniPhase::Hidden {
                     self.mini_host
                         .handle(MiniEvent::Enter(crate::mini::EnterReason::User))
@@ -4875,9 +4691,6 @@ impl App {
                 self.sync_tray();
             }
             "open-pet-assets" => {
-                if config::is_dbx(&self.profile) {
-                    return pipe_error_detail("unsupported_source", "DBX 形态没有桌面宠物素材目录");
-                }
                 self.open_pet_assets();
             }
             "wallpaper-retry" => self.retry_wallpaper(target),
@@ -4945,7 +4758,7 @@ impl App {
                     Err(_) => return pipe_error("invalid_value"),
                 };
                 let profile = match config::management_profile(switch.profile) {
-                    Ok(profile) if !config::is_dbx(&profile) => profile,
+                    Ok(profile) => profile,
                     _ => return pipe_error("source_target_required"),
                 };
                 if let Err(error) = self.switch_source(profile, switch.expected_revision, target) {
@@ -5275,7 +5088,7 @@ impl App {
         self.with_target_status(serde_json::json!({
             "ok": true,
             "managementProtocol": crate::component::MANAGEMENT_PROTOCOL,
-            "bridgeProtocol": crate::component::DBX_BRIDGE_PROTOCOL,
+            "bridgeProtocol": crate::component::BRIDGE_PROTOCOL,
             "desktopBuildId": crate::component::BUILD_ID,
             "capabilities": {
                 "targetProfile": true,
@@ -5322,7 +5135,7 @@ impl App {
                 "peek": self.mini_host.phase == MiniPhase::Peeking,
                 "reopen": self.config.mini.reopen,
                 "scale": self.config.mini.scale,
-                "supported": !config::is_dbx(&self.profile),
+                "supported": true,
             },
             "diagnostics": {
                 "pauseReasons": policy::pause_reasons(&pause_inputs),
@@ -5456,30 +5269,12 @@ impl App {
     }
 
     fn source_expiry_deadline(&self) -> Option<Instant> {
-        let lyrics = self
-            .last_snapshot
+        self.last_snapshot
             .as_ref()
-            .map(|_| self.last_update + STALE_AFTER);
-        let wallpaper = config::is_dbx(&self.profile)
-            .then_some(self.wallpaper_last_update)
-            .flatten()
-            .filter(|_| self.wallpaper_last.is_some())
-            .map(|at| at + STALE_AFTER);
-        lyrics.into_iter().chain(wallpaper).min()
+            .map(|_| self.last_update + STALE_AFTER)
     }
 
     fn expire_source_data(&mut self, now: Instant) {
-        if config::is_dbx(&self.profile)
-            && self
-                .wallpaper_last_update
-                .is_some_and(|at| now.saturating_duration_since(at) >= STALE_AFTER)
-            && self.wallpaper_last.is_some()
-        {
-            self.handle_wallpaper_feed(Err(FeedError {
-                code: "dbx_stale",
-                message: "等待所选 DBX 的新快照".into(),
-            }));
-        }
         if now.saturating_duration_since(self.last_update) >= STALE_AFTER
             && self.last_snapshot.is_some()
         {
@@ -5508,7 +5303,10 @@ impl App {
         self.expire_inline_position_edit();
         self.reap_handoff_workspaces();
         self.poll_wallpaper_retirements();
+        self.tick_community_security();
+        self.tick_community_background();
         self.tick_wallpaper_apply(target);
+        self.flush_external_outcomes();
         self.tick_preview(target);
         self.tick_mirror_playback();
         self.for_each_desktop(|app| {
@@ -5517,7 +5315,6 @@ impl App {
             app.tick_media_wallpaper(target);
             app.tick_wallpaper_playlist();
         });
-        self.sync_dbx_feed();
         self.expire_source_data(Instant::now());
         self.flush_save();
         self.maybe_finish_feature_exit();
@@ -6026,7 +5823,7 @@ impl App {
         let wallpaper_retry = wallpaper_enabled.then(|| MenuItem::new("重新挂载壁纸", true, None));
         let mini_toggle = CheckMenuItem::new(
             "小窗播放（桌面宠物）",
-            !config::is_dbx(&self.profile),
+            true,
             self.mini_host.phase != MiniPhase::Hidden,
             None,
         );
@@ -6118,6 +5915,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             .or_else(|| config.active_profile.clone())
             .or_else(config::detect_profile)
             .unwrap_or_else(default_profile);
+        config::require_standalone(&profile)?;
         return run_wallpaper_feed_test(profile);
     }
     log(&format!(
@@ -6135,6 +5933,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
     }
     let (mut config, migration_notice) = config::load_with_notice()?;
     config.sanitize();
+    let explicit_binding = args.data_dir.is_some();
     let profile = args
         .data_dir
         .take()
@@ -6142,10 +5941,8 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
         .or_else(|| config.active_profile.clone())
         .or_else(config::detect_profile)
         .unwrap_or_else(default_profile);
-    let explicit_binding = args.data_dir.is_some();
-    // The CLI value was consumed above; custom means it was explicitly supplied.
-    let explicit_binding = explicit_binding
-        || matches!(&profile, Profile::Standalone { edition, .. } if edition == "custom");
+    // Reject a retired saved source before changing preferences or creating windows.
+    config::require_standalone(&profile)?;
     if config.unbound_domain.is_none() || explicit_binding || config.active_profile.is_some() {
         let mut next = config.clone();
         if next.activate_profile(profile.clone())? {
@@ -6260,10 +6057,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             Some(manager)
         },
         config,
-        dbx: None,
-        dbx_session: None,
         source_health: crate::management::SourceHealth::default(),
-        wallpaper_last_update: None,
         wallpaper_audio,
         wallpaper_audio_dispatch: Default::default(),
         profile,
@@ -6315,6 +6109,8 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
         ),
         settings_drafts: Default::default(),
         wallpaper_ai: crate::wallpaper::ai::NativeAi::new(),
+        wallpaper_external: crate::wallpaper::external_requests::NativeExternal::default(),
+        wallpaper_community: wallpaper_community::CommunityState::new(),
         settings_generation: 0,
         settings: None,
         settings_events,
@@ -6402,7 +6198,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
     if app.config.wallpaper.enabled || app.wallpaper_forced {
         app.ensure_wallpaper_feed();
     }
-    if !config::is_dbx(&app.profile) && app.config.active_profile.is_some() {
+    if app.config.active_profile.is_some() {
         app.sync_lyrics_feed();
         // 小窗来源线程：常驻轮询，事件侧按相位/播放态调节奏。
         spawn_mini_feed(
@@ -6418,8 +6214,6 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                 .handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
             app.apply_mini_action(action, &event_loop);
         }
-    } else if config::is_dbx(&app.profile) {
-        app.sync_dbx_feed();
     }
     spawn_ticker(proxy.clone());
     if !embedded {
@@ -6479,9 +6273,6 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             Event::UserEvent(UserEvent::WallpaperAudioDelivered(slot, token)) => { app.wallpaper_audio_dispatch.acknowledge(slot, token); }
             Event::UserEvent(UserEvent::WallpaperMirrorClock(generation, sent, received, page_ms)) => {
                 app.accept_mirror_clock(generation, sent, received, page_ms);
-            }
-            Event::UserEvent(UserEvent::Dbx(generation, message)) => {
-                if generation == app.source_generation && config::is_dbx(&app.profile) { app.handle_dbx(*message); }
             }
             Event::UserEvent(UserEvent::Feed(generation, stop, started, result)) => {
                 if generation == app.source_generation && !stop.load(Ordering::Acquire) && app.lyrics_needed() {
@@ -6559,6 +6350,8 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                 app.finish_ai_catalog(owner, request, *result);
             }
             Event::UserEvent(UserEvent::WallpaperManagement(reply, value)) => { app.send_wallpaper_management(reply, value); }
+            Event::UserEvent(UserEvent::WallpaperCommunity(owner,request,result))=>{app.finish_community_event(owner,request,*result);}
+            Event::UserEvent(UserEvent::WallpaperExternal(completion)) => { app.finish_external(*completion); }
             Event::UserEvent(UserEvent::WorkPreviewReady(request, owner, epoch, reply, document)) => {
                 app.finish_work_preview(request, owner, epoch, reply, *document, target);
             }
@@ -6639,6 +6432,10 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     let response=app.handle_ai_pair(request.body["value"].clone(),request.admission.peer().pid);
                     let _=request.reply.send(response);return;
                 }
+                if request.body["command"] == "wallpaper.ai.request.forward" {
+                    app.handle_external_forward(request.body["value"].clone(), request.admission.peer().pid,
+                        ApiReply::Pipe(request.reply.clone(), request.admission.clone())); return;
+                }
                 if request.body.get("protocol").is_some() || request.body.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.")) {
                     app.submit_wallpaper_management(request.body.clone(), ApiReply::Pipe(request.reply.clone(), request.admission.clone()), target);
                 } else {
@@ -6654,6 +6451,9 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     crate::host::HostAction::Command { body, reply } => {
                         if body["command"]=="wallpaper.ai.pair.verify" {
                             let _=reply.send(app.handle_ai_pair(body["value"].clone(),std::process::id()));return;
+                        }
+                        if body["command"] == "wallpaper.ai.request.forward" {
+                            app.handle_external_forward(body["value"].clone(), std::process::id(), ApiReply::Host(reply)); return;
                         }
                         if let Some(response) = app.handle_embedded_lyrics_request(&body) {
                             let _ = reply.send(response);
@@ -6696,10 +6496,13 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     .settings
                     .as_ref()
                     .is_some_and(|settings| settings.window.id() == window_id)
-                    && matches!(&event, WindowEvent::CloseRequested)
                 {
-                    if let Some(settings) = app.settings.as_ref() {
+                    if matches!(&event, WindowEvent::CloseRequested) {
+                        if let Some(settings) = app.settings.as_ref() {
                         settings.eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.requestClose();");
+                        }
+                    } else if !app.external_window_visible() {
+                        app.wallpaper_external.set_panel(false);
                     }
                 } else if app
                     .mini
@@ -6721,7 +6524,6 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                 app.cancel_calibration();
                 app.close_preview();
                 app.drop_wallpaper_surface();
-                app.dbx = None;
                 app.mini_runtime.stop.store(true, Ordering::Relaxed);
                 // 还窗口过程并清注册表，避免收尾回调打在已销毁的窗上。
                 if let Some(mini) = app.mini.take() {
@@ -7030,12 +6832,13 @@ fn profile_options(
     config: &Config,
     candidate: Option<&Profile>,
 ) -> Vec<serde_json::Value> {
-    let mut profiles = vec![current.clone()];
-    for profile in config
+    let mut profiles = Vec::new();
+    for profile in std::iter::once(current.clone()).chain(config
         .known_profiles()
         .into_iter()
         .chain(config::detect_profiles())
-        .chain(candidate.cloned())
+        .chain(candidate.cloned()))
+        .filter(|profile| !config::is_dbx(profile))
     {
         if !profiles
             .iter()
@@ -7507,11 +7310,37 @@ fn settings_html() -> String {
                 include_str!("../assets/wallpaper-work.js")
             ),
         )
-        .replace("__AI_CSS__", include_str!("../assets/wallpaper-ai.css"))
-        .replace("__AI__", include_str!("../assets/wallpaper-ai.js"))
+        .replace(
+            "__AI_CSS__",
+            &format!(
+                "{}\n{}",
+                include_str!("../assets/wallpaper-ai.css"),
+                include_str!("../assets/wallpaper-external-requests.css")
+            ),
+        )
+        .replace(
+            "__AI__",
+            &format!(
+                "{}\n{}",
+                include_str!("../assets/wallpaper-ai.js"),
+                include_str!("../assets/wallpaper-external-requests.js")
+            ),
+        )
         .replace(
             "__PLAYLIST__",
             include_str!("../assets/wallpaper-playlist.js"),
+        )
+        .replace(
+            "__COMMUNITY_PANEL__",
+            include_str!("../assets/wallpaper-community.html"),
+        )
+        .replace(
+            "__COMMUNITY_CSS__",
+            include_str!("../assets/wallpaper-community.css"),
+        )
+        .replace(
+            "__COMMUNITY__",
+            &format!("{}\n{}",include_str!("../assets/wallpaper-community-view.js"),include_str!("../assets/wallpaper-community.js")),
         )
 }
 
@@ -8550,7 +8379,15 @@ mod tests {
         let candidate = config::standalone(PathBuf::from(r"C:\profiles\c"), "standard");
         let mut config = config::Config::default();
         config.activate_profile(saved).unwrap();
+        let retired = Profile::Dbx {
+            edition: "standard".into(), data_dir: r"C:profileslegacy".into(),
+            plugin_id: hertz_desktop_ipc::profile::STANDARD_PLUGIN_ID.into(),
+        };
+        config.activate_profile(retired.clone()).unwrap();
         let options = profile_options(&current, &config, Some(&candidate));
+        assert!(config.known_profiles().iter().any(|source| config::same_profile(source, &retired)));
+        assert!(options.iter().all(|option| option["kind"] == "standalone"));
+        assert!(profile_options(&current, &config, Some(&retired)).iter().all(|option| option["kind"] == "standalone"));
         let dirs: Vec<String> = options
             .iter()
             .map(|option| option["dataDir"].as_str().unwrap().to_string())

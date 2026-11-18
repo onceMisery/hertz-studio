@@ -2,6 +2,7 @@
 // Main-window desktop lyrics settings. Reads never enable a desktop surface.
 (function () {
   'use strict';
+  if (window.hertzHost && !window.hertzHost.desktopEnabled) return;
 
   var refs = null, transport = null, owner = null, dialog = null;
   var viewRoot = null, viewObserver = null;

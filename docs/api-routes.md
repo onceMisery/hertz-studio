@@ -1,6 +1,6 @@
 # REST 路由清单
 
-2026-11-07 桌面歌词声部扩展：快照声明 `vocalSchemaVersions:[1]`；文档查询可附整数 `vocalSchemaVersion=1`。普通文档保持v1形状，带声部文档在原鉴权及key检查后要求能力1，否则422 `desktop_vocals_unsupported`且不返回歌词正文。新文档含schema、agents与行内vocal，HTTP/DBX共用同一投影和key，详见[A10合同](aegis/specs/2026-11-07-desktop-lyrics-vocals-design.md)。备份含导入歌词时为v2，原文/偏移/修订及预算见[JSON备份](json-backup-consistency.md)。
+2026-11-07 桌面歌词声部扩展：快照声明 `vocalSchemaVersions:[1]`；文档查询可附整数 `vocalSchemaVersion=1`。普通文档保持v1形状，带声部文档在原鉴权及key检查后要求能力1，否则422 `desktop_vocals_unsupported`且不返回歌词正文。新文档含schema、agents与行内vocal，独立播放器 HTTP 使用原桌面投影和 key，DBX 保留普通歌词，详见[A10合同](aegis/specs/2026-11-07-desktop-lyrics-vocals-design.md)。备份含导入歌词时为v2，原文/偏移/修订及预算见[JSON备份](json-backup-consistency.md)。
 
 面向接口的参考清单，README 不收录这些内容。改了 `crates/hertz-studio/src/routes.rs`
 或 `crates/hertz-studio/src/main.rs` 之后重跑生成器：
@@ -16,10 +16,14 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 `/v1/desktop/calibration-authorization` 的授权查询/修改均需要完整播放器鉴权。
 `shown` 由选中的完整播放器接收端确认；校准通道不写歌词偏移或执行播控。
 
+2026-11-18 当前形态边界：桌面歌词、桌面壁纸、桌面宠物/原生小窗、桌面校准和壁纸 AI 配对属于独立播放器的 `desktop-host`。Standard/Full DBX 插件保留音乐播放、普通歌词、沉浸舞台及舞台素材；插件不编译原生桌面运行时，不注册桌面管理/数据/校准/壁纸 AI 路由，生成界面不包含桌面入口。旧 DBX profile 和授权文件保留为历史数据，不据其恢复连接或授权。独立宿主遇到旧 DBX 活动来源会在切换/创建窗口前拒绝；从独立播放器启动时使用播放器自己的数据目录。
+
+下表列出独立播放器各编译 feature 的 HTTP 路由；桌面管理、`/v1/desktop-lyrics/*`、`/v1/wallpaper/*`、`/v1/desktop-mini/*` 和 `/v1/ai/wallpaper/*` 仅在 `desktop-host` 下注册。DBX RPC 的桌面请求返回 `not_found`；插件库的同族 HTTP 请求返回 404。
+
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 215 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 178 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 161 条内嵌静态资源路由。
+REST 路由表共 216 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 179 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 163 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -60,6 +64,7 @@ REST 路由表共 215 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/ai/wallpaper/pairings/register` |
 | POST | `/v1/ai/wallpaper/pairings/{pairingId}/confirm` |
 | POST | `/v1/ai/wallpaper/quote` |
+| POST | `/v1/ai/wallpaper/requests/accept` |
 | DELETE | `/v1/ai/wallpaper/session` |
 | GET | `/v1/auth/overlay-key` |
 | POST | `/v1/auth/ticket` |

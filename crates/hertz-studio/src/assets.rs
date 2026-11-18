@@ -65,10 +65,13 @@ ui_assets! {
     "/room.js", JS => const ROOM_JS: &str = edition_ui!("room.js");
     "/room.css", CSS => const ROOM_CSS: &str = edition_ui!("room.css");
     "/host.js", JS => const HOST_JS: &str = edition_ui!("host.js");
-    "/desktop-settings.js", JS => const DESKTOP_SETTINGS_JS: &str = edition_ui!("desktop-settings.js");
+    #[cfg(feature = "desktop-host")]
     "/desktop-lyrics-settings.js", JS => const DESKTOP_LYRICS_SETTINGS_JS: &str = edition_ui!("desktop-lyrics-settings.js");
+    #[cfg(feature = "desktop-host")]
     "/wallpaper-settings.js", JS => const WALLPAPER_SETTINGS_JS: &str = edition_ui!("wallpaper-settings.js");
+    #[cfg(feature = "desktop-host")]
     "/wallpaper-settings.css", CSS => const WALLPAPER_SETTINGS_CSS: &str = edition_ui!("wallpaper-settings.css");
+    #[cfg(feature = "desktop-host")]
     "/desktop-lyrics-settings.css", CSS => const DESKTOP_LYRICS_SETTINGS_CSS: &str = edition_ui!("desktop-lyrics-settings.css");
     "/window-lifecycle.js", JS => const WINDOW_LIFECYCLE_JS: &str = edition_ui!("window-lifecycle.js");
     "/window-sleep.js", JS => const WINDOW_SLEEP_JS: &str = edition_ui!("window-sleep.js");

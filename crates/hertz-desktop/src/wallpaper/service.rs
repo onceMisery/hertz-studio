@@ -28,7 +28,13 @@ const LAYOUT_CACHE_TTL: Duration = Duration::from_secs(30);
 
 type Initialization = Option<Result<(), Arc<JobError>>>;
 type Reply = Box<dyn FnOnce(Value) + Send>;
+type ExternalFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+type ExternalTask = Box<dyn FnOnce(Result<Arc<ImportJobs>, JobError>) -> ExternalFuture + Send>;
 enum Work {
+    ExternalRequest {
+        operation: ExternalTask,
+        slot: Slot,
+    },
     CompositionDraftPreview {
         document: super::work_drafts::Document,
         target: super::image_prepare::ImageTarget,
@@ -372,6 +378,15 @@ pub(crate) struct LibraryService {
 }
 
 impl LibraryService {
+    pub(crate) fn security_check(&self, hash: &str) -> Result<(),JobError> {
+        self.state.jobs.get().ok_or_else(||JobError::new("trust_unavailable","安全库尚未加载"))?.library().trust().security_check(hash)
+    }
+
+    pub(crate) fn security_snapshot(&self, revision:u64, next_due:u64) -> Result<Option<super::community::store::SecuritySnapshot>,JobError> {
+        match self.state.jobs.get(){Some(jobs)=>jobs.library().trust().security_snapshot(revision,next_due),None=>Ok(None)}
+    }
+    pub(crate) fn activation_check(&self,hash:&str,is_web:bool)->Result<(),JobError>{self.state.jobs.get().ok_or_else(||JobError::new("trust_unavailable","安全库尚未加载"))?.library().trust().activation_check(hash,is_web)}
+    pub(crate) fn community_job_active(&self)->bool{self.state.jobs.get().is_some_and(|jobs|jobs.active_status().is_some())}
     pub(crate) fn start(base: PathBuf, probe: ProbeClient) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Work>(REQUEST_CAP);
         let pending = Arc::new(AtomicUsize::new(0));
@@ -426,6 +441,10 @@ impl LibraryService {
                             let state = Arc::clone(&worker);
                             tasks.spawn_local(async move {
                                 match call {
+                                    Work::ExternalRequest { operation, slot } => {
+                                        let _slot = slot;
+                                        operation(state.jobs().await.map(Arc::clone)).await;
+                                    }
                                     Work::CompositionDraftPreview{document,target,fit,facts,cancel,reply,slot}=>{
                                         let _slot=slot;let result=async{let jobs=Arc::clone(state.jobs().await?);let runtime=tokio::runtime::Handle::current();tokio::task::spawn_blocking(move||runtime.block_on(async{
                                             let job=format!("work-preview-{}",super::file_tokens::random_token()?);let source=async{
@@ -543,6 +562,21 @@ impl LibraryService {
     pub(crate) fn set_settings_owner(&self, owner: u64) {
         self.state.tokens.set_owner(owner);
         self.state.output_tokens.set_owner(owner);
+    }
+
+    /// External requests use the original bounded management worker and slots.
+    pub(crate) fn external_request<F, Fut>(&self, operation: F) -> Result<(), JobError>
+    where
+        F: FnOnce(Result<Arc<ImportJobs>, JobError>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let slot = self.reserve()?;
+        self.tx
+            .try_send(Work::ExternalRequest {
+                operation: Box::new(move |jobs| Box::pin(operation(jobs))),
+                slot,
+            })
+            .map_err(|_| JobError::new("budget_busy", "原壁纸管理队列暂不可用"))
     }
 
     pub(crate) fn recommend_ai(
@@ -856,6 +890,7 @@ impl State {
                         runtime.block_on(async move {
                             let library = Library::open(&base).await?;
                             let assets = AssetStore::new(&base)?;
+                            assets.bind_trust(Arc::clone(library.trust()))?;
                             jobs::reconcile_startup(&library, &assets).await?;
                             Ok::<_, JobError>(Arc::new(ImportJobs::start(library, assets, probe)))
                         })
@@ -1752,6 +1787,8 @@ impl State {
                         command.as_deref(),
                         Some(
                             "wallpaper.apply"
+                                | "wallpaper.community.apply"
+                                | "wallpaper.community.auto"
                                 | "config.commit"
                                 | "wallpaper.ai.recommend"
                                 | "wallpaper.ai.confirm"
@@ -1797,7 +1834,7 @@ impl State {
                 }
                 if command
                     .as_deref()
-                    .is_some_and(|command| command != "wallpaper.import.begin")
+                    .is_some_and(|command| !matches!(command,"wallpaper.import.begin"|"wallpaper.community.download"))
                 {
                     return Err(JobError::new(
                         "operation_unknown",

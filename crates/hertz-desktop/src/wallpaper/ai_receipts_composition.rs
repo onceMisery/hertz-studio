@@ -51,11 +51,12 @@ impl AiReceipts<'_> {
             .map_err(database)?;
         Self::expire_in(&mut tx).await?;
         let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ai_receipts WHERE state IN ('preparing','failed','previewReady','saving')").fetch_one(&mut *tx).await.map_err(database)?;
-        let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_receipts")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database)?;
-        if count >= 8 || records >= 500 || expiry <= now_secs() || expiry > now_secs() + 86400 {
+        super::super::ai_receipt_budget::ensure_room(
+            &mut tx,
+            super::super::ai_receipt_budget::Reservation::Candidate,
+        )
+        .await?;
+        if count >= 8 || expiry <= now_secs() || expiry > now_secs() + 86400 {
             return Err(JobError::new(
                 "candidate_capacity_exceeded",
                 "组合候选数量或期限超限",

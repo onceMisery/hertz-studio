@@ -19,7 +19,7 @@ default = []
 full = ["hertz-studio/full"]
 
 [dependencies]
-hertz-studio = { path = "../../crates/hertz-studio" }
+hertz-studio = { path = "../../crates/hertz-studio", default-features = false }
 # DBX 官方 SDK 没有发布到 crates.io（`dbx-plugin-sdk` 在 registry 上是 404），
 # 而 dbx-plugin CLI 明确支持 path 依赖，所以这里 vendor 一份保证可独立构建。
 # 副本与上游保持字节一致，放在 plugin/vendor/ 而不是本包目录内——cargo 不允许
