@@ -169,7 +169,7 @@ function Set-HertzSetupRegistration([string]$Directory,$Manifest,[string]$Uninst
     $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($hertzSetupKey)
     try {
         foreach ($entry in @{
-            DisplayName='Hertz Studio Full';DisplayVersion=$Manifest.version;Publisher='hertz-studio contributors';
+            DisplayName='Hertz Studio';DisplayVersion=$Manifest.version;Publisher='hertz-studio contributors';
             InstallLocation=$Directory;DisplayIcon=(Join-Path $Directory 'hertz-studio.exe')+',0';
             UninstallString='"'+(Join-Path $Directory $hertzUninstallerName)+'"';
             QuietUninstallString='"'+(Join-Path $Directory $hertzUninstallerName)+'" /S'

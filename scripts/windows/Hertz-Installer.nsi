@@ -23,13 +23,13 @@ SetCompressor /SOLID lzma
 !error "PRODUCT_VERSION is required"
 !endif
 
-Name "Hertz Studio Full"
+Name "Hertz Studio"
 OutFile "${OUTPUT_EXE}"
 InstallDir "$LOCALAPPDATA\Programs\Hertz Studio"
 InstallDirRegKey HKCU "Software\HertzStudio\Desktop" "InstallDir"
 BrandingText "Hertz Studio"
 VIProductVersion "${PRODUCT_VERSION_NUMERIC}"
-VIAddVersionKey "ProductName" "Hertz Studio Full"
+VIAddVersionKey "ProductName" "Hertz Studio"
 VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "FileDescription" "Hertz Studio current-user installer"

@@ -22,7 +22,7 @@ function packageInstaller(binary,output,{makensis=process.env.HERTZ_MAKENSIS,all
     const ps=path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe');
     execFileSync(ps,['-NoProfile','-NonInteractive','-Command','Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($env:HERTZ_INSTALLER_ZIP,$env:HERTZ_INSTALLER_CONTENT)'],{windowsHide:true,timeout:30000,env:{...process.env,HERTZ_INSTALLER_ZIP:portable.archive,HERTZ_INSTALLER_CONTENT:content}});
     const description=portable.manifest;
-    const name=`hertz-studio-full-${description.version}-${description.target}${description.profile==='debug'?'-debug':''}-setup.exe`;
+    const name=`hertz-studio-${description.version}-${description.target}${description.profile==='debug'?'-debug':''}-setup.exe`;
     const executable=path.join(stage,name);
     const sources=path.join(stage,'installer-source');fs.mkdirSync(sources);
     const script=path.join(sources,'Hertz-Installer.nsi');

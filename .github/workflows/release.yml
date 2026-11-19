@@ -136,7 +136,7 @@ jobs:
           # 按名字取版本，别用 packages[0]：workspace 成员的顺序不是契约，
           # 加一个排在 hertz-studio 前面的成员就会静默地把版本号取错。
           VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='hertz-studio'))")"
-          NAME="hertz-studio-${{ matrix.edition }}-${VERSION}-${{ matrix.target }}"
+          NAME="hertz-studio-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${NAME}"
           # 只拷可执行文件本体：MSVC 下 hertz-studio* 会把 .pdb 调试符号一并带进包。
           BIN="target/${{ matrix.target }}/release/hertz-studio"

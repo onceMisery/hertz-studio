@@ -98,7 +98,7 @@ function packageStandalone(binary, output, { allowDebug = false } = {}) {
     const manifest = { ...description, signatureStatus,
       qualification: description.profile === 'release' ? 'release-candidate' : 'development-only',
       launch: { file: 'Hertz Studio.cmd', binary: 'hertz-studio.exe', arguments: ['--window'] }, files };
-    const name = `hertz-studio-full-${description.version}-${description.target}${description.profile === 'debug' ? '-debug' : ''}`;
+    const name = `hertz-studio-${description.version}-${description.target}${description.profile === 'debug' ? '-debug' : ''}`;
     const manifestText = JSON.stringify(manifest, null, 2) + '\n';
     fs.writeFileSync(path.join(content, 'standalone-build.json'), manifestText);
     const zip = path.join(stage, name + '.zip');

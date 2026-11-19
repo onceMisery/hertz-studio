@@ -1,6 +1,6 @@
 # Windows 当前用户安装
 
-Windows 11 x64 的 Full 原生播放器提供 NSIS 安装候选。运行 `hertz-studio-full-<版本>-x86_64-pc-windows-msvc-setup.exe`，选择程序目录并完成安装，然后从桌面或开始菜单打开 Hertz Studio。安装不自动启动播放器、播放音乐或启用开机启动。
+Windows 11 x64 的 Full 原生播放器提供 NSIS 安装候选。运行 `hertz-studio-<版本>-x86_64-pc-windows-msvc-setup.exe`，选择程序目录并完成安装，然后从桌面或开始菜单打开 Hertz Studio。安装不自动启动播放器、播放音乐或启用开机启动。
 
 原生播放器使用 Windows GUI 子系统，从桌面或开始菜单启动时不会创建命令行窗口。壁纸设置、应用保存、放弃修改及预览都在主程序的设置页完成；设置项、默认值和配置存储沿用现有实现。加载失败可在编辑区重试，保存失败会保留草稿。
 
