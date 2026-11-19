@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: MIT
 mod records;
+#[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod tests;
 mod watermarks;
 
 use std::{path::Path, time::Duration};
@@ -91,37 +97,48 @@ impl Ledger {
         let keys = Keys::load(&config)?;
         let identity = Identity::new(&config, &keys.bootstrap_public()?);
         let pool = connect(&config).await?;
-        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(&pool)
-            .await?;
-        if version != 2 {
-            return Err(Error("unsupported_signer_schema"));
-        }
-        let stored: Option<String> =
-            sqlx::query_scalar("SELECT CASE WHEN length(CAST(identity_json AS BLOB)) BETWEEN 2 AND 16384 THEN identity_json ELSE NULL END FROM signer_identity WHERE singleton=1")
+        // A rejected recovery must finish releasing SQLite's writer handle before
+        // returning. Dropping a pool alone starts asynchronous cleanup and can
+        // make the next valid open fail the protected-file sharing check.
+        let result = async {
+            let version: i64 = sqlx::query_scalar("PRAGMA user_version")
                 .fetch_one(&pool)
                 .await?;
-        let stored = stored.ok_or(Error("stored_ledger_identity_exceeds_limit"))?;
-        if stored != identity.encoded()? {
-            return Err(Error("ledger_identity_or_keys_changed"));
+            if version != 2 {
+                return Err(Error("unsupported_signer_schema"));
+            }
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT CASE WHEN length(CAST(identity_json AS BLOB)) BETWEEN 2 AND 16384 THEN identity_json ELSE NULL END FROM signer_identity WHERE singleton=1")
+                    .fetch_one(&pool)
+                    .await?;
+            let stored = stored.ok_or(Error("stored_ledger_identity_exceeds_limit"))?;
+            if stored != identity.encoded()? {
+                return Err(Error("ledger_identity_or_keys_changed"));
+            }
+            crate::authorization::reconcile(&pool, &config, &keys).await?;
+            let checkpoints =
+                Store::open(&config, identity.clone(), keys.authorization().watermark())?;
+            let mut ledger = Self {
+                config,
+                pool: pool.clone(),
+                keys,
+                identity,
+                checkpoints,
+                _locks: locks,
+            };
+            ledger.reconcile().await?;
+            if let Some(proof) = recovery_proof {
+                ledger
+                    .checkpoints
+                    .check_recovery_proof(&ledger.config, proof)?;
+            }
+            Ok(ledger)
         }
-        crate::authorization::reconcile(&pool, &config, &keys).await?;
-        let checkpoints = Store::open(&config, identity.clone(), keys.authorization().watermark())?;
-        let mut ledger = Self {
-            config,
-            pool,
-            keys,
-            identity,
-            checkpoints,
-            _locks: locks,
-        };
-        ledger.reconcile().await?;
-        if let Some(proof) = recovery_proof {
-            ledger
-                .checkpoints
-                .check_recovery_proof(&ledger.config, proof)?;
+        .await;
+        if result.is_err() {
+            pool.close().await;
         }
-        Ok(ledger)
+        result
     }
 
     async fn reconcile(&mut self) -> Result<()> {

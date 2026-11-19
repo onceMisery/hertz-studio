@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+#[cfg(test)]
+#[path = "auth_callback_tests.rs"]
+mod tests;
 use super::super::error;
 use crate::wallpaper::jobs::JobError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -17,6 +20,7 @@ pub(super) struct Pkce {
     pub verifier: Zeroizing<String>,
     pub challenge: String,
     created: Instant,
+    consumed: AtomicBool,
 }
 
 impl Pkce {
@@ -41,6 +45,7 @@ impl Pkce {
             verifier,
             challenge,
             created: Instant::now(),
+            consumed: AtomicBool::new(false),
         })
     }
 
@@ -49,6 +54,11 @@ impl Pkce {
         cancel: &AtomicBool,
         issuer: &str,
     ) -> Result<Zeroizing<String>, JobError> {
+        // Claim the whole flow before awaiting so concurrent or repeated waits
+        // cannot consume a second code, including after cancellation or denial.
+        if self.consumed.swap(true, Ordering::AcqRel) {
+            return Err(error("callback_consumed", "此登录回调已使用，请重新登录"));
+        }
         let deadline = self.created + Duration::from_secs(300);
         let expected_host = self
             .redirect

@@ -27,6 +27,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 tao = { version = "=0.37.1", default-features = false, features = ["rwh_06"] }

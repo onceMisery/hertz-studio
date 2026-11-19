@@ -66,21 +66,18 @@ impl AdmittedPool {
         }
     }
 
-    /// An identity preflight must release its actual database handles before a
-    /// writable pool opens the same files. Retain the admission on failed exit.
+    /// Close the sole connection of an unexported identity-inspection pool.
+    /// Its explicit close awaits SQLite's worker acknowledgement; an exclusive
+    /// file probe would incorrectly include other legitimate pools for this DB.
+    /// Keep the admitted pool intact across awaits so cancellation or failure
+    /// still uses the original conservative closer.
     pub(crate) async fn close_before_reopen(mut self) -> Result<()> {
-        if let Some(pool) = self.pool.take() {
+        if let Some(pool) = self.pool.as_ref() {
+            let connection = pool.acquire().await?;
+            connection.close().await?;
             pool.close().await;
-            drop(pool);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !sqlite_physically_exited(&self.root, self.database) {
-                if std::time::Instant::now() >= deadline {
-                    if let Some(charge) = self.charge.take() { std::mem::forget(charge); }
-                    anyhow::bail!("SQLite identity preflight did not physically close");
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
         }
+        self.pool.take();
         self.charge.take();
         Ok(())
     }

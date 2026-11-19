@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+#[cfg(test)]
+#[path = "auth_jwt_tests.rs"]
+mod tests;
 use super::super::{contract, error, model::SourceProfile, network, now};
 use crate::wallpaper::jobs::JobError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};

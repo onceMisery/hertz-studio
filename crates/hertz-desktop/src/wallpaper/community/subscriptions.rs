@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! Subscription projection and recoverable update journal on the original library.
+#[cfg(test)]
+#[path = "apply_tests.rs"]
+mod apply_tests;
+#[cfg(test)]
+#[path = "subscription_tests.rs"]
+mod tests;
 use super::{
     error,
     model::{SourceProfile, MAX_SUBSCRIPTIONS},

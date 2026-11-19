@@ -11,6 +11,8 @@ mod network_policy;
 mod receipts;
 pub(crate) mod store;
 pub(crate) mod subscriptions;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) use receipts::AcceptedRelease;
 pub(crate) use store::TrustStore;

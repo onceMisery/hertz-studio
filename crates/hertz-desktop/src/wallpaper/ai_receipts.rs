@@ -457,6 +457,8 @@ mod tests {
             )
         );
         library.pool().close().await;
+        // A restart releases the independent trust pool with the whole library.
+        drop(library);
         let reopened = Library::open(root.path()).await.unwrap();
         assert_eq!(
             AiReceipts::new(&reopened)

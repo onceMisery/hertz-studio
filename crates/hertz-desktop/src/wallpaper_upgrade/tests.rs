@@ -318,6 +318,25 @@ async fn current_shared_inspection_survives_other_pool_shutdown_sidecars() {
 
 #[tokio::test]
 async fn fresh_app_is_lazy_and_first_library_open_serializes_with_config_gate() {
+    // Other fixtures can still hold global SQLx admissions in closer threads.
+    // This case needs available quota to test fresh-root laziness and the config
+    // lock; isolate it like the exact SQLx fee witness below.
+    const NAME: &str = "wallpaper_upgrade::tests::fresh_app_is_lazy_and_first_library_open_serializes_with_config_gate";
+    if std::env::var("HERTZ_SQLX_LAZY_CHILD").as_deref() != Ok(NAME) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env("HERTZ_SQLX_LAZY_CHILD", NAME)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cold child {NAME} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let dir = tempfileish::temp_dir("upgrade-lazy");
     let app = prepare(dir.path()).unwrap();
     assert!(!dir.path().join("wallpaper.db").exists());

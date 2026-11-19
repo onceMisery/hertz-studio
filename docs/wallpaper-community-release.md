@@ -3,10 +3,15 @@
 2026-11-18 已把离线根链、Signer 工作代际、Hub 发布/撤销回执、原生
 trust.db/认证/订阅和原安装/Config 接线写入源码。共享纯合同位于
 `hertz-wallpaper::release`，通过可选 `community-release` feature 启用。
-用户随后恢复验证。Rust 1.88 的共享 wallpaper 103 项、集成套件及 7 项 doctest、
-Hub 管理 10 项通过；Signer 已编译但没有专用行为测试，独立 Full/native 接线
-也已编译。原生 trust/auth/subscriptions 仍没有专用行为测试，真实 OIDC/OS 审批、
-签名和跨库中断恢复不由编译或共享合同证明，见[验收矩阵](release-validation.md)。
+2026-11-19 在 Rust 1.88.0 下通过 Signer 17 项与原生社区 41 项专用行为测试，
+另通过共享 wallpaper 103 项、275 项集成测试和 7 项 doctest、Hub 管理 10 项。
+隔离账本、信任库、实际包安装与 Config journal 测试覆盖安全和恢复接缝；
+真实 OIDC、独立 OS 账号/IPC、断电与跨客户端发布资格仍需实际环境证据，见
+[验收矩阵](release-validation.md)。
+
+信任库身份预检显式等待自己唯一未导出连接的 SQLite worker 关闭，不要求其它
+合法 Library 连接同时退出；错误 application_id/schema 仍拒绝。一般池关闭、
+逃逸连接和独占迁移继续使用原文件句柄探测与资源额度保护。
 
 ## 发布与撤销信封
 
@@ -92,7 +97,9 @@ sourceId、hubId、remoteWorkId 隔离；同版本/sequence 同正文可回放�
 copyright 阻止新下载，保留用户安装文件。
 
 原生认证沿系统浏览器 PKCE S256，临时回环端口与精确 `/oauth/callback`，完整
-HTTP 头、随机 state、单次五分钟期限；取消/退出 epoch 拦截迟到结果。访问 token
+HTTP 头、随机 state、单次五分钟期限；同一流只允许一次等待，成功、拒绝或
+取消后重复等待均返回 `callback_consumed` 并提示重新登录，令牌交换仍可读取
+原 verifier/redirect。取消/退出 epoch 拦截迟到结果。访问 token
 只在原生内存保留。默认不申请或保存刷新 token；明确同意后台续期且部署注册
 offline_access 后，刷新凭据才进入绑定 origin/issuer/clientId/sub 的 Windows
 凭据存储。刷新单槽，失败转重新登录，退出立即清访问缓存并删除保存凭据。
@@ -142,12 +149,14 @@ Config 结果同时匹配 requestId、digest、revision，原 GUI 回执与恢�
 重新应用。沿用既有 apply_rollback 列与状态，界面区分回滚提交并显示本次实际
 包 hash。rollbackAvailable 从原安装版本关系和独立 trust 的已知安全事实投影，
 不可用的旧目标禁用回滚并说明重新核对/同步；最终仍重查激活、grant、能力和预算。
-playlist revision 同步原 Repository 的 u64 合同。这些是源码修订，
-未取得编译、恢复或交互行为证据。
+playlist revision 同步原 Repository 的 u64 合同。2026-11-19 的专用测试已覆盖
+原 Config 身份匹配、未知结果保留、迟到回执、订阅 CAS、权限扩张与显式回滚；
+实际系统浏览器/原生界面操作与完整跨客户端旅程仍待验。
 
-2026-11-18 依赖解析只增加已有包的依赖关系，没有新增或升级包版本；serde
-1.0.229、serde_json 1.0.151 及既有解析 feature 保持。原 catalog_heap_bounds 仅
-同步锁文件身份，未重跑分配/构建资格。所有当前社区实现仍未编译运行，原 UI
-也未做视觉或可访问性验收。mark_web_activated 尚无执行消费者，G3-S 未合格，
-社区 Web 执行继续关闭。真实 OIDC/OS 权限/中断/跨库恢复、部署、第二台客户端
-完整旅程和 P3-06 发布资格仍待用户恢复验证。
+2026-11-19 原生测试增加已锁定 Ed25519 2.2.0 的开发依赖，锁文件仅增加一条
+依赖边，没有新增或升级包版本；serde 1.0.229、serde_json 1.0.151 及既有解析
+feature 保持。catalog_heap_bounds 已同步锁文件身份并通过原分配计量套件，
+原查询零堆分配、冷峰值界限 93,603 字节和保留量 92,067 字节均保持。
+本轮没有新增 UI 视觉或可访问性验收。mark_web_activated 尚无执行消费者，
+G3-S 未合格，社区 Web 执行继续关闭。真实 OIDC/OS 权限、断电与跨客户端恢复、
+部署、第二台客户端完整旅程和 P3-06 发布资格仍开放。

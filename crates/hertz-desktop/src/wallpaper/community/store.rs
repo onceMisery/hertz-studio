@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Sole owner of independent security transactions. Product rows cannot create
 //! a pin, lower a watermark, or infer an activated Web hash.
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;
 use super::{
     contract, database, error,
     gate::{self, Cache, Freshness},

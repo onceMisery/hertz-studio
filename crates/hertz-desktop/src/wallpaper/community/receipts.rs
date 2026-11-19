@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+#[cfg(test)]
+#[path = "receipt_tests.rs"]
+mod tests;
 use super::{
     contract, error,
     model::{MAX_RECEIPTS, MAX_SECURITY_HASHES},

@@ -130,7 +130,14 @@ pub fn current_identity() -> Result<String> {
 }
 
 fn trusted_system_owner(owner: &str) -> bool {
-    matches!(owner, "S-1-5-18" | "S-1-5-32-544")
+    matches!(
+        owner,
+        "S-1-5-18" | "S-1-5-32-544"
+            // Windows Resource Protection owns the system volume on ordinary
+            // installations. This exact service SID is a privileged OS owner,
+            // not an arbitrary service identity learned from a path or request.
+            | "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    )
 }
 
 fn check_acl(file: &File, identity: &str, private: bool) -> Result<()> {
@@ -201,11 +208,19 @@ fn check_acl(file: &File, identity: &str, private: bool) -> Result<()> {
         if subject == identity || (!private && trusted_system_owner(&subject)) {
             continue;
         }
-        // On ancestors deny any untrusted namespace/ACL mutation. On private
-        // objects additionally deny reading contents or inheriting such access.
+        // On ancestors deny replacement, reparse and ACL mutation. Merely adding
+        // a new subdirectory cannot replace the already checked, protected path
+        // components (the system volume normally grants this right). WRITE_DATA
+        // remains denied because it can also set a directory's reparse point.
+        // Private objects additionally deny creation, reading and inherited access.
         let writes = 0x500d_0156u32; // GENERIC_ALL/WRITE, DELETE, WRITE_DAC/OWNER, data/EA/attributes/delete-child.
         let reads = 0x8000_0089u32; // GENERIC_READ, read data/EA/attributes.
-        if ace.Mask & (writes | if private { reads } else { 0 }) != 0 {
+        let prohibited = if private {
+            writes | reads
+        } else {
+            writes & !0x4
+        };
+        if ace.Mask & prohibited != 0 {
             return Err(Error("private_file_acl_required"));
         }
     }

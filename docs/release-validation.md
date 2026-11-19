@@ -1,5 +1,37 @@
 # 当前路线的能力与发布验收矩阵
 
+## 2026-11-19 社区安全与恢复专用验证
+
+本轮以 `master/51979a5` 为起点，沿原批准设计新增 58 项行为测试：Signer 17 项、
+原生社区 41 项。测试使用隔离账本、信任库、实际包归档和公开测试密钥；JWT
+只验证注入的缓存 JWKS，没有访问真实 OIDC 提供方。原生完整库回归通过 963 项，
+零失败；另有 2 项既有测试因需要真实默认音频渲染设备而忽略。最终命令、源码
+身份、日志与本地提交记录汇总于
+[本轮证据](../output/continuation-20261119-security/verification.json)。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| Signer 审批、意图、水位、检查点及工作代际恢复 | 17 通过 | [完整套件](../output/continuation-20261119-security/contracts-signer-hub-final.log) |
+| 原生 trust、PKCE、JWT、订阅、安装、Config 与回滚 | 41 通过 | [专用测试](../output/continuation-20261119-security/native-community-r4.log) |
+| Hub 管理及共享壁纸单元、集成、doctest | 10 + 103 + 275 + 7 通过 | [完整套件](../output/continuation-20261119-security/contracts-signer-hub-final.log) |
+| 原生重开、并发 CAS、缓存、子进程中断和升级反例 | 原失败的 22 项全部通过 | [同进程回归](../output/continuation-20261119-security/native-recovery-r5.log) |
+| 原生完整库回归 | 963 通过、0 失败、2 项设备测试忽略 | [完整回归](../output/continuation-20261119-security/native-library-r7.log) |
+
+实证修复位于原 owner：Windows 祖先 ACL 识别确切 TrustedInstaller 并允许只创建
+新子目录，私有对象与既有路径仍受保护；Signer 恢复拒绝等待 SQLite 关闭后返回；
+PKCE 流只允许一次等待；trust 身份预检明确等待自己唯一连接的 worker 关闭，
+避免把其它合法连接误算为未退出。一般池、逃逸连接和独占迁移仍用原 OS
+探测保留额度。两个 AI 重启夹具现在释放整个 Library，使独立 trust 池一起退出。
+懒初始化测试沿既有 SQLx 费用测试模式，在独立子进程执行完整原用例，隔离其它
+夹具尚未释放的全局额度；产品预算、准入与退出守卫保持。
+
+开发依赖仅增加已锁定的 Ed25519 2.2.0 依赖边；锁文件身份已同步，原目录分配
+计量套件通过，解析版本、特性、93,603 字节冷界限与 92,067 字节保留量保持。
+原生回归仍有 3 条编译警告，Signer 有 2 条、Hub 有 1 条；本轮不认领零警告。
+本轮没有新增界面、真实声卡、生产 OIDC、独立 OS 账号/IPC、生产签名、断电、
+部署或正式发行验收。G3-S 未合格，社区 Web 执行关闭；P3 与完整 A01–A10
+仍开放。下方 2026-11-18 及更早记录只表示其对应候选与当时范围。
+
 ## 2026-11-18 DBX 桌面功能退役与开发验证
 
 当前 `master/7a50d34` 加未提交工作区已将桌面歌词、壁纸、桌宠/迷你窗、原生设置/校准交接和壁纸 AI 接线移出 DBX Standard/Full。本轮起点为 `f3c821c`；收尾期间既有启动页/预加载改动由外部提交，随后补跑当前 HEAD 的分版、独立编译、前端和 DBX 浏览器检查。独立播放器 `desktop-host` 与原 HTTP feed 继续拥有这些能力；DBX 保留音乐、普通歌词、沉浸舞台、舞台素材持久化及原 SDK/stdio 和普通浮窗。历史 DBX Profile/授权/设置域保留，原生宿主拒绝启动或切换到 DBX 来源；无用户数据清理。新要求覆盖下方历史 DBX 可选桌面范围，旧产物/运行时证据不适用于本次候选。

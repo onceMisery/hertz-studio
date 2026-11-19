@@ -293,6 +293,8 @@ async fn expires_at_boundary_and_never_restores_pending_input_on_restart() {
         .await
         .unwrap();
     library.pool().close().await;
+    // A restart releases the independent trust pool with the whole library.
+    drop(library);
     let reopened = Library::open(root.path()).await.unwrap();
     let store = AiRequests::new(&reopened);
     let fresh_origin = Origin::new(
