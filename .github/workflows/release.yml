@@ -89,6 +89,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
 
+      # 打包前先跑内嵌组合目录的堆预算资格证明。release prep 只 bump Cargo.lock
+      # 里的内部 crate 版本号也会让 LOCK_SOURCE_SHA 失配，资格返回 None，运行时
+      # budget.rs 的 expect 在 panic=abort 下直接闪退（0.3.5 踩过）。这道门禁按
+      # 矩阵逐目标跑，既核 lock/源码身份也核各平台 layout，失配就在构建前红，
+      # 逼人先刷新哈希并复核分配方程，而不是把失配的 exe 发出去。
+      - name: Qualify embedded catalog heap bounds
+        shell: bash
+        run: |
+          cargo test --locked -p hertz-wallpaper --test composition_catalog_heap_bounds --target ${{ matrix.target }}
+
       - name: Build (release)
         shell: bash
         run: |
