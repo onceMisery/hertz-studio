@@ -20,6 +20,9 @@ use zeroize::{Zeroize, Zeroizing};
 mod callback;
 #[path = "auth_jwt.rs"]
 mod jwt;
+#[path = "auth_requests.rs"]
+mod requests;
+pub(crate) use requests::RequestSession;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

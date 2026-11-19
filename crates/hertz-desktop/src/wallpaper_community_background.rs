@@ -26,6 +26,7 @@ impl App {
     }
 
     pub(super) fn tick_community_background(&mut self) {
+        self.wallpaper_community.author.expire();
         if self.community_automatic_held() {
             return;
         }

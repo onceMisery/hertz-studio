@@ -1,5 +1,46 @@
 # 当前路线的能力与发布验收矩阵
 
+## 2026-11-19 原生社区作者与举报客户端
+
+本轮以 `feat/zcode-design-completion/6fae95b` 为起点，补齐独立设置社区页的
+“我的创作”：本地固定版本核对、作品认领、上传、单独送审和本人状态查询。
+公开作品的举报绑定已签名确切版本，提交者可按原编号查询处理结果。确认绑定
+当前设置窗口、来源和账号，五分钟后失效；包使用原 AssetStore 固定只读句柄与
+完整 SHA-256。Hub 新增本人账号、未送审上传分页和原操作查询，读取原账本，
+没有新增业务状态存储。源码、执行命令、日志和提交读回汇总于
+[本轮证据](../output/design-gap-completion-20261119/verification.json)。
+
+上传完成与送审保持两个用户动作。成功上传可从 Hub 原 uploads 账本恢复；
+已经发送但回执丢失、损坏或操作取消时保留原请求定位，只查询原 UUID。
+重新继续 reserved 上传仍需核对同一包并由用户明确操作。页面持久信息仅含
+来源、账号及恢复定位，不含 token、文件路径、举报正文或同意票据。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| 原生完整库，Rust 1.88、`--test-threads=1` | 976 通过、0 失败、2 项设备测试忽略 | [完整回归](../output/design-gap-completion-20261119/native-library-author-final-r3.log) |
+| Hub、Signer、共享壁纸及其集成/doctest | 15 + 17 + 103 + 275 + 7，共 417 通过 | [完整套件](../output/design-gap-completion-20261119/contracts-author-final.log) |
+| 原生作者传输与固定包 | 5 项真实回环 HTTP 测试通过，覆盖固定文件流、认证、取消/账号换代、坏回执和禁止重定向/重放 | [传输测试](../output/design-gap-completion-20261119/native-author-transport-r2.log) |
+| 引用删除夹具的启动维护等待 | 同一原用例在 10 个独立进程全部通过 | [重复执行结果](../output/design-gap-completion-20261119/reference-fixture-loop-results.json) |
+| Chromium 作者/举报流程 | 8 组通过，零页面错误和对话框；包含重载、未知结果查询、账号/来源隔离、过期、键盘和 1120/520/360/320px 布局 | [浏览器结果](../output/design-gap-completion-20261119/browser-author-resume-r3.log) |
+| 前端默认检查 | 499 文件语法、86 步通过，0 失败 | [聚合检查](../output/design-gap-completion-20261119/frontend-author-final.log) |
+| 独立 Full/native，Rust 1.88 all-targets | `cargo check` 通过 | [构建检查](../output/design-gap-completion-20261119/full-native-author-check-r3.log) |
+| API、ADR、脚本登记及限定格式 | API 216 条、ADR 418 项和脚本登记通过；任务源码与改动片段格式核对通过 | [证据索引](../output/design-gap-completion-20261119/verification.json) |
+
+原生全库结果限定于单线程；默认并发运行仍受全局根目录测试状态与 SQLx
+准入相互干扰，原历史通过基线同样使用单线程。三处夹具前置条件已修订：
+会话在实际 SQL 等待处过期；重开循环在每次真实只读检查之后等待原池退出，
+避免累积自身未关闭的费用；引用删除用例等待库初始化的候选维护实际完成，
+再核对原引用和版本绑定。后者曾与原维护争用内容写门并得到合法的
+`budget_busy`，现在用仅测试构建存在的完成观察消除该用例的前置竞争。
+这些修订不重试删除请求、不禁用维护；产品预算、准入、内容写门与退出守卫
+保持。本轮不认领默认并发测试隔离已经修复。
+
+这些结果覆盖隔离 SQLite、原生测试与 Chromium fixture，不替代真实 OIDC、
+WebView2 对生产 Hub 的完整上传旅程、独立 OS 主体/Signer IPC、生产签名、
+断电恢复、部署或另一台客户端验收。Full 原生库仍有 5 条编译警告，原生测试
+有 3 条，Signer 有 2 条。完整 P3/A01–A10 与 G3-S 仍开放，社区 Web 上传和
+执行保持关闭。下方历史记录只覆盖各自候选和当时范围。
+
 ## 2026-11-19 社区安全与恢复专用验证
 
 本轮以 `master/51979a5` 为起点，沿原批准设计新增 58 项行为测试：Signer 17 项、

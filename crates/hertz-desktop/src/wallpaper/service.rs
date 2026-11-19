@@ -127,6 +127,8 @@ struct Record {
 }
 
 struct State {
+    #[cfg(test)]
+    initial_candidate_maintenance_complete: AtomicBool,
     composition_preparing: Mutex<std::collections::HashSet<String>>,
     base: PathBuf,
     probe: ProbeClient,
@@ -391,6 +393,8 @@ impl LibraryService {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Work>(REQUEST_CAP);
         let pending = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(State {
+            #[cfg(test)]
+            initial_candidate_maintenance_complete: AtomicBool::new(false),
             composition_preparing: Mutex::new(Default::default()),
             base,
             probe,
@@ -534,6 +538,12 @@ impl LibraryService {
                         }
                         completion = tasks.join_next(), if !tasks.is_empty() => {
                             if let Some(Ok(Some((result, _permit)))) = completion {
+                                #[cfg(test)]
+                                if result.is_ok() {
+                                    worker
+                                        .initial_candidate_maintenance_complete
+                                        .store(true, Ordering::Release);
+                                }
                                 expiry_wake = match result {
                                     Ok(expiry) => expiry.map(|expiry| Instant::now()+Duration::from_secs(expiry.saturating_sub(super::library::now_secs()).max(0) as u64)),
                                     Err(error) => {
@@ -1934,6 +1944,21 @@ mod tests {
             native.clone(),
         );
         assert_eq!(observed["ok"], true, "{observed}");
+        // Direct fixture preparation leaves the initial library maintenance wake
+        // for this first management call. Wait for its real content writer to exit
+        // before testing deletion bindings, without replaying a delete request.
+        let maintenance_deadline = Instant::now() + Duration::from_secs(5);
+        while !service
+            .state
+            .initial_candidate_maintenance_complete
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < maintenance_deadline,
+                "initial candidate maintenance did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let kinds = observed["result"]["references"]
             .as_array()
             .unwrap()
@@ -1950,22 +1975,23 @@ mod tests {
             ),
             native,
         );
-        assert_eq!(blocked["error"]["code"], "asset_in_use");
+        assert_eq!(blocked["error"]["code"], "asset_in_use", "{blocked}");
         assert_eq!(blocked["error"]["details"], observed["result"]);
         assert_eq!(std::fs::read(&original).unwrap(), bytes);
         let mut mismatch = delete.clone();
         mismatch["packageHash"] = "b".repeat(64).into();
+        let mismatch_reply = call(
+            &service,
+            request(
+                "mismatch-delete",
+                "wallpaper.library.deleteVersion",
+                mismatch,
+            ),
+            0,
+        );
         assert_eq!(
-            call(
-                &service,
-                request(
-                    "mismatch-delete",
-                    "wallpaper.library.deleteVersion",
-                    mismatch
-                ),
-                0
-            )["error"]["code"],
-            "version_not_found"
+            mismatch_reply["error"]["code"], "version_not_found",
+            "{mismatch_reply}"
         );
         runtime
             .block_on(drafts.discard(&draft.id, draft.revision))

@@ -1415,7 +1415,10 @@ JWKS 来自受信 issuer 元数据，缓存最多 1 小时；未知 kid 受刷�
 | `GET /v1/keys` | 完整离线根授权链，原生仍须确认或核对原根指纹 |
 | `GET /v1/works` | 已发布作品分页/关键词；每页最多 50 |
 | `POST /v1/works` | 作者创建作品身份，校验标题/许可 |
+| `GET /v1/me` | 当前数据库中的账号 UUID、issuer/sub 和角色 |
 | `GET /v1/me/works`、`GET /v1/me/releases` | 当前作者的作品与候选状态 |
+| `GET /v1/me/uploads` | 本人未送审上传分页；成功上传后重载仍可找回 ready 包 |
+| `GET /v1/me/operations/{kind}/{id}` | 以 work/upload/report 和原操作 UUID 查询本人原账本；不重放未知写操作 |
 | `POST /v1/works/{work}/uploads` | 申请单次上传槽，声明包长和 SHA-256 |
 | `GET /v1/uploads/{id}` | 所属作者按原 uploadId 查询上传结果 |
 | `PUT /v1/uploads/{id}/content` | 有界流式上传，只接受所有者及约定字节 |
@@ -1431,6 +1434,7 @@ JWKS 来自受信 issuer 元数据，缓存最多 1 小时；未知 kid 受刷�
 | `POST /v1/revocations/prepare`、`POST /v1/releases/{id}/revoke` | 构造完整清单、独立批准/签名与审计 |
 | `POST /v1/releases/{id}/withdraw` | 作者撤回未签名候选 |
 | `POST /v1/reports` | 有界举报，关联作品/版本/原因 |
+| `GET /v1/reports/{id}` | 提交者或当前审核者读取举报与处理结论 |
 
 服务表为 users、works、releases、uploads、reviews、reports、revocations、audit_events；release 固定 packageHash、权限集合、作者、许可、单调版本和状态。上传单作者并发 1、全服务 4、30 分钟期限、512 MiB 上限；配额默认每作者 5 GiB，未提交对象 24 小时回收。公开浏览每 IP 120 次/分钟，上传申请 10 次/小时；下载并发每 IP 4，响应流背压有界。
 
@@ -1463,6 +1467,14 @@ trust.db 持久保存每来源根身份、已验证密钥链与最高代际；re
 下载意图绑定 Config revision/摘要、显示拓扑、组选择、订阅 revision、原固定版本和可选 playlist revision。原轮播在确认、候选准备和 Config 提交前均重查；候选列表由原 Repository 新建，保留其它项目，直到 Config 提交才成为活动选择。准备的 reference 传给原单屏/镜像 runner，首帧回执和 decoder 交接沿原 owner。手工选择、已提交配置/拓扑/订阅/列表变化使旧意图持久标记 stale，候选保留供重新确认；编辑、保存、删除或列表事务的短暂占用只暂停自动操作，不误记为永久过期。
 
 社区更新 journal 区分下载、安装、待确认、ready、apply_requested、应用、失败与 stale。超时或重启只按原 requestId/jobId 和 Config command/digest/revision 收敛，不能从文件已下载推断配置已应用；所有终态对同候选 hash 去重，避免后台反复下载已失败或过期候选。设置入口显示完整根指纹、账号/续期选择、撤销陈旧/时钟回退、版本差异和原操作恢复；作者元数据只按文本展示。
+
+### 17.5 原生作者与举报客户端
+
+独立设置的社区页提供“我的创作”：读取本机已生成的本地版本、核对确切包/许可/输入权限、明确认领、上传、送审和查看本人候选状态。包准备使用原 AssetStore 的固定只读句柄和完整 SHA-256，确认绑定当前窗口、来源完整身份与 `(issuer,sub)`/会话代际，五分钟后失效；网页包继续拒绝。上传占用原 ImportJobs 外部请求槽，取消不会伪称远端内容已删除。
+
+上传 ready 与送审是两个步骤；重载后“刷新我的作品”从原 Hub uploads 账本找回待送审包，不从本地第二份清单推断完成。已发送操作的坏响应、丢响应或取消保持原请求定位；恢复只查询原 UUID，接收/核验或原生操作未退出时仍保持未知。reserved 的原上传只能在重新核对同一包之后由用户明确继续原 uploadId，不能自动申请新槽或重放认领/送审/举报。
+
+公开作品的举报先核对已签名确切发布，再由用户选择原因、说明和确认。本人举报按原编号查询，文字与处理说明仅按文本显示。页面持久信息只包含恢复定位、来源和账号，不含 token、系统文件路径、举报正文或同意票据。控件的身份变化、过期、原生传输与未知结果边界沿原设置/Auth owner；本机行为与 Chromium 检查的覆盖范围见[验收矩阵](release-validation.md)，真实 OIDC/独立 Signer/跨机资格保持开放。
 
 ## 18. 安装、升级与运维
 

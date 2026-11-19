@@ -312,6 +312,9 @@ async fn current_shared_inspection_survives_other_pool_shutdown_sidecars() {
         drop(library);
         let assets = AssetStore::new(dir.path()).unwrap();
         drop(assets);
+        // The inspection above still races the previous pool's shutdown. Await
+        // that physical exit before the next iteration acquires another fee.
+        release(dir.path()).await;
     }
     release(dir.path()).await;
 }

@@ -23,6 +23,16 @@
 .community-workspace input:user-invalid, .community-workspace input[aria-invalid=true] { border-color: #e5a395; }
 .community-field-error { margin: 0; color: #e5a395; font-size: 12px; }
 .community-field-error:empty { display: none; }
+.community-author-controls > details > summary { cursor: pointer; font-size: 14px; font-weight: 600; padding-block: 6px; }
+.community-author-controls .community-form { margin-block-start: 16px; }
+.community-author-controls textarea {
+  inline-size: 100%; min-block-size: 8rem; box-sizing: border-box; resize: vertical;
+  padding: 10px; border: 1px solid #767369; border-radius: 6px; color: inherit;
+  background: var(--control); font: inherit; font-size: max(1rem, 1em); line-height: 1.6;
+}
+.community-author-controls :where(input, select, textarea)[aria-invalid=true] { border-color: #e5a395; }
+.community-author-controls textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.community-author-controls .community-field-error[hidden] { display: none; }
 .community-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-start: 12px; }
 .community-actions button { font-size: 12px; }
 .community-actions button:active:not(:disabled) { transform: scale(.98); }
@@ -69,12 +79,12 @@
   .tabs button { flex: none; }
 }
 @media (pointer: coarse) {
-  .community-workspace :where(button, input[type=text], input[type=url], select), .community-choice, .community-extra summary { min-block-size: 48px; }
+  .community-workspace :where(button, input[type=text], input[type=url], select), .community-choice, .community-extra summary, .community-author-controls summary { min-block-size: 48px; }
   .community-choice label { padding-block: 14px; }
 }
 @media (prefers-reduced-motion: reduce) { .community-workspace button { transition: none; } }
 @media (forced-colors: active) {
-  .community-workspace :where(input, select, .community-notice, .community-confirmation) { border-color: CanvasText; }
+  .community-workspace :where(input, select, textarea, .community-notice, .community-confirmation) { border-color: CanvasText; }
   .community-workspace :where(button, input, select, summary):focus-visible { outline-color: Highlight; }
   .community-state[data-state=stale], .community-notice, .community-field-error { color: CanvasText; }
 }

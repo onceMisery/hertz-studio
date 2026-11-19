@@ -539,8 +539,9 @@ async fn composition_confirmation_does_not_hold_native_state_while_waiting_for_s
     // the quote's longer deadline. No request may consume that expired session.
     let profile = {
         let mut state = lock(&service.state);
-        state.connection.as_mut().unwrap().expires =
-            Some(Instant::now() + Duration::from_millis(150));
+        // Keep the session valid through fixture SQL and thread dispatch. Expire
+        // it only after the second confirmation has reached the actual SQL wait.
+        state.connection.as_mut().unwrap().expires = Some(Instant::now() + Duration::from_secs(60));
         state.quote = Some(Quote {
             owner: 9,
             token: "confirmation".into(),
@@ -589,16 +590,7 @@ async fn composition_confirmation_does_not_hold_native_state_while_waiting_for_s
     })
     .await
     .unwrap();
-    while lock(&service.state)
-        .connection
-        .as_ref()
-        .unwrap()
-        .expires
-        .unwrap()
-        > Instant::now()
-    {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    lock(&service.state).connection.as_mut().unwrap().expires = Some(Instant::now());
     transaction.rollback().await.unwrap();
     assert_eq!(worker.join().unwrap().unwrap_err().code, "ai_superseded");
     assert!(lock(&service.state).submission.is_none());

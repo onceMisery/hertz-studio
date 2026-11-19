@@ -56,6 +56,8 @@ mod wallpaper_ai;
 mod wallpaper_apply;
 #[path = "wallpaper_community.rs"]
 mod wallpaper_community;
+#[path = "wallpaper_community_author.rs"]
+mod wallpaper_community_author;
 #[path = "wallpaper_community_updates.rs"]
 mod wallpaper_community_updates;
 #[path = "wallpaper_community_background.rs"]
@@ -7332,7 +7334,10 @@ fn settings_html() -> String {
         )
         .replace(
             "__COMMUNITY_PANEL__",
-            include_str!("../assets/wallpaper-community.html"),
+            &include_str!("../assets/wallpaper-community.html").replace(
+                "__AUTHOR_PANEL__",
+                include_str!("../assets/wallpaper-community-author.html"),
+            ),
         )
         .replace(
             "__COMMUNITY_CSS__",
@@ -7340,7 +7345,12 @@ fn settings_html() -> String {
         )
         .replace(
             "__COMMUNITY__",
-            &format!("{}\n{}",include_str!("../assets/wallpaper-community-view.js"),include_str!("../assets/wallpaper-community.js")),
+            &format!(
+                "{}\n{}\n{}",
+                include_str!("../assets/wallpaper-community-view.js"),
+                include_str!("../assets/wallpaper-community-author.js"),
+                include_str!("../assets/wallpaper-community.js")
+            ),
         )
 }
 

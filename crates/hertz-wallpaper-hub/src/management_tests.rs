@@ -18,6 +18,9 @@ use std::{path::PathBuf, sync::Arc};
 const AUTHORIZATION: &str = include_str!("../tests/fixtures/authorization.json");
 const HUB_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+#[path = "author_tests.rs"]
+mod author;
+
 struct Fixture {
     hub: Hub,
     lease: Option<ServerLease>,

@@ -56,6 +56,8 @@ pub(super) enum Outcome {
     Value(serde_json::Value),
     Root(Box<RootDraft>),
     Review(Box<Review>),
+    AuthorPrepared(Arc<community::author::PackageDraft>),
+    ReportPrepared(Box<community::author::ReportDraft>),
     Apply(Authority),
     Browser(String),
     Login(auth::Account),
@@ -74,6 +76,7 @@ pub(super) struct Background {
 
 pub(super) struct CommunityState {
     pub auth: Arc<auth::Auth>,
+    pub author: super::wallpaper_community_author::State,
     root: Option<RootTicket>,
     review: Option<ApplyTicket>,
     pub subscriptions: BTreeMap<String, i64>,
@@ -99,6 +102,7 @@ impl CommunityState {
             .expect("native community control admission");
         Self {
             auth: auth::Auth::new().expect("native community authentication admission"),
+            author: super::wallpaper_community_author::State::default(),
             root: None,
             review: None,
             subscriptions: BTreeMap::new(),
@@ -118,6 +122,7 @@ impl CommunityState {
         }
     }
     pub(super) fn close_owner(&mut self) {
+        self.author.clear();
         self.root = None;
         self.review = None;
         self.settings_editing = false;
@@ -406,6 +411,7 @@ impl App {
                 })
             }
             "wallpaper.community.login" => {
+                self.wallpaper_community.author.clear();
                 let source = field(&payload, "sourceId")?;
                 let proxy = self.proxy.clone();
                 let browser_request = request.clone();
@@ -437,6 +443,7 @@ impl App {
                 })
             }
             "wallpaper.community.logout" => {
+                self.wallpaper_community.author.clear();
                 let source = field(&payload, "sourceId")?;
                 self.dispatch_community(request.clone(), owner, move |jobs, auth| async move {
                     auth.logout(jobs.library(), &source).await?;
@@ -504,6 +511,12 @@ impl App {
                 })
             }
             "wallpaper.community.download" => self.begin_community_download(request, owner),
+            command
+                if command.starts_with("wallpaper.community.author")
+                    || command.starts_with("wallpaper.community.report") =>
+            {
+                self.handle_community_author(request.clone(), owner)
+            }
             "wallpaper.community.review" => self.begin_community_review(request, owner),
             "wallpaper.community.apply" => {
                 let nonce = field(&payload, "ticket")?;
@@ -543,6 +556,7 @@ impl App {
         request: api::Request,
         event: CommunityEvent,
     ) {
+        self.wallpaper_community.author.finish(&request.request_id);
         let result = event.result;
         let _charge = event._charge;
         if matches!(
@@ -562,6 +576,8 @@ impl App {
             return;
         }
         let result = match result {
+            Ok(Outcome::AuthorPrepared(draft)) => self.finish_author_prepare(owner, draft),
+            Ok(Outcome::ReportPrepared(draft)) => self.finish_report_prepare(owner, draft),
             Ok(Outcome::Root(draft)) => {
                 let nonce = crate::wallpaper::file_tokens::random_token();
                 match nonce {
