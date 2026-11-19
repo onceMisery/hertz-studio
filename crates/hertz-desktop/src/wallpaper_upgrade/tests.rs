@@ -715,3 +715,113 @@ fn sqlx_pool_admission_covers_open_peak_and_refunds_only_after_close() {
     assert_eq!(budget.usage(), before);
     assert!(crate::root_owner::probe_database_handles(dir.path()).is_ok());
 }
+
+#[tokio::test]
+async fn schema_twelve_preserves_playlist_rows_on_upgrade_and_rollback() {
+    let root = tempfileish::temp_dir("large-playlist-migration");
+    let pool = old(root.path(), 11).await;
+    sqlx::query(
+        "INSERT INTO packages(package_hash,manifest_json,installed_at,bytes) VALUES(?,'{}',1,70)",
+    )
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO versions(version_key,work_key,version,package_hash,created_at) VALUES('version','fixture',1,?,1)").bind("a".repeat(64)).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO playlists VALUES('old-list',7,'原来的轮播','random',60,123)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for index in 0..32 {
+        sqlx::query("INSERT INTO playlist_items VALUES('old-list',?,'fixture',?,'version')")
+            .bind(index)
+            .bind("a".repeat(64))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    const ROWS: &str = "SELECT json_group_array(json_object('id',playlist_id,'position',position,'work',work_key,'hash',package_hash,'version',version_key)) FROM (SELECT * FROM playlist_items ORDER BY playlist_id,position)";
+    let before: String = sqlx::query_scalar(ROWS).fetch_one(&pool).await.unwrap();
+    let metadata: (String, i64, String, i64) = sqlx::query_as(
+        "SELECT title,revision,mode,interval_seconds FROM playlists WHERE playlist_id='old-list'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/wallpaper/0012_large_playlists.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(ROWS)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(
+        sqlx::query("INSERT INTO playlist_items VALUES('old-list',32,'fixture',?,'version')")
+            .bind("a".repeat(64))
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    MIGRATOR.run(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(ROWS)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(sqlx::query_as::<_,(String,i64,String,i64)>("SELECT title,revision,mode,interval_seconds FROM playlists WHERE playlist_id='old-list'").fetch_one(&pool).await.unwrap(), metadata);
+    assert!(sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM sqlite_schema WHERE name='playlist_items_package'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    sqlx::query("INSERT INTO playlist_items VALUES('old-list',999,'fixture',?,'version')")
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(sqlx::query(
+        "INSERT INTO playlist_items VALUES('old-list',1000,'fixture',?,'version')"
+    )
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .is_err());
+    assert!(
+        sqlx::query("INSERT INTO playlist_items VALUES('old-list',33,'missing',?,'version')")
+            .bind("a".repeat(64))
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::query("DELETE FROM playlists WHERE playlist_id='old-list'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM playlist_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    pool.close().await;
+}

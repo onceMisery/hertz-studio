@@ -2609,7 +2609,10 @@ impl App {
         };
         let proxy = self.proxy.clone();
         let destination = reply.clone();
-        let changes_playlist = matches!(typed, Some(api::Command::PlaylistSave { .. }));
+        let changes_playlist = matches!(
+            typed,
+            Some(api::Command::PlaylistSave { .. } | api::Command::PlaylistUpdate(_))
+        );
         let deletes_library = matches!(
             typed,
             Some(
@@ -2617,23 +2620,21 @@ impl App {
             )
         );
         let deletion_id = deletes_library.then(|| request.request_id.clone());
-        let playlist_properties = match &typed {
+        let edited_playlist = match &typed {
             Some(api::Command::PlaylistSave {
                 playlist_id: Some(id),
                 ..
-            }) => self.config.playlist_property_overrides(id),
-            _ => vec![],
+            }) => Some(id.as_str()),
+            Some(api::Command::PlaylistUpdate(update)) => Some(update.playlist_id.as_str()),
+            _ => None,
         };
+        let playlist_properties = edited_playlist
+            .map(|id| self.config.playlist_property_overrides(id))
+            .unwrap_or_default();
         if changes_playlist {
             self.playlist_writes += 1;
-            if let Some(api::Command::PlaylistSave {
-                playlist_id: Some(id),
-                ..
-            }) = &typed
-            {
-                if let Some(transaction) = &self.wallpaper_apply {
-                    transaction.cancel_for_playlist(id);
-                }
+            if let (Some(id), Some(transaction)) = (edited_playlist, &self.wallpaper_apply) {
+                transaction.cancel_for_playlist(id);
             }
         }
         if let Err(error) = self.wallpaper_library.submit_with_context(
@@ -7333,7 +7334,11 @@ fn settings_html() -> String {
         )
         .replace(
             "__PLAYLIST__",
-            include_str!("../assets/wallpaper-playlist.js"),
+            &format!(
+                "{}\n{}",
+                include_str!("../assets/wallpaper-playlist-editor.js"),
+                include_str!("../assets/wallpaper-playlist.js")
+            ),
         )
         .replace(
             "__COMMUNITY_PANEL__",

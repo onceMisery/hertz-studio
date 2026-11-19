@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 #[path = "service_ai.rs"]
 mod ai_operations;
+#[path = "service_playlist.rs"]
+mod playlist_operations;
 
 const REQUEST_CAP: usize = 4;
 const HISTORY_CAP: usize = 256;
@@ -380,15 +382,41 @@ pub(crate) struct LibraryService {
 }
 
 impl LibraryService {
-    pub(crate) fn security_check(&self, hash: &str) -> Result<(),JobError> {
-        self.state.jobs.get().ok_or_else(||JobError::new("trust_unavailable","安全库尚未加载"))?.library().trust().security_check(hash)
+    pub(crate) fn security_check(&self, hash: &str) -> Result<(), JobError> {
+        self.state
+            .jobs
+            .get()
+            .ok_or_else(|| JobError::new("trust_unavailable", "安全库尚未加载"))?
+            .library()
+            .trust()
+            .security_check(hash)
     }
 
-    pub(crate) fn security_snapshot(&self, revision:u64, next_due:u64) -> Result<Option<super::community::store::SecuritySnapshot>,JobError> {
-        match self.state.jobs.get(){Some(jobs)=>jobs.library().trust().security_snapshot(revision,next_due),None=>Ok(None)}
+    pub(crate) fn security_snapshot(
+        &self,
+        revision: u64,
+        next_due: u64,
+    ) -> Result<Option<super::community::store::SecuritySnapshot>, JobError> {
+        match self.state.jobs.get() {
+            Some(jobs) => jobs.library().trust().security_snapshot(revision, next_due),
+            None => Ok(None),
+        }
     }
-    pub(crate) fn activation_check(&self,hash:&str,is_web:bool)->Result<(),JobError>{self.state.jobs.get().ok_or_else(||JobError::new("trust_unavailable","安全库尚未加载"))?.library().trust().activation_check(hash,is_web)}
-    pub(crate) fn community_job_active(&self)->bool{self.state.jobs.get().is_some_and(|jobs|jobs.active_status().is_some())}
+    pub(crate) fn activation_check(&self, hash: &str, is_web: bool) -> Result<(), JobError> {
+        self.state
+            .jobs
+            .get()
+            .ok_or_else(|| JobError::new("trust_unavailable", "安全库尚未加载"))?
+            .library()
+            .trust()
+            .activation_check(hash, is_web)
+    }
+    pub(crate) fn community_job_active(&self) -> bool {
+        self.state
+            .jobs
+            .get()
+            .is_some_and(|jobs| jobs.active_status().is_some())
+    }
     pub(crate) fn start(base: PathBuf, probe: ProbeClient) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Work>(REQUEST_CAP);
         let pending = Arc::new(AtomicUsize::new(0));
@@ -1007,13 +1035,16 @@ impl State {
                 JobError::new("operation_pending", "请求仍在处理，请按 requestId 查询")
             });
         }
-        if request.command == "wallpaper.layout.inspect" {
+        if matches!(
+            request.command.as_str(),
+            "wallpaper.layout.inspect" | "wallpaper.playlist.page"
+        ) {
             // A long inspection can receive many fresh polling IDs. Keep only a small
             // completed read history instead of exhausting mutation idempotency records.
             let mut completed: Vec<_> = history
                 .iter()
                 .filter(|(_, record)| {
-                    record.command == "wallpaper.layout.inspect" && record.response.is_some()
+                    record.command == request.command && record.response.is_some()
                 })
                 .map(|(id, record)| (id.clone(), record.started))
                 .collect();
@@ -1072,6 +1103,7 @@ impl State {
                 | Command::LibraryReferences { .. }
                 | Command::LibraryPoster { .. }
                 | Command::JobsGet { .. }
+                | Command::PlaylistPage(_)
                 | Command::OperationsGet { .. })
         );
         let result = if read_only {
@@ -1127,6 +1159,7 @@ impl State {
         let _layout_invalidation = if matches!(
             command,
             Command::PlaylistSave { .. }
+                | Command::PlaylistUpdate(_)
                 | Command::LibraryDeleteWork { .. }
                 | Command::LibraryDeleteVersion { .. }
                 | Command::ImportBegin { .. }
@@ -1145,7 +1178,7 @@ impl State {
                 ))
             }
             Command::Capabilities => {
-                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm","svg"],"svg":super::api::svg_capability(),"nativeFilePicker":true,"settingsDrafts":true,"workDrafts":true,"publicProperties":true,"playlists":true,"playlistMaxItems":32,"export":true,"nativeOutputPicker":true,"builtinPackages":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"multiDisplay":true,"layouts":["single","span","mirror"],"mirrorBuiltin":false,"mirrorPackages":false,"mirrorPlaylists":false,"mirrorInspection":true,"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
+                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm","svg"],"svg":super::api::svg_capability(),"nativeFilePicker":true,"settingsDrafts":true,"workDrafts":true,"publicProperties":true,"playlists":true,"playlistMaxItems":1000,"playlistPageSize":32,"playlistIncremental":true,"export":true,"nativeOutputPicker":true,"builtinPackages":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"multiDisplay":true,"layouts":["single","span","mirror"],"mirrorBuiltin":false,"mirrorPackages":false,"mirrorPlaylists":false,"mirrorInspection":true,"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
             }
             Command::PropertiesInspect {
                 selection,
@@ -1254,11 +1287,25 @@ impl State {
                 )
             }
             Command::PlaylistGet { playlist_id } => {
-                json!(
-                    super::playlist::Repository::new(self.jobs().await?.library())
-                        .get(&playlist_id)
-                        .await?
-                )
+                let playlist = super::playlist::Repository::new(self.jobs().await?.library())
+                    .get(&playlist_id)
+                    .await?;
+                if playlist.items.len() > super::playlist::edit::PAGE_SIZE {
+                    return Err(JobError::new(
+                        "playlist_pagination_required",
+                        "大型列表请使用wallpaper.playlist.page分页读取",
+                    ));
+                }
+                json!(playlist)
+            }
+            Command::PlaylistPage(page) => {
+                super::playlist::Repository::new(self.jobs().await?.library())
+                    .page(&page)
+                    .await?
+            }
+            Command::PlaylistUpdate(update) => {
+                self.update_playlist(update, owner, playlist_properties)
+                    .await?
             }
             Command::PlaylistSave {
                 playlist_id,
@@ -1271,31 +1318,7 @@ impl State {
                 self.check_owner(owner)?;
                 let jobs = self.jobs().await?;
                 let _writer = jobs.assets().content_writer()?;
-                if !playlist_properties.is_empty() {
-                    let source = Arc::clone(jobs);
-                    let references = items.clone();
-                    let overrides = playlist_properties.to_vec();
-                    let runtime = tokio::runtime::Handle::current();
-                    tokio::task::spawn_blocking(move || {
-                        runtime.block_on(async {
-                            let cancel = AtomicBool::new(false);
-                            for properties in &overrides {
-                                super::public_properties::validate_references(
-                                    &source,
-                                    &references,
-                                    properties,
-                                    &cancel,
-                                )
-                                .await?;
-                            }
-                            Ok::<_, JobError>(())
-                        })
-                    })
-                    .await
-                    .map_err(|_| {
-                        JobError::new("worker_unavailable", "轮播公开属性核验线程已退出")
-                    })??;
-                }
+                playlist_operations::validate_properties(jobs, &items, playlist_properties).await?;
                 json!(
                     super::playlist::Repository::new(jobs.library())
                         .save(
@@ -1842,10 +1865,12 @@ impl State {
                         .response
                         .ok_or_else(|| JobError::new("operation_pending", "请求仍在处理中"));
                 }
-                if command
-                    .as_deref()
-                    .is_some_and(|command| !matches!(command,"wallpaper.import.begin"|"wallpaper.community.download"))
-                {
+                if command.as_deref().is_some_and(|command| {
+                    !matches!(
+                        command,
+                        "wallpaper.import.begin" | "wallpaper.community.download"
+                    )
+                }) {
                     return Err(JobError::new(
                         "operation_unknown",
                         "该配置请求无保留记录，请重新读取当前配置",

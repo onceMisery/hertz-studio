@@ -1,5 +1,21 @@
 # 当前路线的能力与发布验收矩阵
 
+## 2026-11-19 千项轮播分页与增量编辑
+
+从 `feat/zcode-design-completion/df35253` 继续补齐 P1-08：每列表最多1000个固定版本、32项分页显示、跨页移动、每批32个增量CAS操作、丢回执核对和关闭前保存。原SQLite列表、内容写门、公开属性检查、镜像资格、社区意图失效与Runner继续负责保存和播放；协议2的16 KiB/64 KiB限制不变。用法及分批保存边界见[轮播说明](wallpaper-works-playlists.md#大型轮播列表2026-11-19-增量)。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| 原生完整库，Rust 1.88，单线程 | 988通过、0失败、2项既有音频设备测试忽略；包含千项重开/分页/Runner、增量原子回滚/CAS、owner/公开属性拒绝/原回执和分页缓存、1000项属性与镜像核验 | [原生回归](../output/playlist-incremental-20261119/native-library-final.log) |
+| 旧库升级与共享SQLite生命周期 | 13项原升级测试和5项共享测试通过；0012保留原32项逐行内容、元数据、索引及外键，迁移中途回滚和999/1000边界已核对 | [升级测试](../output/playlist-incremental-20261119/native-upgrade.log)、[生命周期](../output/playlist-incremental-20261119/sqlite-lifecycle.log) |
+| 独立轮播Chromium交互 | 8组通过、零页面错误；1000项加载、跨页排序、节点/键盘焦点、丢回执无重放、中途失败/冲突/显式恢复、1120/520/360/320px | [浏览器结果](../output/playlist-incremental-20261119/browser/results.json) |
+| 显示组与真实关闭入口Chromium回归 | 34组通过；列表保存保持原显示组，关闭等待原保存，输入无效保留窗口；公开属性/镜像/窗口规则回归通过 | [设置回归](../output/playlist-incremental-20261119/display/report.json) |
+| 编辑算法行为 | 5组通过；1000项创建32批、长距离移动单操作、整表替换容量边界、重复条目及30轮混合增删移动、元数据重开 | [编辑行为](../output/playlist-incremental-20261119/editor-behavior.log) |
+| 前端默认聚合 | 502文件语法与87步通过，API/ADR/资源/350个脚本登记通过 | [前端聚合](../output/playlist-incremental-20261119/frontend-final.log) |
+| Full/native all-targets | Rust 1.88，locked/offline构建检查通过，既有5条原生警告和3条测试警告保留 | [构建](../output/playlist-incremental-20261119/full-native-final.log) |
+
+源码与执行身份见[证据索引](../output/playlist-incremental-20261119/verification.json)。浏览器使用实际客户端脚本与隔离管理回执，数据库、迁移及服务是原Rust/SQLite执行；这些结果不等于本轮真实WebView2桌面播放、多设备、千种不同媒体包性能或8小时长稳验收。默认并发测试隔离问题仍开放。新迁移只在隔离测试库运行，未打开或迁移用户的真实作品库。完整A01–A10、第三方改编、生产OIDC/独立Signer和G3-S保持原未完成范围。
+
 ## 2026-11-19 组合图层分组与顺序编辑
 
 本轮从 `feat/zcode-design-completion/62d2b8b` 继续，补齐组合编辑器的层级列表、父组选择、2D/3D 组创建、同组/根层排序和效果执行顺序。结构编辑进入原撤销/重做、自动保存与不可变版本流程；位置示意继承父组变换和可见性，拖动使用父组局部坐标。用法和合同见[作品说明](wallpaper-works-playlists.md#组合图层分组与顺序2026-11-19-增量)。

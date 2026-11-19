@@ -98,7 +98,10 @@ pub(crate) async fn validate_references(
     properties: &Map<String, Value>,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    if references.is_empty() || references.len() > 32 || properties.len() > 64 {
+    if references.is_empty()
+        || references.len() > super::playlist::edit::MAX_ITEMS
+        || properties.len() > 64
+    {
         return Err(JobError::invalid_input("公开属性核验数量超出上限"));
     }
     let mut seen = HashSet::new();
@@ -381,7 +384,7 @@ mod tests {
         let values = json!({"daylight":0.25}).as_object().unwrap().clone();
         validate_references(
             &jobs,
-            &[first.clone(), first.clone()],
+            &vec![first.clone(); 1000],
             &values,
             &AtomicBool::new(false),
         )
@@ -390,7 +393,7 @@ mod tests {
         assert_eq!(
             validate_references(
                 &jobs,
-                &[first.clone(), second],
+                &[vec![first.clone(); 999], vec![second]].concat(),
                 &values,
                 &AtomicBool::new(false)
             )

@@ -175,6 +175,8 @@ pub(crate) enum Command {
     PlaylistGet {
         playlist_id: String,
     },
+    PlaylistPage(super::playlist::edit::PageRequest),
+    PlaylistUpdate(super::playlist::edit::Update),
     PlaylistSave {
         playlist_id: Option<String>,
         expected_playlist_revision: Option<u64>,
@@ -844,9 +846,20 @@ impl Request {
                     playlist_id: id(value.playlist_id)?,
                 }
             }
+            "wallpaper.playlist.page" => {
+                let value: super::playlist::edit::PageRequest = decode(&self.payload)?;
+                value.validate()?;
+                Command::PlaylistPage(value)
+            }
+            "wallpaper.playlist.update" => {
+                let value: super::playlist::edit::Update = decode(&self.payload)?;
+                value.validate()?;
+                Command::PlaylistUpdate(value)
+            }
             "wallpaper.playlist.save" => {
                 let value: PlaylistSave = decode(&self.payload)?;
                 if value.items.is_empty()
+                    || value.expected_playlist_revision == Some(0)
                     || value.items.len() > 32
                     || !(10..=86400).contains(&value.interval_seconds)
                 {
@@ -971,6 +984,7 @@ impl Request {
                             | "config.commit"
                             | "wallpaper.import.begin"
                             | "wallpaper.export.begin"
+                            | "wallpaper.playlist.update"
                     )
                 }) {
                     return Err(JobError::invalid_input("不支持的持久操作类别"));

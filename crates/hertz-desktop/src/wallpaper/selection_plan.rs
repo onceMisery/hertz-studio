@@ -384,8 +384,8 @@ async fn inspect_references(
     cancel: &AtomicBool,
 ) -> Result<LayoutInspection> {
     validate_members(members)?;
-    if references.is_empty() || references.len() > 32 {
-        return Err(JobError::invalid_input("布局检查需要 1–32 个固定版本"));
+    if references.is_empty() || references.len() > super::playlist::edit::MAX_ITEMS {
+        return Err(JobError::invalid_input("布局检查需要 1–1000 个固定版本"));
     }
     let mut integrated = false;
     let mut video = false;
@@ -641,7 +641,9 @@ async fn resolve_media(
     cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedSelection> {
     request.validate()?;
-    jobs.library().trust().security_check(&request.package_hash)?;
+    jobs.library()
+        .trust()
+        .security_check(&request.package_hash)?;
     cancelled(&cancel)?;
     if !jobs
         .library()
@@ -674,7 +676,13 @@ async fn resolve_media(
             ));
         }
         let package = source.assets().read_installed_manifest(&hash)?;
-        source.library().trust().activation_check(&hash,matches!(package.manifest.content,hertz_wallpaper::Content::Web { .. }))?;
+        source.library().trust().activation_check(
+            &hash,
+            matches!(
+                package.manifest.content,
+                hertz_wallpaper::Content::Web { .. }
+            ),
+        )?;
         cancelled(&source_cancel)?;
         if matches!(
             package.manifest.content,
@@ -1161,7 +1169,7 @@ mod tests {
             eligible.verified_versions, 1,
             "duplicate fixed versions are hashed once"
         );
-        let repeated_videos = playlist(&jobs, vec![video.clone(); 32]).await;
+        let repeated_videos = playlist(&jobs, vec![video.clone(); 1000]).await;
         let repeated = inspect(&jobs, selection(&repeated_videos), 2)
             .await
             .unwrap();

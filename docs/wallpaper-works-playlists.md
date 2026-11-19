@@ -1,6 +1,6 @@
 # 壁纸作品、导出与轮播实施记录
 
-2026-11-05，实施盘点 A03，对应[壁纸设计](desktop-wallpaper.md) §14.2、§15 与 P1-05/08。本次在当前工作树接通内置场景作品的保存、重开、发布、原包导出和单屏固定版本轮播。2026-11-06 的 A02 增量又接入显示组与镜像共享轮播，见[显示组与镜像实施记录](wallpaper-displays-mirror.md)。2026-11-19 的组合图层编辑增量见下文；第三方许可证改编仍按原工作包推进。
+2026-11-05，实施盘点 A03，对应[壁纸设计](desktop-wallpaper.md) §14.2、§15 与 P1-05/08。本次在当前工作树接通内置场景作品的保存、重开、发布、原包导出和单屏固定版本轮播。2026-11-06 的 A02 增量又接入显示组与镜像共享轮播，见[显示组与镜像实施记录](wallpaper-displays-mirror.md)。2026-11-19 的组合图层编辑和大型轮播增量见下文；第三方许可证改编仍按原工作包推进。
 
 ## 使用入口
 
@@ -28,6 +28,24 @@
 
 证据见[本轮验证](../output/composition-hierarchy-20261119/verification.json)，可复现脚本为 [check-wallpaper-work-layers-browser.js](../scripts/check-wallpaper-work-layers-browser.js)、[组合界面夹具](../scripts/check-wallpaper-composition-ui-browser.js)和[实际渲染夹具](../scripts/check-wallpaper-composition-browser.js)。本轮只关闭图层编辑切片的本机开发验证；完整 P2/A01–A10、生产 WebView2、多设备与长稳资格仍开放。
 
+## 大型轮播列表（2026-11-19 增量）
+
+每个列表现在可保存1–1000个固定版本，编辑器每页显示32项。可用“上移”“下移”调整顺序，也可填写目标位置并点击“移到”，包括跨页移动；重复的固定版本仍是独立条目。列表排序保持键盘焦点，窄窗口的操作控件换行显示。
+
+点击“保存列表”将本地编辑按每批最多32个操作提交，名称、顺序模式和间隔随同批次保存。每批独立CAS和原子提交，大批保存显示进度；中途失败时已完成的批次保留，剩余编辑保留在当前页面，再次点击保存继续。正在播放的列表仍按原列表修订通知刷新，因此多批保存不是整个编辑过程的一次原子替换。关闭设置页会等待列表保存；无效输入、冲突或未知结果阻止关闭并给出恢复入口。
+
+回执未知时点击“核对保存结果”，查询原requestId。若原进程记录已不存在，读取固定playlistId、revision和所有分页内容进行比对；已提交只更新本地基线，确认仍为原状态则等待用户显式继续保存，其它变化要求明确重新读取。核对不重放写请求。新建列表使用随机固定ID和revision=0的create-if-absent，因此创建回执丢失也不会自动另建一个列表。未保存输入和待核对状态仅在当前页面保留，强制重载或退出不承诺恢复未保存编辑。
+
+管理协议2继续使用16 KiB请求、64 KiB响应：
+
+- `wallpaper.playlist.page`：`playlistId, expectedPlaylistRevision?, offset, limit`；limit为1–32，后续页必须带首屏revision。返回摘要、`items, offset, nextOffset`；修订变化返回`playlist_conflict`，不拼接不同版本。
+- `wallpaper.playlist.update`：`playlistId, expectedPlaylistRevision, title, mode, intervalSeconds, operations`；0–32个操作（空数组只改元数据）。`insert {index,item}`、`remove {index}`、`move {from,to}`使用0基位置，move的to是移除后的最终位置。最终列表非空且最多1000项；无效位置、版本或修订使整批回滚。回执只返回摘要和itemCount。
+- 原`save`继续接受最多32项整存；原`get`对超过32项返回`playlist_pagination_required`。原`operations.get`支持按`wallpaper.playlist.update`查询进程内回执，页面用确切列表快照处理重启后的未知状态。
+
+SQLite迁移0012在原升级/备份事务中扩展position约束，保留顺序、固定引用、外键和索引，不改HWPK1、Config5或原播放owner。增量保存复用内容写门、所有已保存显示域的公开属性校验、镜像资格失效和社区意图取消；大列表属性/镜像核验仍覆盖末项，重复版本去重核对。原生内部Repository可读取完整有界列表，线上分页不扩大信封。
+
+本机开发证据见[验证汇总](../output/playlist-incremental-20261119/verification.json)和[验收矩阵](release-validation.md)。真实WebView2、多设备、长稳与生产发行资格保持各自未验边界。
+
 ## 存储与运行约束
 
 | 范围 | 当前实现 |
@@ -38,12 +56,12 @@
 | 作者归属 | `authored_versions` 按版本记录原生发布事实；导入包即使声称本地来源也不能取得编辑权限。第三方许可证改编/fork 尚未开放 |
 | 输出能力 | 原生输出 token 绑定当前 owner 与包 hash，60 秒有效、单次消费，最多 4 个；页面不能提交路径，选择位置本身不创建文件 |
 | 导出任务 | 单个有界 worker，和安装/删除共用内容写门；分块复制已安装的 `original.hwpkg`，核对 SHA-256，刷新并无覆盖提交。不会重新打包或解码媒体 |
-| 轮播列表 | 每项固定 `workKey + packageHash`，独立列表 revision/CAS；首版每列表 1–32 项，最多 100 个列表。完整保存请求仍受 16 KiB 管理信封约束 |
+| 轮播列表 | 每项固定 `workKey + packageHash`，独立列表 revision/CAS；每列表 1–1000 项，最多 100 个列表；分页读取和每批最多32个增量操作仍受16 KiB/64 KiB管理信封约束 |
 | 轮播时钟 | 从实际呈现后的可绘制时间累计；暂停冻结、恢复不补切，每次只准备一个候选，随机选择不重排保存的列表 |
 | 呈现与失败 | builtin、图片、视频沿同一准备/首帧/交接/退出链路；当前或候选失败会停止轮播，显式重试仍指向失败的固定版本，不自动跳过坏项 |
 | 配置与引用 | 定时切换不写 Config 或递增 configRevision；保存的列表、草稿及当前/准备/候选/退出中的实际版本都参与删除保护 |
 
-首版 32 项限制小于设计总上限 1000 项：本次使用一次有界完整保存，尚未实现大型列表的增量编辑协议。A03 原始原生证据使用单屏 single；A02 已增加显示组和图片/视频 mirror，但双屏同时呈现仍需真实硬件验证。
+2026-11-19 已补齐设计的1000项上限；旧整存接口保留32项限制，新编辑器使用上面的增量协议。A03 原始原生证据使用单屏 single；A02 已增加显示组和图片/视频 mirror，但双屏同时呈现仍需真实硬件验证。
 
 ## 崩溃与回执恢复
 
@@ -68,8 +86,8 @@
 | `wallpaper.export.pick/begin/recover` | 原生选择输出能力、受理导出任务、显式重新核验未决导出 |
 | `wallpaper.jobs.get/cancel` | 统一查询/取消导入及导出；不会把已完成的文件提交撤销成“未写入” |
 | `wallpaper.operations.get` | 支持精确查询持久导出操作；读取不启动新的导出任务 |
-| `wallpaper.playlist.list/get/save/next` | 分页摘要、固定版本快照、列表 CAS 保存、下一项或 `retry=true` 重试失败项 |
-| `wallpaper.capabilities` | 公布 `workDrafts`、`export`、`nativeOutputPicker`、`builtinPackages`、`playlists`、`playlistMaxItems:32`；A02 增量公布 single/span/mirror，并通过 `wallpaper.layout.inspect` 检查具体镜像资格 |
+| `wallpaper.playlist.list/get/page/save/update/next` | 分页摘要、固定版本分页快照、有界增量 CAS 保存、下一项或 `retry=true` 重试失败项 |
+| `wallpaper.capabilities` | 公布 `workDrafts`、`export`、`nativeOutputPicker`、`builtinPackages`、`playlists`、`playlistMaxItems:1000`、`playlistPageSize:32`、`playlistIncremental:true`；A02 增量公布 single/span/mirror，并通过 `wallpaper.layout.inspect` 检查具体镜像资格 |
 
 核心实现位于 [work_drafts.rs](../crates/hertz-desktop/src/wallpaper/work_drafts.rs)、[output_tokens.rs](../crates/hertz-desktop/src/wallpaper/output_tokens.rs)、[export_jobs.rs](../crates/hertz-desktop/src/wallpaper/export_jobs.rs)、[playlist.rs](../crates/hertz-desktop/src/wallpaper/playlist.rs) 与 [wallpaper_playlist.rs](../crates/hertz-desktop/src/wallpaper_playlist.rs)，迁移为 `0004_work_drafts.sql`、`0005_exports.sql`、`0006_playlists.sql`。服务、设置页与现有桌面/预览 owner 接线复用原入口。
 

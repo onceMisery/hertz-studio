@@ -20,6 +20,10 @@
       try { await window.hertzWallpaperWork.flush(); }
       catch (error) { status('作品尚未保存：' + error.message, true); return; }
     }
+    if (window.hertzWallpaperPlaylist) {
+      try { await window.hertzWallpaperPlaylist.flush(); }
+      catch (error) { status('轮播列表尚未保存：' + error.message, true); return; }
+    }
     if (dirty || pending) { $('close-confirm').hidden = false; $('continue-editing').focus(); return; }
     send('close');
   }
@@ -192,7 +196,7 @@
     managementRequests.delete(receipt.requestId); clearTimeout(waiting.timer);
     if (receipt.ok) {
       waiting.resolve(receipt);
-      if (['wallpaper.playlist.save', 'wallpaper.library.deleteVersion', 'wallpaper.library.deleteWork'].includes(waiting.command)
+      if (['wallpaper.playlist.save', 'wallpaper.playlist.update', 'wallpaper.library.deleteVersion', 'wallpaper.library.deleteWork'].includes(waiting.command)
         || waiting.command === 'wallpaper.library.list' && waiting.firstPage
         || waiting.command === 'wallpaper.jobs.get' && receipt.result && receipt.result.kind === 'import' && receipt.result.state === 'done') { invalidateGroupLayouts(); invalidatePublicProperties(); }
     }

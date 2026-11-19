@@ -44,6 +44,8 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-wallpaper-playlist-editor.js', stage: 'behavior',
+    why: '1000项轮播必须通过有界增量保存保留固定版本、重复条目、顺序和元数据，不能超出信封或容量。' },
   { script: 'check-wallpaper-text-layout.js', stage: 'behavior',
     why: '长文本须有界整行测量，保留Unicode、换行、对齐与取消，不以单字宽度替代shaping。' },
   { script: 'check-wallpaper-font-probe.js', stage: 'behavior',
