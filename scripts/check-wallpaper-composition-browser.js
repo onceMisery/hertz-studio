@@ -240,6 +240,7 @@ const results=[];
    if(file==='')return route.fulfill({contentType:'text/html',body:'<body style="margin:0;background:black"><canvas width="64" height="64" style="width:64px;height:64px"></canvas></body>'});
    return route.abort();
   });
+  await require('./stage-runtime-fixture').routeStageRuntime(page);
   await page.goto('http://composition.test/');
   await page.addScriptTag({path:path.join(root,'plugin/ui/stage-resource-budget.js')});
   await page.addScriptTag({path:path.join(root,'plugin/ui/stage-resource-policy.js')});

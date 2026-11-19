@@ -5,7 +5,7 @@ const path = require('node:path');
 const ROOT = path.join(__dirname, '..');
 const FILE = path.join(ROOT, 'crates/hertz-studio/src/assets.rs');
 function readAssets(source = fs.readFileSync(FILE, 'utf8')) {
-  return Array.from(source.matchAll(/"(\/[^"\s]+)"\s*,\s*(JS|CSS|HTML)\s*=>\s*const\s+(\w+)\s*:\s*&str\s*=\s*edition_ui!\(\s*"([^"]+)"\s*\)\s*;/g), m => {
+  return Array.from(source.matchAll(/"(\/[^"\s]+)"\s*,\s*(JS|CSS|HTML|WASM|JSON)\s*=>\s*const\s+(\w+)\s*:\s*&(?:str|\[u8\])\s*=\s*edition_ui!\(\s*"([^"]+)"\s*\)\s*;/g), m => {
     // Authored splash documents live at the repository root and are copied to
     // the same path in every generated UI package by edition-ui.rs.
     const file = path.resolve(ROOT, m[4].startsWith('splash/') ? '.' : 'plugin/ui', m[4]);

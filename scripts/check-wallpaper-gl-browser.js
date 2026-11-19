@@ -2,14 +2,13 @@
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { runtimePage } = require('./stage-runtime-fixture');
 const path = require('node:path');
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), assets=path.join(root,'crates/hertz-desktop/assets');
 const guard=fs.readFileSync(path.join(assets,'wallpaper-gl-budget.js'),'utf8');
 const html=fs.readFileSync(path.join(assets,'wallpaper-scene.html'),'utf8')
   .replace('__GL_BUDGET__',()=>guard)
-  .replace('__RUNTIME__',()=>fs.readFileSync(path.join(root,'plugin/ui/vendor/stage-runtime.js'),'utf8'))
-  .replace('__SHIM__',()=>fs.readFileSync(path.join(root,'plugin/ui/vendor/zodiac-stage.js'),'utf8'))
   .replace('__SCENE__',()=>fs.readFileSync(path.join(assets,'wallpaper-scene.js'),'utf8'));
 const output=path.join(root,'output/playwright/wallpaper-gl-browser');
 const sharedContract=JSON.parse(fs.readFileSync(path.join(root,'crates/hertz-wallpaper/contracts/shared-assets.json'),'utf8'));
@@ -23,7 +22,7 @@ const limits={quality:'low',requestedQuality:'low',fps:30,refreshHz:60,pixelBudg
   const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,args:['--use-angle=swiftshader','--enable-webgl']});
   const results=[];
   async function pageFor(allocation=limits, scene=false) {
-    const page=await browser.newPage({viewport:{width:1280,height:720}});
+    const page=await runtimePage(browser, {viewport:{width:1280,height:720}});
     await page.addInitScript(allocation=>{
       window.receipts=[];window.ipc={postMessage:message=>receipts.push(message)};
       Object.defineProperty(window,'__hertzWallpaperBinding',{value:Object.freeze({generation:1,sessionId:'browser'})});
@@ -138,6 +137,7 @@ const limits={quality:'low',requestedQuality:'low',fps:30,refreshHz:60,pixelBudg
       await page.evaluate(quality=>{hertzWallpaper.applyConfig({source:'fixed',scene:'reactor',quality});hertzWallpaper.start(30);},quality);
       await page.waitForFunction(()=>hertzWallpaper.debug().draws>2,null,{timeout:15000});
       const debug=await page.evaluate(()=>hertzWallpaper.debug());assert.equal(debug.glBudget.error,null);assert.ok(debug.glBudget.peakBytes<=profile.gpuBytes);
+      assert.equal(debug.stats.effectiveQuality,quality,'runtime quality consumes the native admitted tier');
       const dimensions=await page.evaluate(()=>{const c=document.querySelector('canvas');return {width:c.width,height:c.height};});
       assert.ok(dimensions.width*dimensions.height<=profile.pixelBudget);results.push({quality,dimensions,debug});await page.close();
     }

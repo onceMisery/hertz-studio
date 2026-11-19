@@ -124,22 +124,28 @@ function definition([id, label, category, factory, aliases = []]) {
       return { programs: 4, ownedCpuBytes: primary.ownedCpuBytes + effects.ownedCpuBytes, bufferDeclaredBytes: primary.bufferDeclaredBytes + effects.bufferDeclaredBytes };
     } : undefined,
     create(ctx) {
-      const primary = factory(ctx), effects = createEffects(ctx, ctx.layer === 'lyrics' ? [] : undefined); let params = ctx.params;
-      return {
-        update(frame) {
-          const visualFrame = motionFrame(frame, params.reduced, lyrics), sceneTime = visualFrame.sceneTime;
-          primary.update(visualFrame); effects.update(visualFrame);
-          if (primary.group && !lyrics) {
-            primary.group.rotation.z = params.director ? Math.sin(sceneTime * .08) * .04 : 0;
-            primary.group.scale.setScalar((params.scale ?? 1) * (params.cue === 'chorus' ? 1.08 : 1));
-            primary.group.rotation.x = params.cue === 'bridge' ? .06 : 0;
-          }
-        }, resize(w, h) { primary.resize(w, h); effects.resize(w, h); },
-        setParams(next) { params = next; primary.setParams(next); effects.setParams(next); }, setQuality(profile) { primary.setQuality(profile); effects.setQuality(profile); },
-        resetHistory() {primary.resetHistory?.();effects.resetHistory();},
-        ...(primary.setRig ? { setRig(pose) { primary.setRig(pose); } } : {}),
-        dispose() { effects.dispose(); primary.dispose(); }, stats: () => ({ primary: primary.stats?.(), effects: effects.stats() })
-      };
+      const primary = factory(ctx);
+      // The registry already permits asynchronous scene preparation. Attach
+      // shared effects only after that preparation has produced an instance.
+      return primary?.then ? primary.then(attach) : attach(primary);
+      function attach(primary) {
+        const effects = createEffects(ctx, ctx.layer === 'lyrics' ? [] : undefined); let params = ctx.params;
+        return {
+          update(frame) {
+            const visualFrame = motionFrame(frame, params.reduced, lyrics), sceneTime = visualFrame.sceneTime;
+            primary.update(visualFrame); effects.update(visualFrame);
+            if (primary.group && !lyrics) {
+              primary.group.rotation.z = params.director ? Math.sin(sceneTime * .08) * .04 : 0;
+              primary.group.scale.setScalar((params.scale ?? 1) * (params.cue === 'chorus' ? 1.08 : 1));
+              primary.group.rotation.x = params.cue === 'bridge' ? .06 : 0;
+            }
+          }, resize(w, h) { primary.resize(w, h); effects.resize(w, h); },
+          setParams(next) { params = next; primary.setParams(next); effects.setParams(next); }, setQuality(profile) { primary.setQuality(profile); effects.setQuality(profile); },
+          resetHistory() {primary.resetHistory?.();effects.resetHistory();},
+          ...(primary.setRig ? { setRig(pose) { primary.setRig(pose); } } : {}),
+          dispose() { effects.dispose(); primary.dispose(); }, stats: () => ({ primary: primary.stats?.(), effects: effects.stats() })
+        };
+      }
     }
   };
 }

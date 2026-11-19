@@ -12,7 +12,7 @@ pub(super) struct UiAsset {
 // per asset, on demand; ordinary browser requests use the build-time gzip bytes.
 pub(super) struct UiBody {
     pub gzip: &'static [u8],
-    identity: std::sync::OnceLock<String>,
+    identity: std::sync::OnceLock<Vec<u8>>,
 }
 
 impl UiBody {
@@ -23,14 +23,14 @@ impl UiBody {
         }
     }
 
-    pub fn identity(&self) -> &str {
+    pub fn identity(&self) -> &[u8] {
         self.identity.get_or_init(|| {
             use std::io::Read;
-            let mut text = String::new();
+            let mut bytes = Vec::new();
             flate2::read::GzDecoder::new(self.gzip)
-                .read_to_string(&mut text)
-                .expect("build-time gzip contains valid UI text");
-            text
+                .read_to_end(&mut bytes)
+                .expect("build-time gzip contains valid UI bytes");
+            bytes
         })
     }
 }
@@ -38,9 +38,11 @@ impl UiBody {
 const JS: &str = "application/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 const HTML: &str = "text/html; charset=utf-8";
+const WASM: &str = "application/wasm";
+const JSON: &str = "application/json";
 
 macro_rules! ui_assets {
-    ($($(#[$attr:meta])* $path:literal, $mime:ident => const $name:ident: &str = edition_ui!($file:literal);)+) => {
+    ($($(#[$attr:meta])* $path:literal, $mime:ident => const $name:ident: $body_type:ty = edition_ui!($file:literal);)+) => {
         $($(#[$attr])* static $name: UiBody = UiBody::new(include_bytes!(concat!(env!("OUT_DIR"), "/ui/", $file, ".gz")));)+
         pub(super) static UI_ASSETS: &[UiAsset] = &[
             $($(#[$attr])* UiAsset { path: $path, mime: $mime, body: &$name },)+
@@ -141,6 +143,9 @@ ui_assets! {
     "/stage-lyrics.js", JS => const STAGE_LYRICS_JS: &str = edition_ui!("stage-lyrics.js");
     "/stage-shelf.js", JS => const STAGE_SHELF_JS: &str = edition_ui!("stage-shelf.js");
     "/vendor/stage-runtime.js", JS => const STAGE_RUNTIME_JS: &str = edition_ui!("vendor/stage-runtime.js");
+    "/vendor/stage-assets/basis_transcoder.js", JS => const BASIS_TRANSCODER_JS: &str = edition_ui!("vendor/stage-assets/basis_transcoder.js");
+    "/vendor/stage-assets/basis_transcoder.wasm", WASM => const BASIS_TRANSCODER_WASM: &[u8] = edition_ui!("vendor/stage-assets/basis_transcoder.wasm");
+    "/vendor/stage-assets/phoenix-reference-data.json", JSON => const PHOENIX_REFERENCE_DATA: &str = edition_ui!("vendor/stage-assets/phoenix-reference-data.json");
     "/vendor/coast-stage.js", JS => const COAST_STAGE_JS: &str = edition_ui!("vendor/coast-stage.js");
     "/stage-coast.js", JS => const STAGE_COAST_JS: &str = edition_ui!("stage-coast.js");
     "/vendor/zodiac-stage.js", JS => const ZODIAC_STAGE_JS: &str = edition_ui!("vendor/zodiac-stage.js");

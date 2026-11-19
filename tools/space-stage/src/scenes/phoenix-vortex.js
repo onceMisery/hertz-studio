@@ -4,7 +4,7 @@
 import { basicInstance, own, qualityDensity, root, seed } from './factories.js';
 import { createParticlePointer, particleNoiseShader } from './particle-pointer.js';
 import { approach, createGlow, createShockPool, createStarfield, faceCamera } from './scene-field.js';
-import { createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry, createShellField, phoenixCrackPoints } from './phoenix-form.js';
+import { preparePhoenixArtwork, createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry, createShellField, phoenixCrackPoints } from './phoenix-form.js';
 import { phoenixAtmosphereVertex, phoenixAtmosphereFragment, createPhoenixStarTravel, createPhoenixSanctum } from './phoenix-atmosphere.js';
 import { phoenixColor, createSpaceNoise } from './phoenix-color.js';
 
@@ -513,7 +513,9 @@ function createVeilNoise(ctx) {
 }
 
 
-export function createPhoenixVortex(ctx) {
+export async function createPhoenixVortex(ctx) {
+  await preparePhoenixArtwork();
+  if (ctx.signal?.aborted) throw new DOMException('Scene preparation cancelled', 'AbortError');
   const T = ctx.THREE, group = root(ctx), world = new T.Group(); group.add(world);
   const pointer = createParticlePointer(ctx, world, { depth: 0, radius: 3 });
   const uniforms = { ...pointer.uniforms,

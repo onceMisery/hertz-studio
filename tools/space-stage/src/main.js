@@ -402,7 +402,7 @@ export function create(canvas, options = {}) {
           const info = renderer.info.render, scoped = candidate.scope.stats(), shared = spatialResources.stats();
           const post = candidate.post && candidate.post.stats ? candidate.post.stats().bytes : 0;
           return { drawCalls: info.calls, points: info.points, triangles: info.triangles, estimatedBytes: scoped.estimatedBytes + (lyricLayer ? lyricLayer.scope.stats().estimatedBytes : 0) + shared.bytes + post };
-        }, cpuMs)) applyQuality();
+        }, cpuMs, frame.targetFps)) applyQuality();
         const currentFailure = admissionFailure || candidate.post?.stats?.().resourceFailure || spatialResources.stats().resourceFailure || '';
         if (frameCount % 120 === 0 || currentFailure !== lastResourceFailure) notify();
         if (!current() || (typeof document !== 'undefined' && document.hidden) || (options.isVisible && !options.isVisible())) return false;

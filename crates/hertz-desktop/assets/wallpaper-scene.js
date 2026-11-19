@@ -14,6 +14,29 @@
   var runtime = window.HertzStageRuntime || {};
   var zodiac = window.ZodiacStagePure || runtime.ZodiacStagePure || null;
   var spaceRuntime = runtime.SpaceStagePure || null;
+  var runtimeLoading = null;
+  function loadRuntime() {
+    if (spaceRuntime && zodiac) return Promise.resolve();
+    if (runtimeLoading) return runtimeLoading;
+    runtimeLoading = new Promise(function (resolve, reject) {
+      var script = document.createElement('script');
+      script.src = 'vendor/stage-runtime.js';
+      script.onload = function () {
+        runtime = window.HertzStageRuntime || {};
+        zodiac = runtime.ZodiacStagePure || null;
+        spaceRuntime = runtime.SpaceStagePure || null;
+        script.remove();
+        if (spaceRuntime && zodiac) resolve();
+        else { runtimeLoading = null; reject(new Error('scene_runtime_missing')); }
+      };
+      script.onerror = function () {
+        script.remove(); runtimeLoading = null;
+        reject(new Error('scene_runtime_load_failed'));
+      };
+      document.head.appendChild(script);
+    });
+    return runtimeLoading;
+  }
   var DEFAULT_SCENE = 'zodiac';
   var ALLOWED = {
     zodiac: true,
@@ -54,6 +77,12 @@
   var selectToken = 0;
   var pendingCapture = null;
   var lastRenderedFrame = null;
+  var sceneRevision = 0;
+  function invalidateScene() { sceneRevision++; }
+  function deviceTier() {
+    // Native admission is the quality ceiling, including any budget downgrade.
+    return ['low', 'medium', 'high'].indexOf(config.quality);
+  }
   var raf = 0;
   var last = 0;
   var cap = 30;
@@ -549,6 +578,15 @@
       motionActive: motionActive(), playing: scenePlaying(), position: feed.positionMs || 0
     };
     var bands = frame.bands;
+    // Composition owns its asynchronous frame transaction and dirty state.
+    // Builtins with frozen time and silent audio can retain their last output.
+    // Keep the heartbeat alive and let capture redraw a discarded buffer.
+    if (!compositionUrl && !retained && !pendingCapture && lastRenderedFrame
+      && lastRenderedFrame.revision === sceneRevision && !frame.motionActive
+      && frame.sceneTime === lastRenderedFrame.sceneTime
+      && frame.playing === lastRenderedFrame.playing
+      && bands.every(function (value, index) { return value === 0 && lastRenderedFrame.bands[index] === 0; })) return;
+    frame.revision = sceneRevision;
     try {
       var submitted = false;
       if (backend === 'zodiac') {
@@ -576,7 +614,8 @@
           redraw: !!pendingCapture,
           paused: !enabled || config.motion <= 0,
           dynamicDt: frame.dynamicDt,
-          deviceTier: 1,
+          deviceTier: deviceTier(),
+          targetFps: gate.budget,
           level: level,
           onset: 0,
           bands: shaped,
@@ -602,6 +641,7 @@
 
   function startLoop() {
     if (!raf && enabled && !lost && !document.hidden) {
+      invalidateScene();
       resetGate();
       raf = requestAnimationFrame(loop);
     }
@@ -757,8 +797,9 @@
 
   async function selectScene(id, params, initial, force) {
     if (!allowedScene(id)) id = DEFAULT_SCENE;
-    var nextBackend = id === 'zodiac' && zodiac ? 'zodiac' : 'space';
+    var nextBackend = id === 'zodiac' ? 'zodiac' : 'space';
     if (!force && mounted && sceneId === id && backend === nextBackend) {
+      invalidateScene();
       if (id === 'zodiac' && params && zodiac) zodiac.setPrefs(Object.assign({}, params, { interactive: false }));
       if (id !== 'zodiac' && params && stage) {
         try {
@@ -774,6 +815,8 @@
     teardown();
     var token = ++selectToken;
     try {
+      await loadRuntime();
+      if (token !== selectToken) return false;
       if (window.HertzGlBudget) await HertzGlBudget.idle();
       if (token !== selectToken) return false;
       if (nextBackend === 'zodiac') {
@@ -786,8 +829,8 @@
       applyBrightness();
       stage = spaceRuntime.create(canvas, {
         qualityMode: config.quality,
-        deviceTier: 1,
-        onInvalidate: function () { /* wallpaper loop already runs */ },
+        deviceTier: deviceTier(),
+        onInvalidate: invalidateScene,
         onStatus: function (status) {
           if (status && status.state === 'failed') error = status.error || 'scene_failed';
         }
@@ -801,7 +844,7 @@
         playTrack: function () {},
         onRecipe: function () {},
         zodiacEvent: function () {},
-        invalidate: function () {}
+        invalidate: invalidateScene
       });
       var normalized = await stage.select(id, { params: params || {} });
       if (token !== selectToken || !stage) return false;
@@ -841,16 +884,12 @@
     if (compositionUrl) return true;
     if (media) unmountMedia(); // 场景接管呈现（start 的场景分支/显式 mount）
     if (mounted || switching) return true;
-    if (!zodiac && !spaceRuntime) {
-      error = 'scene_runtime_missing';
-      notify('wallpaper_mount_failed');
-      return false;
-    }
     var id = targetScene();
     var params = config.source === 'follow' && followSpace && canonicalScene(followSpace.scene) === id ? followSpace.params : config.params;
     var pending = selectScene(id, params, true, false);
+    var token = selectToken;
     Promise.resolve(pending).then(function (ok) {
-      if (!ok && !mounted && !switching) {
+      if (token === selectToken && !ok && !mounted && !switching) {
         error = error || 'scene_mount_failed';
         notify('wallpaper_mount_failed');
       }
@@ -868,13 +907,14 @@
   function applyFollow() {
     if (compositionUrl) return;
     if (media) return;
-    if (config.source !== 'follow' || !mounted) return;
+    if (config.source !== 'follow' || (!mounted && !switching)) return;
     var hasFollow = followSpace && allowedScene(canonicalScene(followSpace.scene));
     var id = hasFollow ? canonicalScene(followSpace.scene) : config.scene;
     var params = hasFollow ? followSpace.params : config.params;
     var signature = id + '|' + JSON.stringify(params);
     if (id === sceneId) {
       if (backend === 'space' && stage && signature !== followSignature) {
+        invalidateScene();
         followSignature = signature;
         try {
           var patched = stage.setParams(params);
@@ -882,7 +922,8 @@
         } catch (failure) {
           error = String(failure);
         }
-      } else if (backend === 'zodiac') {
+      } else if (backend === 'zodiac' && signature !== followSignature) {
+        invalidateScene();
         followSignature = signature;
         zodiac.setPrefs(Object.assign({}, params, { interactive: false }));
       }
@@ -1346,6 +1387,7 @@
 
   function applyConfig(next) {
     if (!next || typeof next !== 'object') return;
+    var previousConfig = JSON.stringify(config);
     if (Array.isArray(next.allowed) && next.allowed.length) {
       var allowed = {};
       for (var i = 0; i < next.allowed.length; i++) {
@@ -1382,6 +1424,7 @@
     config.source = nextSource;
     config.scene = nextScene;
     config.params = next.params && typeof next.params === 'object' ? next.params : {};
+    if (previousConfig !== JSON.stringify(config)) invalidateScene();
     if (!pointerAllowed()) clearPointer();
     gate = computeGate(cap, config.refreshHz);
     resetGate();
@@ -1389,7 +1432,16 @@
     if (zodiac && zodiac.setMotion && backend === 'zodiac') zodiac.setMotion({ active: motionActive() });
     applyMediaMotion();
     if (compositionUrl) return;
-    if (!mounted) return;
+    if (!mounted) {
+      // Configuration may arrive while the shared runtime is still loading.
+      // Reuse that load, but retire the earlier selection's continuation.
+      if (switching && !media) {
+        var loadingId = targetScene();
+        selectScene(loadingId, config.source === 'follow' && followSpace && canonicalScene(followSpace.scene) === loadingId
+          ? followSpace.params : config.params, true, true);
+      }
+      return;
+    }
     if (previousQuality !== config.quality) {
       followSignature = '';
       var id = targetScene();
@@ -1417,6 +1469,8 @@
     unmountMedia();teardown();compositionUrl=url;switching=true;
     var token=++selectToken;
     try {
+      await loadRuntime();
+      if(token!==selectToken)return false;
       var response=await fetch(url,{cache:'no-store'});
       if(!response.ok)throw new Error('composition_projection_unavailable');
       var projection=await response.json();
@@ -1427,8 +1481,8 @@
       if(token!==selectToken)return false;
       attachCanvas();
       canvas.width=projection.target.width;canvas.height=projection.target.height;
-      stage=spaceRuntime.create(canvas,{qualityMode:config.quality,deviceTier:1,resources:HertzGlBudget.resources,compositionTarget:projection.target,
-        onInvalidate:function(){},onStatus:function(status){if(status&&status.state==='failed')notify('wallpaper_gl_failed '+String(status.error).slice(0,220));}});
+      stage=spaceRuntime.create(canvas,{qualityMode:config.quality,deviceTier:deviceTier(),resources:HertzGlBudget.resources,compositionTarget:projection.target,
+        onInvalidate:invalidateScene,onStatus:function(status){if(status&&status.state==='failed')notify('wallpaper_gl_failed '+String(status.error).slice(0,220));}});
       await stage.selectComposition(projection);
       if(token!==selectToken||!stage)return false;
       backend='space';sceneId='composition';mounted=true;lost=false;error=null;sceneTime=0;compositionFramePending=true;
@@ -1576,6 +1630,7 @@
   }
 
   addEventListener('resize', function () {
+    invalidateScene();
     clearPointer();
     if (!mounted) return;
     if (backend === 'zodiac' && zodiac) {

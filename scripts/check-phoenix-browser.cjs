@@ -14,7 +14,8 @@ async function previewContract(browser) {
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   const paths = new Set(['/tools/space-stage/phoenix-preview.html', '/tools/space-stage/phoenix-preview.js',
-    '/plugin/ui/vendor/stage-runtime.js', '/plugin/ui/vendor/space-stage.js', '/plugin/ui/space-camera.js']);
+    '/plugin/ui/vendor/stage-runtime.js', '/plugin/ui/vendor/stage-assets/phoenix-reference-data.json',
+    '/plugin/ui/vendor/space-stage.js', '/plugin/ui/space-camera.js']);
   await page.route('http://phoenix-preview.test/**', route => {
     const pathname = new URL(route.request().url()).pathname;
     if (!paths.has(pathname)) return route.fulfill({ status: 404, body: '' });
@@ -61,7 +62,8 @@ async function renderContract(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } }), errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.setContent('<body style="margin:0;background:#020304"><canvas style="width:100vw;height:100vh"></canvas></body>');
+  await require('./stage-runtime-fixture').routeStageRuntime(page);
+  await page.setContent('<base href="http://phoenix.test/"><body style="margin:0;background:#020304"><canvas style="width:100vw;height:100vh"></canvas></body>');
   for (const name of ['stage-runtime', 'space-stage']) await page.addScriptTag({ path: path.join(web, 'vendor', name + '.js') });
   await page.evaluate(async () => {
     const canvas = document.querySelector('canvas'), original = canvas.getContext.bind(canvas);
@@ -186,15 +188,16 @@ async function fireContract(browser) {
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   try {
-    await page.setContent('<body style="margin:0"><canvas></canvas></body>');
+    await require('./stage-runtime-fixture').routeStageRuntime(page);
+    await page.setContent('<base href="http://phoenix.test/"><body style="margin:0"><canvas></canvas></body>');
     await page.addScriptTag({ content: bundled.outputFiles[0].text });
-    const evidence = await page.evaluate(() => {
+    const evidence = await page.evaluate(async () => {
       const { THREE, createScope, createPhoenixVortex } = fireModules;
       const renderer = new THREE.WebGLRenderer({ canvas: document.querySelector('canvas') });
       renderer.setSize(1280, 720);
       const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(48, 1280 / 720, .05, 900), scope = createScope();
       camera.position.set(0, .6, 16.5); camera.lookAt(0, .6, 0);
-      const instance = createPhoenixVortex({ THREE, scene, camera, renderer, scope,
+      const instance = await createPhoenixVortex({ THREE, scene, camera, renderer, scope,
         params: { performance: 'swarm', density: 1 }, quality: { mode: 'low', density: .4 }, services: {} });
       instance.resize(1280, 720);
       const flames = scene.getObjectByName('phoenix-flames'), embers = scene.getObjectByName('phoenix-embers');
@@ -522,6 +525,7 @@ async function appContract(browser) {
     page.on('console', m => { if (m.type() === 'error' && /THREE|shader|WebGL/i.test(m.text())) errors.push(m.text()); });
     await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Space3D && document.getElementById('space3d').dataset.spReady === '1');
+    await page.locator('#top-more-btn').click();
     await page.locator('#space3d-entry').click();
     await page.waitForFunction(() => Space3D.stats().renderer?.state === 'ready');
     await page.evaluate(() => {

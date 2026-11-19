@@ -2,9 +2,9 @@
 // Synchronous classic-script packaging: one Three.js/module graph, three public APIs.
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { withProgramAdmission } from './three-program-admission.mjs';
 import { withBufferAdmission } from './three-buffer-admission.mjs';
 
@@ -24,23 +24,39 @@ const stages = { coast: 'CoastStagePure', zodiac: 'ZodiacStagePure', space: 'Spa
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex').slice(0, 16);
 const vendor = resolve(root, 'plugin/ui/vendor');
 mkdirSync(vendor, { recursive: true });
+const assetDir = resolve(vendor, 'stage-assets');
+mkdirSync(assetDir, { recursive: true });
+const basis = resolve(here, 'node_modules/three/examples/jsm/libs/basis');
+const assetSources = {
+  'basis_transcoder.js': resolve(basis, 'basis_transcoder.js'),
+  'basis_transcoder.wasm': resolve(basis, 'basis_transcoder.wasm'),
+  'phoenix-reference-data.json': resolve(here, 'src/scenes/assets/phoenix-reference-data.js'),
+};
+for (const [file, source] of Object.entries(assetSources)) {
+  if (file.endsWith('.json')) writeFileSync(resolve(assetDir, file), JSON.stringify((await import(pathToFileURL(source))).phoenixArt));
+  else copyFileSync(source, resolve(assetDir, file));
+}
 const result = await build({
   stdin: { contents: Object.entries(stages).map(([id, api]) => `export * as ${api} from './${id}-stage/src/main.js';`).join('\n'), resolveDir: resolve(root, 'tools'), sourcefile: 'stage-entrypoints.js' },
   bundle: true, format: 'iife', globalName: 'HertzStageRuntime', minify: !process.argv.includes('--dev'),
   target: 'es2020', legalComments: 'eof', write: false, metafile: true,
   plugins: [{ name: 'ktx2-transcoder-urls', setup(builder) {
-    // The IIFE bundle has no import.meta. Inline the pinned Basis transcoder as
-    // data URLs so KTX2Loader can build its worker without extra served files.
-    const basis = resolve(here, 'node_modules/three/examples/jsm/libs/basis');
-    const transcoderJS = readFileSync(resolve(basis, 'basis_transcoder.js')).toString('base64');
-    const transcoderWasm = readFileSync(resolve(basis, 'basis_transcoder.wasm')).toString('base64');
+    // Keep large payloads out of the JS graph. KTX2Loader fetches the pinned
+    // worker inputs only when a Basis texture actually needs transcoding.
+    builder.onLoad({ filter: /[\\/]src[\\/]runtime-assets\.js$/ }, args => ({
+      contents: readFileSync(args.path, 'utf8').replace('import.meta.url', 'null'),
+      loader: 'js', resolveDir: dirname(args.path),
+    }));
     builder.onLoad({ filter: /[\\/]loaders[\\/]KTX2Loader\.js$/ }, args => {
       const source = readFileSync(args.path, 'utf8');
-      const contents = source.replace(
+      const replaced = source.replace(
         /const WASM_BIN_URL = new URL\([^;]+;\s*const WASM_JS_URL = new URL\([^;]+;/,
-        `const WASM_BIN_URL = 'data:application/wasm;base64,${transcoderWasm}';\n`
-        + `const WASM_JS_URL = 'data:text/javascript;base64,${transcoderJS}';`);
-      if (contents === source) throw new Error('KTX2Loader transcoder URL layout changed');
+        `const WASM_BIN_URL = () => runtimeAssetUrl('basis_transcoder.wasm');\n`
+        + `const WASM_JS_URL = () => runtimeAssetUrl('basis_transcoder.js');`)
+        .replace('loadAsync( WASM_JS_URL )', 'loadAsync( WASM_JS_URL() )')
+        .replace('loadAsync( WASM_BIN_URL )', 'loadAsync( WASM_BIN_URL() )');
+      if (replaced === source) throw new Error('KTX2Loader transcoder URL layout changed');
+      const contents = `import { runtimeAssetUrl } from ${JSON.stringify(resolve(here, 'src/runtime-assets.js'))};\n` + replaced;
       return { contents, loader: 'js', resolveDir: dirname(args.path) };
     });
   } }, { name: 'single-three-version', setup(builder) {
@@ -64,7 +80,7 @@ for (const id of Object.keys(stages)) {
     }
   }
   for (const source of Object.keys(stages)) scan(resolve(root, `tools/${source}-stage/src`));
-  for (const file of ['tools/build-stages.mjs', 'tools/three-program-admission.mjs', 'tools/three-buffer-admission.mjs', ...Object.keys(stages).map(name => `tools/${name}-stage/build.mjs`), 'tools/space-stage/package.json', 'tools/space-stage/package-lock.json', 'plugin/ui/vendor/stage-runtime.js', ...Object.keys(stages).map(name => `plugin/ui/vendor/${name}-stage.js`)]) manifest[file] = hash(resolve(root, file));
+  for (const file of ['tools/build-stages.mjs', 'tools/three-program-admission.mjs', 'tools/three-buffer-admission.mjs', ...Object.keys(stages).map(name => `tools/${name}-stage/build.mjs`), 'tools/space-stage/package.json', 'tools/space-stage/package-lock.json', 'plugin/ui/vendor/stage-runtime.js', ...Object.keys(assetSources).map(name => `plugin/ui/vendor/stage-assets/${name}`), ...Object.keys(stages).map(name => `plugin/ui/vendor/${name}-stage.js`)]) manifest[file] = hash(resolve(root, file));
   writeFileSync(resolve(root, `tools/${id}-stage/.build-manifest.json`), JSON.stringify(manifest, null, 2) + '\n');
 }
 console.log(`Shared stages: ${result.outputFiles[0].contents.length} bytes; one classic-script runtime, three synchronous APIs.`);

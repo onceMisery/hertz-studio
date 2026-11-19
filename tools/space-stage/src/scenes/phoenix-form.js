@@ -2,11 +2,23 @@
 // Reference artwork, distant flock plumage and the shared egg surface.
 import { own, seed } from './factories.js';
 import { unzlibSync } from 'three/examples/jsm/libs/fflate.module.js';
-import { phoenixArt } from './assets/phoenix-reference-data.js';
+import { runtimeAssetUrl } from '../runtime-assets.js';
 
 const TAU = Math.PI * 2;
-const WIDTH = 12.5, HEIGHT = WIDTH * phoenixArt.height / phoenixArt.width;
-let artworkPixels;
+const WIDTH = 12.5;
+let HEIGHT, phoenixArt, artworkLoading, artworkPixels;
+
+export async function preparePhoenixArtwork() {
+  if (!artworkLoading) artworkLoading = fetch(runtimeAssetUrl('phoenix-reference-data.json'))
+    .then(response => {
+      if (!response.ok) throw new Error('Phoenix artwork unavailable');
+      return response.json();
+    }).then(art => {
+      phoenixArt = art;
+      HEIGHT = WIDTH * phoenixArt.height / phoenixArt.width;
+    }).catch(error => { artworkLoading = null; throw error; });
+  await artworkLoading;
+}
 
 function pixels() {
   if (artworkPixels) return artworkPixels;

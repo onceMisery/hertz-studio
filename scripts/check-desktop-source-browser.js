@@ -3,6 +3,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { runtimePage } = require('./stage-runtime-fixture');
 const path = require('node:path');
 const http = require('node:http');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -12,14 +13,12 @@ const read = name => fs.readFileSync(path.join(assets, name), 'utf8');
 const lyrics = '<!doctype html><html><meta charset="utf-8"><style>' + read('desktop-lyrics.css') + '</style><body>' + read('desktop-lyrics.html') + '<script>' + read('desktop-lyrics.js') + '</script></body></html>';
 const wallpaper = read('wallpaper-scene.html')
   .replace('__GL_BUDGET__', () => read('wallpaper-gl-budget.js'))
-  .replace('__RUNTIME__', fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8'))
-  .replace('__SHIM__', fs.readFileSync(path.join(root, 'plugin/ui/vendor/zodiac-stage.js'), 'utf8'))
   .replace('__SCENE__', read('wallpaper-scene.js'));
 async function main() {
   const server = http.createServer((request, response) => { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(request.url === '/wallpaper' ? wallpaper : lyrics); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true, args: ['--use-angle=swiftshader', '--enable-webgl'] });
-  const page = await browser.newPage({ viewport: { width: 550, height: 500 } });
+  const page = await runtimePage(browser, { viewport: { width: 550, height: 500 } });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
     await page.addInitScript(() => { window.requests = []; window.ipc = { postMessage: text => { try { requests.push(JSON.parse(text)); } catch (_) { requests.push({ event: text }); } } }; });

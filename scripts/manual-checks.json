@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-stage-review-browser.js",
+      "purpose": "真实 Chromium：壁纸图片不加载运行时、静止停止提交、尺寸/参数/音频/恢复唤醒、原生质量消费、凤凰按需准备和加载取消。"
+    },
+    {
       "script": "check-wallpaper-community-author-browser.js",
       "purpose": "Actual Chromium interaction with shipped standalone settings/community author/report controllers and isolated native receipts: native form/keyboard validation, exact upload and submit, successful and unknown reload recovery, original UUID/source/account isolation, reauthentication without discarding pending author metadata, no automatic write replay, explicit same-upload resume, late receipt and five-minute expiry, text injection and 1120/520/360/320px layout. Requires PLAYWRIGHT_MODULE and installed Chromium (PLAYWRIGHT_EXECUTABLE optional). Hub and native package/auth state are covered by Rust tests; this fixture does not qualify production HTTPS, OIDC, WebView2 or Signer deployment."
     },
