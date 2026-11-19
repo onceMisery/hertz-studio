@@ -89,7 +89,8 @@
     root = document.createElement('dialog'); root.id = 'wallpaper-settings-workspace';
     root.setAttribute('aria-labelledby', 'wallpaper-workspace-title');
     root.innerHTML = '<header class="wallpaper-workspace-heading"><div><h2 id="wallpaper-workspace-title">桌面设置</h2><p>壁纸与运行设置 · 收起窗口保留本次草稿</p></div>'
-      + '<form method="dialog"><button type="submit" class="btn" autofocus>收起</button></form></header>'
+      + '<form method="dialog"><button type="submit" class="iconbtn" title="收起" aria-label="收起" autofocus>'
+      + '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></form></header>'
       + '<div id="wallpaper-settings-surface"><div class="wallpaper-workspace-loading" aria-hidden="true"><span></span><span></span><span></span></div>'
       + '<p id="wallpaper-workspace-status" role="status" aria-live="polite"></p><button id="wallpaper-workspace-retry" class="btn" hidden>重新加载</button></div>';
     document.body.appendChild(root);

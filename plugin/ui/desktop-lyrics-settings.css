@@ -6,7 +6,6 @@
 .dls-dialog-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-shrink: 0; padding: 20px 28px; border-bottom: 1px solid var(--line); }
 .dls-dialog-header h2 { margin: 0; font-size: 20px; font-weight: 600; }
 .dls-dialog-header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
-.dls-dialog-header .btn { min-height: 44px; }
 .dls-dialog-body { flex: 1; min-height: 0; padding: 0 28px; overflow: auto; overscroll-behavior: contain; }
 #desktop-lyrics-dialog #desktop-lyrics-settings { margin: 0; border: 0; padding: 20px 0 0; }
 #desktop-lyrics-dialog #desktop-lyrics-settings > legend { display: none; }

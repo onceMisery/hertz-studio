@@ -345,7 +345,8 @@
     dialog.id = 'desktop-lyrics-dialog';
     dialog.setAttribute('aria-labelledby', 'dls-dialog-title');
     dialog.innerHTML = '<header class="dls-dialog-header"><div><h2 id="dls-dialog-title">桌面歌词</h2><p>调整样式与布局，应用后生效</p></div>'
-      + '<form method="dialog"><button type="submit" class="btn" autofocus>关闭</button></form></header>'
+      + '<form method="dialog"><button type="submit" class="iconbtn dls-dialog-close" title="关闭" aria-label="关闭" autofocus>'
+      + '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></form></header>'
       + '<div class="dls-dialog-body"></div>';
     root.before(dialog);
     dialog.querySelector('.dls-dialog-body').appendChild(root);
