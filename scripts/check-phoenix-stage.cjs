@@ -193,7 +193,9 @@ function timelineContract(timeline) {
         else { instance.dispose(); scope.dispose(); }
         assert.equal(scene.children.length, 0, 'disposing removes the complete registered scene');
         assert.equal(scope.signal.aborted, true, 'scope aborts its signal');
-        assert.deepEqual(scope.stats(), { resources: 0, tasks: 0, cleanups: 0, estimatedBytes: 0 }, 'scope releases all ownership');
+        // The scope later grew lease/admission counters; every one must drain too.
+        assert.deepEqual(scope.stats(), { resources: 0, tasks: 0, cleanups: 0, leases: 0, admissionTickets: 0, allocationTasks: 0,
+          cleanupFailed: false, preparedBuffers: 0, unclaimedPreparedBuffers: 0, estimatedBytes: 0 }, 'scope releases all ownership');
         for (const [resource, count] of disposals) assert.ok(count > 0, `resource ${resource.type || resource.uuid} was disposed`);
         const counts = [...disposals.values()];
         instance.dispose(); scope.dispose();
