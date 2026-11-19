@@ -1,5 +1,23 @@
 # 当前路线的能力与发布验收矩阵
 
+## 2026-11-19 组合图层分组与顺序编辑
+
+本轮从 `feat/zcode-design-completion/62d2b8b` 继续，补齐组合编辑器的层级列表、父组选择、2D/3D 组创建、同组/根层排序和效果执行顺序。结构编辑进入原撤销/重做、自动保存与不可变版本流程；位置示意继承父组变换和可见性，拖动使用父组局部坐标。用法和合同见[作品说明](wallpaper-works-playlists.md#组合图层分组与顺序2026-11-19-增量)。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| 原生结构编辑、保存/重开与不可变包 | 6 项通过；包含原子失败、CAS、空间/循环/八层边界、128 个最长 ID 排序信封 | [结构测试](../output/composition-hierarchy-20261119/native-structure-r3.log) |
+| 原生完整库，Rust 1.88、`--test-threads=1` | 982 通过、0 失败、2 项设备测试按原设置忽略 | [完整回归](../output/composition-hierarchy-20261119/native-library-final.log) |
+| Chromium 图层与顺序编辑 | 9 组通过、零页面错误；分组、父组拖动、撤销/重开、焦点、未知回执、冲突与 1120/520/360/320px | [界面结果](../output/composition-hierarchy-20261119/browser/results.json) |
+| 原组合编辑器回归 | 14 项通过 | [原界面回归](../output/composition-hierarchy-20261119/browser-composition-ui-final.log) |
+| 实际 Rust IR、已发布 bundle、SwiftShader 像素/媒体/字体 | 66 项通过；嵌套半透明组排序像素符合预期，沿用同一个 renderer | [实际渲染](../output/composition-hierarchy-20261119/renderer-r2/evidence.json) |
+| 前端默认检查 | 500 文件语法、86 步通过；包含 API 216 条、ADR 418 项与脚本登记 | [聚合检查](../output/composition-hierarchy-20261119/frontend-final.log) |
+| 独立 Full/native，Rust 1.88 all-targets | `cargo check --locked --offline` 通过 | [构建检查](../output/composition-hierarchy-20261119/full-native-final.log) |
+
+完整库测试后的改动只涉及 App 无关格式恢复与渲染夹具的 `CHROME_PATH` 启动配置；事务、结构算法和其测试源码保持冻结摘要。随后 Full/native 与实际 renderer 以更新后的候选重新验证，源码身份和执行读回汇总于[本轮证据](../output/composition-hierarchy-20261119/verification.json)。原生编译仍有 5 条既有警告，测试构建有 3 条。渲染夹具日志中的故意无效 shader 属于原拒绝测试，不代表正向渲染失败。
+
+这些结果覆盖本机结构编辑切片，包含真实 SQLite/包/编译器和 Chromium fixture；没有据此认领生产 WebView2、多设备、长稳、完整 P2/P3/A01–A10 或 G3-S 资格。原默认并发测试隔离限制和下方各次历史证据范围继续保留。
+
 ## 2026-11-19 原生社区作者与举报客户端
 
 本轮以 `feat/zcode-design-completion/6fae95b` 为起点，补齐独立设置社区页的

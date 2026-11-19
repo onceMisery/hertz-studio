@@ -173,8 +173,15 @@ pub(super) fn update(document: &mut Document, operation: Update) -> Result<()> {
         Update::ReplaceCanvas { canvas } => value.canvas = canvas,
         Update::SetNode { node } => set(&mut value.nodes, node, |v| &v.id),
         Update::RemoveNode { id } => remove(&mut value.nodes, &id, |v| &v.id)?,
+        Update::MoveNode {
+            node_id,
+            parent_id,
+            index,
+        } => structure::move_node(value, &node_id, parent_id.as_deref(), index)?,
+        Update::ReorderNodes { ids } => structure::reorder(&mut value.nodes, &ids, |v| &v.id)?,
         Update::SetEffect { effect } => set(&mut value.effects, effect, |v| &v.id),
         Update::RemoveEffect { id } => remove(&mut value.effects, &id, |v| &v.id)?,
+        Update::ReorderEffects { ids } => structure::reorder(&mut value.effects, &ids, |v| &v.id)?,
         Update::SetTrack { track } => set(&mut value.timeline.tracks, track, |v| &v.id),
         Update::RemoveTrack { id } => remove(&mut value.timeline.tracks, &id, |v| &v.id)?,
         Update::ReplaceTimeline {

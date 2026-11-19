@@ -2,6 +2,7 @@
 // Presentation for the original work controller. Native WorkDrafts validates and saves.
 (function () {
   'use strict';
+  const structure = window.hertzWallpaperWorkStructure;
   const copy = value => JSON.parse(JSON.stringify(value));
   const labels = { image: '图片', video: '视频', text: '文字', group: '图层组', particles: '粒子', model: '模型', builtinScene: '内置场景',
     x: '水平位置', y: '垂直位置', z: '深度位置', width: '宽度', height: '高度', opacity: '透明度', rotation: '旋转', scaleX: '水平缩放', scaleY: '垂直缩放',
@@ -31,8 +32,15 @@
     const add = makeButton('添加', addItem), remove = makeButton('删除条目', removeItem);
     itemTools.append(chooser, type, add, remove);
     const detail = element('div'); detail.className = 'work-composition-fields';
-    container.append(toolbar, plan, caption, canvasFields, sections, itemTools, detail);
-    chooser.addEventListener('change', () => { selected = chooser.value; renderDetail(); draw(); });
+    const layerFields = element('div'); layerFields.className = 'work-layer-fields';
+    const layerView = window.hertzWallpaperWorkLayers.create(layerFields, {
+      label: node => node.type === 'group' ? (structure.space(node, catalog) === '3d' ? '3D 图层组' : '2D 图层组') : labels[node.type] || node.type,
+      change: action => changed(action), message: context.message,
+      refresh: () => { renderItems(); draw(); },
+      select: id => { category = 'nodes'; selected = id; sections.querySelector('[value="nodes"]').checked = true; renderItems(); draw(); }
+    });
+    container.append(toolbar, plan, caption, canvasFields, sections, itemTools, layerFields, detail);
+    chooser.addEventListener('change', () => { selected = chooser.value; renderDetail(); layerView.show(value.composition, catalog, category, selected); draw(); });
     function makeButton(text, action) {
       const button = element('button', text); button.type = 'button';
       button.addEventListener('click', () => { if (!busy) { try { action(); } catch (error) { context.message(error.message, true); } } }); return button;
@@ -121,16 +129,21 @@
     }
     function renderItems() {
       chooser.replaceChildren(); type.replaceChildren(); const items = collection();
-      for (const item of items) { const option = element('option', item.id + (item.type ? ' · ' + (labels[item.type] || item.type) : '')); option.value = item.id; chooser.append(option); }
+      const ordered = category === 'nodes' ? structure.hierarchy(value.composition).rows.map(row => row.node) : items;
+      for (const item of ordered) { const option = element('option', item.id + (item.type ? ' · ' + (labels[item.type] || item.type) : '')); option.value = item.id; chooser.append(option); }
       if (!items.some(item => item.id === selected)) selected = items[0]?.id || ''; chooser.value = selected;
       type.hidden = !['nodes', 'effects'].includes(category);
       if (!type.hidden) for (const schema of definitions()) {
-        const option = element('option', labels[schema.type] || schema.type); option.value = schema.type;
-        option.disabled = Object.values(schema.assets || {}).some(field => field.required && !value.resources.some(resource => field.kinds.includes(resource.kind)));
-        type.append(option);
+        for (const space of schema.type === 'group' ? ['2d', '3d'] : ['']) {
+          const option = element('option', space ? space.toUpperCase() + ' 图层组' : labels[schema.type] || schema.type); option.value = schema.type + (space ? ':' + space : '');
+          option.disabled = Object.values(schema.assets || {}).some(field => field.required && !value.resources.some(resource => field.kinds.includes(resource.kind)));
+          type.append(option);
+        }
       }
       if (type.selectedOptions[0]?.disabled) type.value = Array.from(type.options).find(option => !option.disabled)?.value || '';
       add.disabled = busy || (!type.hidden && !type.value) || (type.hidden && !availableTargets().length); remove.disabled = busy || !selected;
+      remove.textContent = category === 'nodes' && items.find(item => item.id === selected)?.type === 'group' ? '删除图层组，保留子图层' : '删除条目';
+      layerView.show(value.composition, catalog, category, selected);
       renderDetail();
     }
     function renderDetail() {
@@ -198,9 +211,9 @@
         if (category === 'tracks') items.push({ id, target: copy(availableTargets().find(target => target.property === 'opacity') || availableTargets()[0]), keys: [{ timeSeconds: 0, value: 1, easing: 'linear' }] });
         else if (category === 'bindings') items.push({ id, target: copy(availableTargets().find(target => target.property === 'opacity') || availableTargets()[0]), mode: 'multiply', parameters: {}, program: [{ op: 'const', value: 1 }] });
         else {
-          const schema = definitions().find(schema => schema.type === type.value), assets = {};
+          const [nodeType, space] = type.value.split(':'), schema = definitions().find(schema => schema.type === nodeType), assets = {};
           for (const [name, field] of Object.entries(schema.assets || {})) if (field.required) assets[name] = value.resources.find(resource => field.kinds.includes(resource.kind)).assetId;
-          items.push(Object.assign({ id, type: schema.type, stateVersion: schema.stateVersion, assets, properties: {} }, category === 'effects' ? { target: { kind: 'output' } } : { children: [] }));
+          items.push(Object.assign({ id, type: schema.type, stateVersion: schema.stateVersion, assets, properties: space ? { space } : {} }, category === 'effects' ? { target: { kind: 'output' } } : { children: [] }));
         }
       }); selected = id; renderItems(); draw();
     }
@@ -218,30 +231,43 @@
     function draw() {
       if (!value) return; const canvas = value.composition.canvas; plan.setAttribute('viewBox', '0 0 ' + canvas.width + ' ' + canvas.height); plan.replaceChildren();
       const background = document.createElementNS(plan.namespaceURI, 'rect'); background.setAttribute('width', canvas.width); background.setAttribute('height', canvas.height); background.setAttribute('fill', canvas.background); plan.append(background);
-      for (const node of value.composition.nodes) {
-        const properties = node.properties, schema = schemaFor(node); if (!schema || schema.space === '3d' || node.type === 'group') continue;
+      const groups = new Map();
+      for (const { node, parentId } of structure.hierarchy(value.composition).rows) {
+        const properties = node.properties, schema = schemaFor(node); if (!schema || structure.space(node, catalog) !== '2d') continue;
         const defaults = Object.fromEntries(Object.entries(schema.properties).map(([name, spec]) => [name, spec.default]));
-        const width = properties.width || defaults.width || 160, height = properties.height || defaults.height || 80;
-        const x = (properties.x || 0) + canvas.width / 2 - width * (properties.anchorX ?? defaults.anchorX ?? 0.5), y = (properties.y || 0) + canvas.height / 2 - height * (properties.anchorY ?? defaults.anchorY ?? 0.5);
+        const number = name => properties[name] ?? defaults[name], width = number('width'), height = number('height');
+        const angle = number('rotation') * Math.PI / 180, cosine = Math.cos(angle), sine = Math.sin(angle);
+        const a = cosine * number('scaleX'), b = sine * number('scaleX'), c = -sine * number('scaleY'), d = cosine * number('scaleY');
+        const x = number('x') - a * width * number('anchorX') - c * height * number('anchorY');
+        const y = number('y') - b * width * number('anchorX') - d * height * number('anchorY');
+        const parent = groups.get(parentId) || plan, transform = document.createElementNS(plan.namespaceURI, 'g');
+        const place = (dx = 0, dy = 0) => transform.setAttribute('transform', 'matrix(' + [a, b, c, d, x + dx, y + dy].join(' ') + ')');
+        place(); transform.setAttribute('opacity', number('opacity'));
+        if (number('visible') === false) transform.style.display = 'none';
+        parent.append(transform);
+        if (node.type === 'group') { transform.dataset.compositionGroup = node.id; groups.set(node.id, transform); continue; }
         const rect = document.createElementNS(plan.namespaceURI, 'rect'); rect.dataset.compositionLayer = node.id;
-        for (const [name, number] of Object.entries({ x, y, width, height })) rect.setAttribute(name, number);
+        for (const [name, number] of Object.entries({ x: 0, y: 0, width, height })) rect.setAttribute(name, number);
         rect.setAttribute('fill', '#809aa8'); rect.setAttribute('fill-opacity', '0.3'); rect.setAttribute('stroke', node.id === selected ? '#ddebf0' : '#809aa8'); rect.setAttribute('vector-effect', 'non-scaling-stroke');
-        rect.setAttribute('tabindex', '0'); rect.setAttribute('role', 'button'); rect.setAttribute('aria-label', '移动图层 ' + node.id); plan.append(rect);
+        rect.setAttribute('tabindex', '0'); rect.setAttribute('role', 'button'); rect.setAttribute('aria-label', '移动图层 ' + node.id); transform.append(rect);
         rect.addEventListener('keydown', event => {
           const delta = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] }[event.key]; if (!delta || busy) return;
           event.preventDefault(); changed(() => { node.properties.x = (node.properties.x || 0) + delta[0]; node.properties.y = (node.properties.y || 0) + delta[1]; }); draw(); plan.querySelector('[data-composition-layer="' + node.id + '"]').focus();
         });
         let start = null;
-        const point = event => { const matrix = plan.getScreenCTM(); return matrix ? new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse()) : null; };
+        const point = event => {
+          const matrix = parent.getScreenCTM(), value = matrix ? new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse()) : null;
+          return value && Number.isFinite(value.x) && Number.isFinite(value.y) ? value : null;
+        };
         rect.addEventListener('pointerdown', event => { if (busy || event.button !== 0) return; const p = point(event); if (!p) return; remember(); start = { p, x: properties.x || 0, y: properties.y || 0 }; rect.setPointerCapture(event.pointerId); event.preventDefault(); });
-        rect.addEventListener('pointermove', event => { if (!start) return; const p = point(event); if (!p) return; properties.x = start.x + p.x - start.p.x; properties.y = start.y + p.y - start.p.y; rect.setAttribute('x', x + p.x - start.p.x); rect.setAttribute('y', y + p.y - start.p.y); });
+        rect.addEventListener('pointermove', event => { if (!start) return; const p = point(event); if (!p) return; properties.x = start.x + p.x - start.p.x; properties.y = start.y + p.y - start.p.y; place(p.x - start.p.x, p.y - start.p.y); });
         const end = () => { if (!start) return; start = null; selected = node.id; category = 'nodes'; sections.querySelector('[value="nodes"]').checked = true; renderItems(); syncHistory(); context.edited(); };
         rect.addEventListener('pointerup', end); rect.addEventListener('pointercancel', end);
       }
     }
     return {
       show(documentValue, definitions, reset = true) { value = documentValue; catalog = definitions; if (reset) { undo = []; redo = []; selected = ''; } render(); },
-      setBusy(next) { busy = next; container.querySelectorAll('input,textarea,select,button').forEach(input => { input.disabled = busy; }); syncHistory(); }
+      setBusy(next) { busy = next; container.querySelectorAll('input,textarea,select,button').forEach(input => { input.disabled = busy; }); layerView.setBusy(busy); syncHistory(); }
     };
   }
   window.hertzWallpaperCompositionView = { create };

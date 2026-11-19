@@ -3,10 +3,11 @@
 'use strict';
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
+const vm=require('node:vm');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
 const {coreGlb,animatedGlb,twoClipGlb,texturedGlb,morphGlb,skinGlb,ktx2Glb,basisGlb,basisUastcGlb,multiMaterialGlb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
+const root=path.resolve(__dirname,'..'), output=path.resolve(process.env.HERTZ_COMPOSITION_BROWSER_OUTPUT || path.join(root,'output/a04-p2-20261108/composition-browser'));
 const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), twoClipFixture=twoClipGlb(), texturedFixture=texturedGlb(), morphFixture=morphGlb(), skinFixture=skinGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
@@ -86,6 +87,19 @@ const image=(id,asset,properties={},assets={})=>({id,type:'image',stateVersion:1
 const alpha=compile([image('back','blue'),image('red-layer','red',{width:32,height:32,opacity:.5}),
  {id:'parent',type:'group',stateVersion:1,children:['red-layer'],properties:{x:16,y:16,width:64,height:64,anchorX:0,anchorY:0,opacity:.5}},
  image('front','green',{x:32,y:16,width:16,height:32,opacity:.5})]);
+// Use the same edit projection as the UI, then independently compile it in Rust
+// and observe the changed painter order in the original renderer's actual pixels.
+const editorWindow={};
+vm.runInNewContext(fs.readFileSync(path.join(root,'crates/hertz-desktop/assets/wallpaper-work-structure.js'),'utf8'),{window:editorWindow});
+const groupedEditor={nodes:[
+ {id:'outer',type:'group',stateVersion:1,children:['inner','red-layer'],properties:{width:64,height:64,anchorX:0,anchorY:0,opacity:.5}},
+ {id:'inner',type:'group',stateVersion:1,children:['blue-layer'],properties:{width:64,height:64,anchorX:0,anchorY:0,opacity:.5}},
+ image('red-layer','red'),image('blue-layer','blue')
+]};
+const groupedBefore=compile(groupedEditor.nodes);
+editorWindow.hertzWallpaperWorkStructure.moveNode(groupedEditor,{nodeId:'red-layer',parentId:'inner',index:0});
+editorWindow.hertzWallpaperWorkStructure.reorder(groupedEditor.nodes,['outer','blue-layer','red-layer','inner']);
+const groupedAfter=compile(groupedEditor.nodes);
 const mask=compile([image('back','blue'),image('front','soft',{}, {maskAsset:'mask'})]);
 const fit=compile([image('wide-layer','wide',{width:64,height:64,fit:'contain'})]);
 const modelCanvas={width:64,height:64,colorSpace:'srgb',background:'#000000',
@@ -202,7 +216,7 @@ const results=[];
   const bytes=fs.readFileSync(path.join(output,file.file));assert.equal(hash(bytes),file.entry.sha256);assert.equal(bytes.length,file.entry.bytes);
   nativeFiles.set(file.url,{bytes,mime:file.entry.mime});
  }
- const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
+ const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',executablePath:process.env.CHROME_PATH,headless:true,args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
  try{
   const page=await browser.newPage({viewport:{width:64,height:64}}), errors=[],consoleErrors=[];
   page.on('pageerror',e=>errors.push(e.message));
@@ -275,6 +289,10 @@ const results=[];
   const near=(actual,expected)=>{for(let i=0;i<3;i++)assert.ok(Math.abs(actual[i]-expected[i])<=4,`${actual} != ${expected}`);};
   near(pixels.back,[0,0,255]);near(pixels.red,[137,0,225]);near(pixels.front,[99,188,165]);assert.equal(pixels.contexts,1);assert.equal(pixels.ledger.violations.length,0);
   results.push({case:'linear alpha, fixed child/root painter order, inherited matrix, unique renderer',pixels});
+  await select(groupedBefore);const beforeGroupOrder=await page.evaluate(()=>pixel(32,32));near(beforeGroupOrder,[188,0,99]);
+  await select(groupedAfter);const afterGroupOrder=await page.evaluate(()=>pixel(32,32));near(afterGroupOrder,[120,0,137]);
+  assert.equal(await page.evaluate(()=>counts.contexts),1);
+  results.push({case:'editor reparent/order projection compiles to exact nested-alpha GL pixels in the same renderer',beforeGroupOrder,afterGroupOrder});
   await select(mask);near(await page.evaluate(()=>pixel(32,32)),[137,0,225]);results.push({case:'linear numeric mask and real straight-alpha source premultiplication'});
   await select(fit);near(await page.evaluate(()=>pixel(8,8)),[0,0,0]);near(await page.evaluate(()=>pixel(8,32)),[255,0,0]);near(await page.evaluate(()=>pixel(56,32)),[0,255,0]);results.push({case:'decoded dimensions contain-fit without canvas refit'});
   async function reject(compiled,mutate){

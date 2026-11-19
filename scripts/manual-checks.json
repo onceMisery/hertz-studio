@@ -949,6 +949,10 @@
     {
       "script": "check-stage-media-dbx-video-browser.js",
       "purpose": "Real Chrome MediaSource: DBX stage video lease chunks (1000B short reads) feed an MSE SourceBuffer; the VP8 WebM fixture decodes (64x48, 2s) and a locally recorded MP4/H.264 stream whose avcC codec string is derived from its bytes also decodes (320x240), with exact sequential offsets, no reads after release and unsupported-codec lease release. Uses a fake transport and local media; no service, DBX host or native host is involved. Real DBX/device acceptance remains separate."
+    },
+    {
+      "script": "check-wallpaper-work-layers-browser.js",
+      "purpose": "组合编辑器真实Chromium交互：嵌套图层/同组与根顺序/效果链、2D与3D组创建、原草稿桥保存/撤销/重开/丢回执/冲突、父组变换拖动、8层边界和1120～320px。原生SQLite/包/编译器另由WorkDrafts结构测试验证；不替代设备或生产资格。"
     }
   ],
   "retiredLayouts": [

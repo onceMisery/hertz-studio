@@ -7307,7 +7307,9 @@ fn settings_html() -> String {
         .replace(
             "__WORKS__",
             &format!(
-                "{}\n{}",
+                "{}\n{}\n{}\n{}",
+                include_str!("../assets/wallpaper-work-structure.js"),
+                include_str!("../assets/wallpaper-work-layers.js"),
                 include_str!("../assets/wallpaper-work-composition.js"),
                 include_str!("../assets/wallpaper-work.js")
             ),
@@ -7315,8 +7317,9 @@ fn settings_html() -> String {
         .replace(
             "__AI_CSS__",
             &format!(
-                "{}\n{}",
+                "{}\n{}\n{}",
                 include_str!("../assets/wallpaper-ai.css"),
+                include_str!("../assets/wallpaper-work-layers.css"),
                 include_str!("../assets/wallpaper-external-requests.css")
             ),
         )

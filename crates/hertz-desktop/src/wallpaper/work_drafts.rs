@@ -22,6 +22,8 @@ const PARAM_PAGE_BYTES: usize = 12 * 1024;
 const PARAM_VALUE_BYTES: usize = 8 * 1024;
 #[path = "work_drafts_composition.rs"]
 mod composition;
+#[path = "work_drafts_structure.rs"]
+mod structure;
 #[cfg(test)]
 pub(crate) use composition::tests::install_source as install_composition_test_source;
 pub(crate) use composition::PackageBuild;
@@ -198,11 +200,22 @@ pub(crate) enum Update {
     RemoveNode {
         id: String,
     },
+    MoveNode {
+        node_id: String,
+        parent_id: Option<String>,
+        index: usize,
+    },
+    ReorderNodes {
+        ids: Vec<String>,
+    },
     SetEffect {
         effect: hertz_wallpaper::document::Effect,
     },
     RemoveEffect {
         id: String,
+    },
+    ReorderEffects {
+        ids: Vec<String>,
     },
     SetTrack {
         track: hertz_wallpaper::document::Track,

@@ -5,6 +5,7 @@
   const settings = window.hertzWallpaperSettings;
   const request = (command, payload) => settings.requestManagement(command, payload).then(receipt => receipt.result);
   const clone = value => JSON.parse(JSON.stringify(value));
+  const structure = window.hertzWallpaperWorkStructure;
   const serialize = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.keys(item).sort().reduce((result, key) => { result[key] = item[key]; return result; }, {}) : item);
   const publicId = id => id.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
   function node(tag, text, id) { const value = document.createElement(tag); if (text) value.textContent = text; if (id) value.id = id; return value; }
@@ -177,36 +178,47 @@
     return flushCurrent();
   }
   function operationsFor(previous, next) {
-    const operations = [];
-    if (previous.title !== next.title || previous.description !== next.description) operations.push({ kind: 'replaceMetadata', title: next.title, description: next.description });
-    previous.properties.filter(property => !next.properties.some(item => item.id === property.id)).forEach(property => operations.push({ kind: 'removeProperty', id: property.id }));
-    Object.entries(next.params).forEach(([id, value]) => { if (serialize(value) !== serialize(previous.params[id])) operations.push({ kind: 'setParam', id, value }); });
-    next.properties.forEach(property => { if (serialize(property) !== serialize(previous.properties.find(item => item.id === property.id))) operations.push({ kind: 'setProperty', property }); });
+    const operations = []; let projected = clone(previous);
+    const push = operation => { projected = applyOperations(projected, [operation]); operations.push(operation); };
+    if (previous.title !== next.title || previous.description !== next.description) push({ kind: 'replaceMetadata', title: next.title, description: next.description });
+    previous.properties.filter(property => !next.properties.some(item => item.id === property.id)).forEach(property => push({ kind: 'removeProperty', id: property.id }));
+    Object.entries(next.params).forEach(([id, value]) => { if (serialize(value) !== serialize(previous.params[id])) push({ kind: 'setParam', id, value }); });
+    next.properties.forEach(property => { if (serialize(property) !== serialize(previous.properties.find(item => item.id === property.id))) push({ kind: 'setProperty', property }); });
     if (next.composition) {
       const before = previous.composition, after = next.composition;
       const groups = [['tracks', 'Track'], ['bindings', 'Binding'], ['effects', 'Effect'], ['nodes', 'Node']];
       const items = (value, section) => section === 'tracks' ? value.timeline.tracks : value[section];
-      for (const [part, name] of groups) items(before, part).filter(item => !items(after, part).some(next => next.id === item.id)).forEach(item => operations.push({ kind: 'remove' + name, id: item.id }));
-      if (serialize(before.canvas) !== serialize(after.canvas)) operations.push({ kind: 'replaceCanvas', canvas: after.canvas });
-      for (const [part, name] of groups.slice().reverse()) for (const item of items(after, part)) {
-        const old = items(before, part).find(previous => previous.id === item.id);
+      for (const [part, name] of groups) items(before, part).filter(item => !items(after, part).some(next => next.id === item.id)).forEach(item => {
+        if (name === 'Node') {
+          const tree = structure.hierarchy(projected.composition);
+          if (tree.parents.has(item.id)) push({ kind: 'moveNode', nodeId: item.id, parentId: null, index: tree.roots.length });
+        }
+        push({ kind: 'remove' + name, id: item.id });
+      });
+      if (serialize(before.canvas) !== serialize(after.canvas)) push({ kind: 'replaceCanvas', canvas: after.canvas });
+      for (const [part, name] of groups.slice().reverse()) for (const desired of items(after, part)) {
+        const old = items(projected.composition, part).find(previous => previous.id === desired.id);
+        // Hierarchy changes use tiny atomic moves, never whole group blobs split
+        // across a CAS boundary. New nodes initially enter as independent roots.
+        const item = name === 'Node' ? { ...desired, children: clone(old?.children || []) } : desired;
         if (serialize(item) === serialize(old)) continue;
         if (name === 'Track' && old) {
-          if (serialize(old.target) !== serialize(item.target)) operations.push({ kind: 'setTrackTarget', trackId: item.id, target: item.target });
+          if (serialize(old.target) !== serialize(item.target)) push({ kind: 'setTrackTarget', trackId: item.id, target: item.target });
           if (old.keys.length === item.keys.length) {
-            item.keys.forEach((key, index) => { if (serialize(key) !== serialize(old.keys[index])) operations.push({ kind: 'setTrackKey', trackId: item.id, index, key }); });
+            item.keys.forEach((key, index) => { if (serialize(key) !== serialize(old.keys[index])) push({ kind: 'setTrackKey', trackId: item.id, index, key }); });
           } else {
             let first = 0, tail = 0;
             while (first < Math.min(old.keys.length, item.keys.length) && serialize(old.keys[first]) === serialize(item.keys[first])) first++;
             while (tail < Math.min(old.keys.length, item.keys.length) - first && serialize(old.keys.at(-1 - tail)) === serialize(item.keys.at(-1 - tail))) tail++;
-            for (let index = old.keys.length - tail - 1; index >= first; index--) operations.push({ kind: 'removeTrackKey', trackId: item.id, index });
-            for (let index = first; index < item.keys.length - tail; index++) operations.push({ kind: 'insertTrackKey', trackId: item.id, index, key: item.keys[index] });
+            for (let index = old.keys.length - tail - 1; index >= first; index--) push({ kind: 'removeTrackKey', trackId: item.id, index });
+            for (let index = first; index < item.keys.length - tail; index++) push({ kind: 'insertTrackKey', trackId: item.id, index, key: item.keys[index] });
           }
         } else if (name === 'Node' && old && serialize({ ...old, properties: {} }) === serialize({ ...item, properties: {} }) && Object.keys(old.properties).every(key => Object.hasOwn(item.properties, key))) {
-          for (const [property, value] of Object.entries(item.properties)) if (serialize(value) !== serialize(old.properties[property])) operations.push({ kind: 'setNodeProperty', nodeId: item.id, property, value });
-        } else operations.push({ kind: 'set' + name, [name.toLowerCase()]: item });
+          for (const [property, value] of Object.entries(item.properties)) if (serialize(value) !== serialize(old.properties[property])) push({ kind: 'setNodeProperty', nodeId: item.id, property, value });
+        } else push({ kind: 'set' + name, [name.toLowerCase()]: item });
       }
-      if (before.timeline.durationSeconds !== after.timeline.durationSeconds || before.timeline.loop !== after.timeline.loop) operations.push({ kind: 'replaceTimeline', durationSeconds: after.timeline.durationSeconds, loop: after.timeline.loop });
+      operations.push(...structure.reconcile(projected.composition, after));
+      if (before.timeline.durationSeconds !== after.timeline.durationSeconds || before.timeline.loop !== after.timeline.loop) push({ kind: 'replaceTimeline', durationSeconds: after.timeline.durationSeconds, loop: after.timeline.loop });
     }
     return operations;
   }
@@ -221,6 +233,7 @@
       else if (operation.kind === 'replaceTimeline') Object.assign(next.composition.timeline, { durationSeconds: operation.durationSeconds, loop: operation.loop });
       else if (operation.kind === 'setNodeProperty') next.composition.nodes.find(node => node.id === operation.nodeId).properties[operation.property] = clone(operation.value);
       else if (operation.kind === 'setTrackTarget') next.composition.timeline.tracks.find(track => track.id === operation.trackId).target = clone(operation.target);
+      else if (['moveNode', 'reorderNodes', 'reorderEffects'].includes(operation.kind)) structure.apply(next.composition, operation);
       else if (['setTrackKey', 'insertTrackKey', 'removeTrackKey'].includes(operation.kind)) {
         const keys = next.composition.timeline.tracks.find(track => track.id === operation.trackId).keys;
         if (operation.kind === 'removeTrackKey') keys.splice(operation.index, 1);
