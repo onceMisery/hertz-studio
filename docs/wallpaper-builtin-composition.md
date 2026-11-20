@@ -1,12 +1,14 @@
 # builtinScene 组合实施与当前资格
 
+2026-11-20 增量：原 `spectrum-towers` 背景现在可与二维图层的时间线、绑定和已支持的文档输出效果共同呈现；固定工作区、绝对采样和原生成本已同步。其它 builtin 场景、builtin/model 混用和带历史的镜像仍不由此开放。以下 11-11 段落是首版范围；当前代码及验证见[离线实施记录](offline-design-completion.md)。
+
 2026-11-11，分支 `codex/continue-designs-final-20261110`。A04/P2 的首个 `builtinScene` 适配器已接入原生组合路径。本记录限下面的场景子集和当前 Windows 设备，完整 P2、A05/A06/A10 与 A01–A10 目标继续实施。
 
 ## 可运行范围
 
 组合可使用一个根 `spectrum-towers`、stateVersion 1 背景，与既有 image、video、同包 text、2D group 和 particles 图层共同呈现。源 profile 固定为 low；ripples 和源九项 post 参数必须为零。medium/high 请求保留在设置中，实际准入明确降为此 low profile。
 
-可组合资格、完整参数规格和资源计划由原 scene registry 发布，再通过原 catalog 导出给 Rust。两端检查编译器最终公开参数槽、实际结构版本及完整参数映射，缺项不补默认值。其它 28 个 scene、model、3D group、显式相机、文档 effects、tracks 和 bindings 继续返回明确不可用；不会删掉作者层或把非零效果静默归零。
+可组合资格、完整参数规格和资源计划由原 scene registry 发布，再通过原 catalog 导出给 Rust。两端检查编译器最终公开参数槽、实际结构版本及完整参数映射，缺项不补默认值。首版拒绝其它 28 个 scene、model、3D group、显式相机、文档 effects、tracks 和 bindings；模型后续沿独立三维来源演进，效果/轨道/绑定的当前支持以上方增量及真实目录为准。不会删掉作者层或把非零效果静默归零。
 
 ## 呈现、成本与时间
 

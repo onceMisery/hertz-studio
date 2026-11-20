@@ -52,6 +52,7 @@ pub(super) async fn receive(
         properties: vec![],
         composition: Some(composition),
         resources: snapshot.resources(),
+        provenance: None,
     };
     let build = super::super::work_drafts::PackageBuild::resolve(
         &document,

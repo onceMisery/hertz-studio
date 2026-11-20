@@ -119,8 +119,16 @@ pub struct NodeSchema {
     pub node_type: String,
     pub state_version: u32,
     pub space: String,
+    pub time_model: TimeModel,
     pub properties: BTreeMap<String, Field>,
     pub assets: BTreeMap<String, AssetField>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimeModel {
+    Absolute,
+    Integrated,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -130,6 +130,31 @@
   sceneLabel.before(quoteForm); quoteForm.append(sceneLabel, briefLabel, quoteTools);
   const externalSource = node('p', '', 'external-source'); externalSource.className = 'hint'; externalSource.hidden = true;
   quoteForm.before(externalSource);
+  const pauseOption = node('div'); pauseOption.className = 'generation-option'; pauseOption.hidden = true;
+  const pauseDynamic = node('input', '', 'pause-dynamic'); pauseDynamic.type = 'checkbox'; pauseDynamic.checked = true;
+  const pauseLabel = node('label', '生成期间暂停动态壁纸与预览'); pauseLabel.htmlFor = pauseDynamic.id;
+  const pauseHelp = node('p', '', 'pause-help'); pauseHelp.className = 'hint'; pauseHelp.hidden = true;
+  pauseDynamic.setAttribute('aria-describedby', pauseHelp.id); pauseOption.append(pauseDynamic, pauseLabel);
+  el('confirm').before(pauseOption, pauseHelp);
+  const pauseState = node('p', '', 'pause-state'); pauseState.className = 'hint'; pauseState.setAttribute('role', 'status'); pauseState.hidden = true;
+  const resumeDynamic = node('button', '恢复动态壁纸与预览', 'resume-dynamic'); resumeDynamic.type = 'button'; resumeDynamic.hidden = true;
+  resumeDynamic.setAttribute('aria-describedby', pauseState.id); el('job').after(pauseState, resumeDynamic);
+  let generationPause = null;
+  function renderPause(state) {
+    generationPause = state || null;
+    const active = !!state?.active, external = !!state?.externalMayRun;
+    pauseState.hidden = !active && !external;
+    resumeDynamic.hidden = !active;
+    if (active) {
+      const remaining = Math.max(0, ...(state.requests || []).map(item => item.remainingSeconds || 0));
+      pauseState.textContent = '本地生成期间，动态壁纸与预览已暂停。' + (external ? '此前停止或状态未确认的请求，其外部模型可能仍在运行。' : '')
+        + '仅本次生成暂停原因将在最多 ' + remaining + ' 秒后解除；也可立即恢复动态内容。音乐继续播放。';
+    } else if (external) {
+      pauseState.textContent = (state.releaseReason === 'deadline' ? '生成暂停已到期并解除。' : '本次生成暂停原因已解除。')
+        + '外部模型可能仍在运行，可在 Ollama 中停止；其它暂停原因仍生效。';
+    }
+  }
+  pauseDynamic.addEventListener('change', () => controls());
   el('scene').name = 'scene'; el('brief').name = 'brief'; el('brief').required = true; el('quote').type = 'submit';
   el('brief').setAttribute('aria-describedby', 'generation-type-info');
   let capability = null;
@@ -241,6 +266,11 @@
     el('quote').disabled = busy || submissionPending || !ready || !connected;
     el('recover').hidden = !submissionPending; el('recover').disabled = busy || !connected;
     el('price').hidden = !quote; el('confirm').disabled = busy || !quote || quote.expiresAt <= Date.now();
+    const local = (quote?.provider || (capability?.outputs || []).find(item => item.kind === chosen('kind'))?.provider) === 'ollama-local';
+    pauseOption.hidden = pauseHelp.hidden = !local;
+    pauseDynamic.disabled = busy || !connected;
+    pauseHelp.textContent = pauseDynamic.checked ? '仅影响本次本地生成。正常完成后解除生成暂停；取消后可手动恢复。音乐继续播放。' : '本次保持动态内容运行，可能与本地模型争抢 GPU、影响流畅度。';
+    resumeDynamic.disabled = busy;
     el('cancel').hidden = !job || !['accepted', 'running'].includes(job.state); el('cancel').disabled = busy;
     receive.hidden = !job || job.state !== 'succeeded'; receive.disabled = busy || !connected || !!receiving;
     receiveCancel.hidden = !receiving; receiveCancel.disabled = busy;
@@ -377,6 +407,7 @@
       const state = await request('status');
       if (current !== epoch || !visible()) return;
       connected = !!state.connected; if (!connected) capability = null;
+      renderPause(state.generationPause);
       job = state.job || null; submissionPending = !!state.submissionPending;
       el('job').textContent = job ? phases[job.state] || '任务状态未知。' : '';
       if (!connected) {
@@ -448,6 +479,7 @@
   });
   el('confirm').addEventListener('click', () => action('generate.confirm', {
     confirmationToken: quote && quote.confirmationToken,
+    pauseDynamic: pauseDynamic.checked,
     ...(externalRequest ? { externalRequestId: externalRequest.requestId } : {})
   }, result => {
     job = result.job || result; quote = null; externalRequest = null; externalSource.hidden = true;
@@ -459,6 +491,10 @@
   el('recover').addEventListener('click', () => action('generate.recover', {}, result => {
     job = result.job; submissionPending = false; assetSnapshot = null; el('job').textContent = phases[job.state] || '原任务已受理。'; status('已找回原请求回执。');
   }));
+  resumeDynamic.addEventListener('click', () => action('pause.resume', {
+    requestIds: (generationPause?.requests || []).map(item => item.requestId)
+  }, result => { renderPause(result); status('已解除所选生成暂停；其它暂停原因仍生效。'); })
+    .then(() => { if (visible()) (el('brief').disabled ? el('connect') : el('brief')).focus(); }));
   for (const name of ['brief', 'scene']) el(name).addEventListener('input', () => { if (name === 'brief') el(name).setCustomValidity(''); invalidateQuote(); controls(); });
   panel.addEventListener('toggle', () => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) { ready = false; capability = null; list.querySelectorAll('li').forEach(row => row.retryThumbnail?.()); refresh(); } });
   new MutationObserver(() => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) refresh(); })

@@ -18,6 +18,9 @@ import { createSky, SKY, samplePalette, sunDirection, moonDirection, nightFactor
 import { createOcean, wavePhases, SEA_LEVEL } from './ocean.js';
 import { createWorld, terrainHeight, prepareGridLod } from './world.js';
 import { clamp, lerp, damp, smoothstep } from './util.js';
+import { createScope } from '../../space-stage/src/scope.js';
+import { createRenderContext } from '../../space-stage/src/render-context.js';
+export { resourcePlan } from './resource-plan.js';
 
 // 画质三档对应舞台 tier 2/1/0。pr 上限沿用原作的按 DPR 折算。
 const QUALITY = {
@@ -61,6 +64,7 @@ function disposeObject(root) {
 }
 
 function createStage(canvas, opts, context = null) {
+  const shared = context && !context.standalone;
   let quality = QUALITY[opts.quality] || QUALITY.high;
   let renderer = context && context.renderer;
   try {
@@ -70,7 +74,7 @@ function createStage(canvas, opts, context = null) {
   }
   const pr = Math.min(DPR, quality.prCap) * quality.prMul;
   if (!context) renderer.setPixelRatio(pr);
-  renderer.shadowMap.enabled = !context && quality.shadow > 0;
+  renderer.shadowMap.enabled = !shared && quality.shadow > 0;
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1;
@@ -82,7 +86,7 @@ function createStage(canvas, opts, context = null) {
   const cameraTarget = camera.clone();
   scene.add(camera);
 
-  const sky = createSky();
+  const sky = createSky(context?.scope);
   if (context) { context.scope.trackTree(sky.mesh); context.scope.trackTree(sky.envMesh); }
   scene.add(sky.mesh);
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -90,10 +94,28 @@ function createStage(canvas, opts, context = null) {
   const envScene = new THREE.Scene();
   envScene.add(sky.envMesh);
   let envRT = null;
+  let envTicket = null, pmremTicket = null;
   let envHour = -99;
   function refreshEnv() {
-    const rt = pmrem.fromScene(envScene, 0, 0.1, 100);
+    const scope = context?.scope;
+    // r186 fromScene(size256): 768x1024 RGBA16F output + depth24,
+    // one RGBA16F ping-pong target and eleven 36-vertex LOD planes.
+    if (scope && !pmremTicket) pmremTicket = scope.reserve({
+      renderTargetDeclaredBytes: 768 * 1024 * 8,
+      ownedCpuBytes: 11 * 36 * 6 * 4 + (24 * 8 * 4 + 36 * 2) + (24 * 8 + 36 + 30) * 8
+    }, 'Coast PMREM r186 size256 ping-pong and fixed plane/background source arrays', 'bounded-estimate');
+    const ticket = scope?.reserve({ renderTargetDeclaredBytes: 768 * 1024 * 12 },
+      'Coast PMREM r186 size256 RGBA16F plus depth output; old/new replacement');
+    let rt;
+    // Keep each newly created result reachable even if a shader/upload fails
+    // before fromScene returns. The pinned original owner still creates it.
+    const allocate = pmrem._allocateTargets;
+    if (scope) pmrem._allocateTargets = function () { return scope.track(allocate.call(this)); };
+    try { rt = pmrem.fromScene(envScene, 0, 0.1, 100); }
+    finally { pmrem._allocateTargets = allocate; }
+    ticket?.commit(); pmremTicket?.commit();
     if (envRT) { if (context) context.scope.release(envRT); else envRT.dispose(); }
+    scope?.releaseReservation(envTicket); envTicket = ticket;
     envRT = rt;
     if (context) context.scope.track(rt);
     scene.environment = rt.texture;
@@ -119,24 +141,46 @@ function createStage(canvas, opts, context = null) {
   fillLight.position.set(0.6, 0.8, 0.5);
   camera.add(fillLight);
 
-  const ocean = createOcean();
-  if (context) prepareGridLod(ocean.mesh.geometry, ocean.columns, ocean.rows);
+  const ocean = createOcean(context?.scope);
+  if (context) prepareGridLod(ocean.mesh.geometry, ocean.columns, ocean.rows, context.scope);
   if (context) context.scope.trackTree(ocean.mesh);
   scene.add(ocean.mesh);
-  const world = createWorld(scene, { density: context ? 1 : quality.density });
+  let world;
+  try { world = createWorld(scene, { density: shared ? 1 : quality.density, scope: context?.scope }); }
+  catch (error) { context?.scope.trackTree(scene); throw error; }
+  if (context) context.scope.trackTree(scene);
 
   // 后期：渲染 -> 清洗 -> 泛光 -> 输出。暖色分级交给调色板与雾，不再叠 grade。
   const size2 = renderer.getDrawingBufferSize(new THREE.Vector2());
-  const rt = context ? null : new THREE.WebGLRenderTarget(size2.x, size2.y, { type: THREE.HalfFloatType, samples: quality.msaa });
-  const composer = context ? null : new EffectComposer(renderer, rt);
-  const bloom = context ? { enabled: false } : new UnrealBloomPass(new THREE.Vector2(2, 2), 0.4, 0.55, 0.92);
+  let postTicket = null, shadowTicket = null;
+  function postBytes(w, h) {
+    let bytes = w * h * 2 * (12 + 12 * quality.msaa);
+    let x = Math.max(1, Math.round(w / 2)), y = Math.max(1, Math.round(h / 2));
+    bytes += x * y * 8;
+    for (let i = 0; i < 5; i++) { bytes += x * y * 16; x = Math.max(1, Math.round(x / 2)); y = Math.max(1, Math.round(y / 2)); }
+    return bytes;
+  }
+  if (context && !shared) {
+    postTicket = context.scope.reserve({ renderTargetDeclaredBytes: postBytes(size2.x, size2.y) },
+      'Coast composer two RGBA16F/depth targets with MSAA/resolve and bloom bright plus ten RGBA16F mips', 'bounded-estimate');
+    shadowTicket = quality.shadow ? context.scope.reserve({ renderTargetDeclaredBytes: quality.shadow * quality.shadow * 8 },
+      'Coast original PCF directional shadow RGBA8 and depth24 storage', 'bounded-estimate') : null;
+    context.scope.reserve({ ownedCpuBytes: (6 + 10 + 14 + 18 + 22) * 2 * 8 + 5 * 3 * 8 },
+      'Coast r186 bloom five Gaussian kernels offsets/weights and tint vectors')?.commit();
+  }
+  const rt = shared ? null : new THREE.WebGLRenderTarget(size2.x, size2.y, { type: THREE.HalfFloatType, samples: quality.msaa });
+  if (context && rt) context.scope.track(rt);
+  const composer = shared ? null : new EffectComposer(renderer, rt);
+  if (context && composer) context.scope.track(composer);
+  const bloom = shared ? { enabled: false } : new UnrealBloomPass(new THREE.Vector2(2, 2), 0.4, 0.55, 0.92);
   if (composer) {
-    composer.setPixelRatio(pr);
+    composer.setPixelRatio(context ? 1 : pr);
     composer.addPass(new RenderPass(scene, camera));
     composer.addPass(new ShaderPass(sanitizeShader));
     bloom.enabled = quality.bloom;
     composer.addPass(bloom);
     composer.addPass(new OutputPass());
+    if (context) composer.passes.forEach(pass => { if (pass.dispose) context.scope.track(pass); });
   }
   if (context) { context.scope.trackTree(scene); context.scope.trackTree(envScene); }
 
@@ -334,7 +378,7 @@ function createStage(canvas, opts, context = null) {
     update(dt);
     if (dt) composer.render();
   }
-  function update(dt) {
+  function update(dt, uiDt = dt) {
     if (!dt && !context) return;
     S.t += dt;
 
@@ -359,7 +403,7 @@ function createStage(canvas, opts, context = null) {
     env.waveAmp = S.reduced ? 0.35 : 0.55 + 0.9 * smoothstep(0.1, 0.75, audio.bass);
     world.update(S.distance, dt, S.t, env);
     updateLighting();
-    cameraUpdate(dt);
+    cameraUpdate(uiDt);
     sky.mesh.position.copy(camera.position);
     renderer.getDrawingBufferSize(bufSize);
     world.ffMat.uniforms.uScale.value = bufSize.y / (2 * Math.tan((camera.fov * Math.PI) / 360));
@@ -371,7 +415,16 @@ function createStage(canvas, opts, context = null) {
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     if (!context) renderer.setSize(width, height, false);
-    if (composer) composer.setSize(width, height);
+    if (composer) {
+      const draw = renderer.getDrawingBufferSize(new THREE.Vector2());
+      const rw = context ? draw.x : width, rh = context ? draw.y : height;
+      if (composer.renderTarget1.width !== rw || composer.renderTarget1.height !== rh) {
+        const next = context?.scope.reserve({ renderTargetDeclaredBytes: postBytes(rw, rh) },
+          'Coast composer old/new resized RGBA16F MSAA/depth and bloom target peak', 'bounded-estimate');
+        composer.setSize(rw, rh);
+        context?.scope.releaseReservation(postTicket); postTicket = next;
+      }
+    }
     if (bloom.resolution) bloom.resolution.set(width / 2, height / 2);
   }
 
@@ -428,6 +481,13 @@ function createStage(canvas, opts, context = null) {
       sky.mesh.position.copy(camera.position);
       if (composer) composer.render();
     },
+    render(dt, uiDt = dt, sceneTime) {
+      if (Number.isFinite(sceneTime)) S.t = sceneTime - dt;
+      update(dt, uiDt);
+      renderer.info.reset();
+      if (composer) composer.render(dt); else renderer.render(scene, camera);
+      postTicket?.commit(); if (sun.shadow.map) shadowTicket?.commit();
+    },
     bind,
     unbind,
     dispose() {
@@ -471,31 +531,31 @@ export function createScene(context) {
 
 // 探测当前环境能否起 WebGL2（用于入口置灰），不留持久状态。
 export function probe() {
-  let g = null;
-  try {
-    g = new THREE.WebGLRenderer({ canvas: document.createElement('canvas') });
-    return true;
-  } catch (e) {
-    return false;
-  } finally {
-    if (g) {
-      g.dispose();
-      if (g.forceContextLoss) g.forceContextLoss();
-    }
-  }
+  return typeof WebGL2RenderingContext !== 'undefined';
 }
 
 // opts: { quality: 'low'|'medium'|'high', tod: 0..1, interactive: bool, reduced: bool }
 // 返回 false 表示 WebGL2 不可用（适配层走降级）。
 export function mount(canvas, opts = {}) {
   if (st) unmount();
-  const s = createStage(canvas, opts);
-  if (!s) return false;
-  s.resize(canvas.clientWidth || 640, canvas.clientHeight || 360);
-  s.bind();
-  s.start();
-  st = s;
-  return true;
+  if (opts.admissionRequired && !opts.resources) throw new Error('resource-policy-required');
+  let context, scope, s;
+  try {
+    if (opts.resources) {
+      scope = createScope({ resources: opts.resources, generation: opts.generation || 0 });
+      context = createRenderContext(THREE, canvas, { resources: opts.resources,
+        onContextLost() { unmount(); opts.onContextLost?.(); } });
+      const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera();
+      s = createStage(canvas, opts, { renderer: context.renderer, scope, scene, camera, standalone: true });
+      s.resources = context; s.scope = scope;
+    } else s = createStage(canvas, opts);
+    if (!s) return false;
+    st = s; s.external = !!opts.external;
+    resize(opts.width || canvas.clientWidth || 640, opts.height || canvas.clientHeight || 360);
+    s.bind(); if (!s.external) s.start(); return true;
+  } catch (error) {
+    s?.unbind(); scope?.dispose(); context?.dispose(); st = null; throw error;
+  }
 }
 
 export function unmount() {
@@ -503,8 +563,18 @@ export function unmount() {
   st.stop();
   st.unbind();
   st.dispose();
+  st.scope?.trackTree(st.scene); st.scope?.dispose(); st.resources?.dispose();
   st = null;
 }
+
+export function render(now, dynamicDt = 0, uiDt = 0, sceneTime) {
+  if (!st || !st.external) return false;
+  st.render(Math.max(0, Math.min(dynamicDt, .1)), Math.max(0, Math.min(uiDt, .1)), sceneTime);
+  if (st.renderer.info.programs.some(program => program.diagnostics?.runnable === false)) throw new Error('Three shader program failed');
+  return true;
+}
+export function resetInput() { if (st) { st.audio.target = st.audio.level = st.audio.slow = st.audio.bass = 0; st.audio.onset = false; } }
+export function setReduced(value) { if (st) st.S.reduced = !!value; }
 
 // frame = { level: 0..1 总能量, bands: 频谱带数组(0..1), onset: 低频起音 }
 export function setAudio(frame) {
@@ -536,6 +606,10 @@ export function setInteraction(v) {
 
 export function resize(w, h) {
   if (!st) return;
+  if (st.resources) {
+    const pr = Math.min(window.devicePixelRatio || 1, st.quality.prCap) * st.quality.prMul;
+    if (!st.resources.resize(w, h, pr)) throw new Error(st.resources.admissionFailure);
+  }
   st.resize(w, h);
 }
 
@@ -573,7 +647,8 @@ export function setRig(pose, opts) {
 export function stats() {
   if (!st) return null;
   const m = st.renderer.info.memory;
-  return { geometries: m.geometries, textures: m.textures, programs: st.renderer.info.programs.length };
+  return { geometries: m.geometries, textures: m.textures, programs: st.renderer.info.programs.length,
+    sceneTime: st.S.t, external: !!st.external, scope: st.scope?.stats(), context: st.resources?.stats() };
 }
 
 // 供检查脚本做确定性断言（只读快照，不改行为）：相机 rig、巡航、音频包络，
@@ -602,7 +677,10 @@ export function capture() {
   const gl = st.renderer.getContext();
   const w = gl.drawingBufferWidth;
   const h = gl.drawingBufferHeight;
+  const ticket = st.scope?.reserve({ ownedCpuBytes: w * h * 4 }, 'Coast diagnostic RGBA8 pixel readback');
+  try {
   const px = new Uint8Array(w * h * 4);
+  ticket?.commit();
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   const step = Math.max(1, (Math.min(w, h) / 48) | 0);
   const region = (y0, y1) => {
@@ -616,4 +694,5 @@ export function capture() {
     return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
   };
   return { top: region((h * 0.62) | 0, h - 1), bottom: region(0, (h * 0.3) | 0), width: w, height: h };
+  } finally { st.scope?.releaseReservation(ticket); }
 }

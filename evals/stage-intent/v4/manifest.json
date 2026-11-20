@@ -1,0 +1,35 @@
+{
+  "corpusVersion": "stage-intent-v4",
+  "frozenAt": "2026-11-20",
+  "provenance": "Frozen v3 cases preserved in order; original synthetic spectrum-family extension, no private lyrics/media",
+  "labelStatus": "authored; independent semantic label review still required",
+  "holdoutStatus": "reserved synthetic prompts; structural validation only; no model evaluation or production tuning",
+  "mechanicalAudit": {
+    "status": "passed",
+    "contractHash": "5c294943281a4a1234414c0634294e8c2bdfa0216d85c3a5223d2569c4715932",
+    "candidateLabelsChecked": 97,
+    "candidateLabelsMaterialized": 97,
+    "refusalLabelsStructurallyConflicted": 0,
+    "semanticReviewComplete": false
+  },
+  "corpusSha256": "52264cbf67269c6c8aac3e0b5e88aba1b788bf7d97d2b1e5e593e92dac14e968",
+  "schemaHash": "5c294943281a4a1234414c0634294e8c2bdfa0216d85c3a5223d2569c4715932",
+  "total": 172,
+  "splits": {
+    "development": 127,
+    "holdout": 45
+  },
+  "categories": {
+    "common": 31,
+    "open_vocabulary": 14,
+    "negation": 25,
+    "conflict": 13,
+    "boundary": 15,
+    "cross_scene": 14,
+    "unknown": 14,
+    "injection": 15,
+    "long": 13,
+    "temporal": 10,
+    "relative": 8
+  }
+}

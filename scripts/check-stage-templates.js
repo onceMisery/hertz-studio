@@ -56,7 +56,7 @@ async function main(){
   assert.deepEqual(CS.library().find(item=>item.id===originalFavorite.id),originalFavorite,
     'At capacity, saving a loaded favorite must not evict its source snapshot');
   assert.equal(h.requests(),0,'Templates never read media or call a model');
-  const info=T.list();info[0].version=999;assert.equal(T.list()[0].version,2);
+  const info=T.list(),version=info[0].version;info[0].version=999;assert.equal(T.list()[0].version,version);
   draft.artifact.intent.patch['look.bloom']=99;
   assert.equal((await T.prepare('quiet-orb')).preset.look.bloom,.12);
   await assert.rejects(()=>T.prepare('missing'),/未知/);

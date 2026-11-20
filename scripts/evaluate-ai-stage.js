@@ -13,8 +13,8 @@ const { uiToken } = require('./ui-token');
 
 const ROOT = path.resolve(__dirname, '..');
 const DATA_ROOT = path.join(ROOT, 'evals/stage-intent');
-const DEFAULT_CORPUS_VERSION = 'v3';
-const CORPUS_VERSIONS = Object.freeze({ v3: 'v3' });
+const DEFAULT_CORPUS_VERSION = 'v4';
+const CORPUS_VERSIONS = Object.freeze({ v3: 'v3', v4: 'v4' });
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const clone = value => JSON.parse(JSON.stringify(value));
 const THRESHOLDS = Object.freeze({ supportedSchemaRate: 0.98, protocolStructureRate: 0.98,
@@ -41,10 +41,11 @@ function loadCorpus(version = DEFAULT_CORPUS_VERSION) {
   ensure(manifest.corpusVersion === 'stage-intent-' + version, 'Manifest corpus version mismatch');
   ensure(contract.schemaHash === manifest.schemaHash, 'Corpus contract version changed: review labels before refreezing');
   const audit = manifest.mechanicalAudit;
+  const candidateCount = cases.filter(item => item.expect.kind === 'candidate').length;
   ensure(audit && audit.status === 'passed' && audit.contractHash === manifest.schemaHash
-    && audit.candidateLabelsChecked === 89 && audit.candidateLabelsMaterialized === 89
+    && audit.candidateLabelsChecked === candidateCount && audit.candidateLabelsMaterialized === candidateCount
     && audit.refusalLabelsStructurallyConflicted === 0 && audit.semanticReviewComplete === false,
-  'Invalid v3 mechanical audit or semantic review status');
+  'Invalid mechanical audit or semantic review status');
   const ids = new Set();
   const briefs = new Set();
   const counts = { development: 0, holdout: 0 };
@@ -93,7 +94,8 @@ function stageHarness() {
       body: { classList: { contains() { return false; } } } } };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  const files = ['creative-gl.js','backgrounds.js','handdrawn.js','creative-anime.js',
+  const files = ['stage-resource-budget.js','stage-resource-policy.js','stage-json-source.js',
+    'creative-gl.js','backgrounds.js','handdrawn.js','creative-anime.js',
     'creative-share-code.js','creative-stage.js','creative-contract.js','creative-draft.js','creative-prompt.js'];
   const sources = [];
   for (const file of files) {
@@ -101,6 +103,10 @@ function stageHarness() {
     sources.push(file + '\0' + source);
     vm.runInContext(source, sandbox, { filename: file, timeout: 3000 });
     Object.assign(sandbox, sandbox.window);
+    if (file === 'stage-resource-policy.js') {
+      const ledger = sandbox.StageResourceBudget.create(sandbox.StageResourcePolicy);
+      sandbox.Stage = sandbox.window.Stage = { resources: () => ledger };
+    }
   }
   const stage = sandbox.window.CreativeStage;
   return { stage, prompt: sandbox.window.CreativePrompt, draft: sandbox.window.CreativeDraft,
@@ -507,7 +513,8 @@ async function main(argv = process.argv.slice(2)) {
   const corpus = loadCorpus(opts['--corpus'] || DEFAULT_CORPUS_VERSION);
   if (opts['--validate'] || !argv.length) {
     console.log('Frozen stage evaluation ' + corpus.version + ': ' + corpus.cases.length
-      + ' unique synthetic cases, 120 development / 40 reserved; corpus hash and contract hash passed');
+      + ' unique synthetic cases, ' + corpus.manifest.splits.development + ' development / '
+      + corpus.manifest.splits.holdout + ' reserved; corpus hash and contract hash passed');
     return;
   }
   const harness = stageHarness();

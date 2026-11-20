@@ -63,6 +63,40 @@ fn happy_path_reaches_running_with_applied_revision() {
 }
 
 #[test]
+fn ai_generation_pause_applies_to_desktop_and_preview_without_releasing_other_reasons() {
+    use super::super::policy::{REASON_AI_GENERATION, REASON_SESSION_UNAVAILABLE};
+    for mut session in [
+        WallpaperSession::new(),
+        WallpaperSession::preview_after_generation(0),
+    ] {
+        let now = base();
+        let generation = to_attaching(&mut session, &RecoveryLedger::new(), 1);
+        submit_facts_but(&mut session, generation, usize::MAX);
+        session.start_presentation(now);
+        session.add_pause_reason(REASON_AI_GENERATION, PauseScope::AllPresentations, now);
+        assert_eq!(session.state(), SessionState::Paused);
+        for reason in [
+            REASON_BATTERY,
+            REASON_SESSION_UNAVAILABLE,
+            REASON_MANUAL_PAUSE,
+        ] {
+            session.add_pause_reason(reason, PauseScope::AllPresentations, now);
+        }
+        session.remove_pause_reason(REASON_AI_GENERATION, PauseScope::AllPresentations, now);
+        assert_eq!(session.state(), SessionState::Paused);
+        assert_eq!(session.pause_reasons().len(), 3);
+        for reason in [
+            REASON_BATTERY,
+            REASON_SESSION_UNAVAILABLE,
+            REASON_MANUAL_PAUSE,
+        ] {
+            session.remove_pause_reason(reason, PauseScope::AllPresentations, now);
+        }
+        assert_eq!(session.state(), SessionState::Running);
+    }
+}
+
+#[test]
 fn a_new_generation_does_not_inherit_the_previous_pause_duration() {
     let recovery = RecoveryLedger::new();
     let mut session = WallpaperSession::new();

@@ -70,6 +70,11 @@
     if (global.HertzCovers && global.HertzCovers.resolve) return global.HertzCovers.resolve(url);
     return Promise.resolve(url || null);
   }
+  resolveCoverUrl.borrow = function (url, resources, signal) {
+    return global.HertzCovers && HertzCovers.resolve.borrow
+      ? HertzCovers.resolve.borrow(url, resources, signal)
+      : Promise.resolve(resolveCoverUrl(url)).then(function (resolved) { return { url: resolved, accounted: false }; });
+  };
   var BASE_FOV = 52;
   var CHROME_HIDE_MS = 2600;
   var TAU_ANGLE = 190;      // 相机角度低通时间常数（ms）
@@ -840,6 +845,7 @@
   var fsTri = null;
   var graphicsPort = null, contextTicket = null, drawingTicket = null;
   var graphicsFailure = '', graphicsGeneration = 0;
+  var recordingSource = null, destroyInputPending = false;
   var inputTicket = null, inputPort = null;
   var graphicsAllocations = new Map();
   function deleteGraphic(kind, handle, context) {
@@ -938,6 +944,7 @@
   var motion = 0.65, bloom = 0.80, showLyrics = true;
   var reactivity = 1.35;
   var queueData = [], queueOpen = false, queuePinned = false;
+  var queueCoverBorrows = [];
   // 3D 歌单架（stage-shelf.js）：off/stage/side，默认舞台封面流。
   // 默认「右侧竖向歌单架」：歌曲列表在屏幕右缘纵向排列上下滑动，
   // 不再横向铺开（2026-09 需求变更）。
@@ -1452,6 +1459,7 @@
   // -------------------------------------------------------------------------
 
   function ensureGl() {
+    if (recordingSource && recordingSource.retiring) return false;
     if (gl) return true;
     if (glFailed || !wrapEl) return false;
     if (documentHidden() || !wrapEl.clientWidth || !wrapEl.clientHeight) return false;
@@ -1490,6 +1498,8 @@
     }
     contextTicket.commit();
     drawingTicket.commit();
+    recordingSource = { canvas:canvas, consumers:new Set(), retiring:false, resizePending:false };
+    rawFirstSubmit = false;
 
     canvas.addEventListener('webglcontextlost', onContextLost, false);
     canvas.addEventListener('webglcontextrestored', onContextRestored, false);
@@ -1521,6 +1531,13 @@
   }
 
   function releaseGl() {
+    if (recordingSource && recordingSource.consumers.size) {
+      recordingSource.retiring = true; sceneAdvancing = false;
+      if (canvas) canvas.remove();
+      graphicsResources().report({ lifecycle:'retiring',reason:'recording-source-in-use' });
+      invalidateRecordingSource(recordingSource, '舞台图形资源正在关闭，停止并保留此前片段。');
+      return;
+    }
     disposeStages();
     builtStages = {};
     if (post) {
@@ -1549,6 +1566,42 @@
     releaseGraphicsTicket(drawingTicket); releaseGraphicsTicket(contextTicket);
     drawingTicket = contextTicket = null;
     if (graphicsPort) graphicsPort.forgetReport(); graphicsPort = null;
+    recordingSource = null; rawFirstSubmit = false;
+    if (destroyInputPending) {
+      destroyInputPending = false;
+      proj = view = viewR = audioBands = onset = null;
+      releaseGraphicsTicket(inputTicket); inputTicket = null;
+      if (inputPort) inputPort.forgetReport(); inputPort = null;
+    }
+  }
+
+  function invalidateRecordingSource(source, reason) {
+    // Allocation lifetime can outlast the recording session. Notify only the
+    // consumers which acquired this source, never an unrelated current exporter.
+    source.consumers.forEach(function (consumer) {
+      if (consumer.onInvalidated) consumer.onInvalidated(reason);
+    });
+  }
+
+  function acquireRecordingSource(source, options) {
+    if (!source || source !== recordingSource || source.retiring || !active || sceneCovered()
+        || !gl || contextLost || !rawFirstSubmit) throw new Error('recording-source-unavailable');
+    var consumer = { onInvalidated:options && typeof options.onInvalidated === 'function' ? options.onInvalidated : null };
+    source.consumers.add(consumer);
+    var released = false;
+    return { canvas:source.canvas, release:function () {
+      if (released) return; released = true; source.consumers.delete(consumer);
+      if (!source.consumers.size) {
+        if (source.retiring) releaseGl();
+        else { source.resizePending = false; markSizeDirty(); }
+      }
+    } };
+  }
+
+  function requestRecordingFrame(source) {
+    if (source !== recordingSource || source.retiring || !active || sceneCovered() || contextLost) return;
+    rawDirty = true;
+    if (global.Stage && Stage.kick) Stage.kick();
   }
 
   function showFallback(text, source) {
@@ -1595,7 +1648,7 @@
   }
 
   function resize() {
-    if (!gl || !root) return;
+    if (!gl || !root || recordingSource && recordingSource.retiring) return;
     layoutWidth = wrapEl.clientWidth; layoutHeight = wrapEl.clientHeight;
     if (!layoutWidth || !layoutHeight || documentHidden()) { sceneAdvancing = false; return; }
     var w = Math.max(1, Math.round(layoutWidth));
@@ -1604,6 +1657,12 @@
     var nw = Math.max(1, Math.floor(w * nextDpr));
     var nh = Math.max(1, Math.floor(h * nextDpr));
     if (canvas.width !== nw || canvas.height !== nh) {
+      if (recordingSource && recordingSource.consumers.size) {
+        if (!recordingSource.resizePending)
+          invalidateRecordingSource(recordingSource, '舞台尺寸或画质已改变，停止并保留此前片段。');
+        recordingSource.resizePending = true;
+        return;
+      }
       var nextTicket = null;
       try {
       var peak = Math.max(nw * nh, nw * canvas.height);
@@ -1841,7 +1900,7 @@
 
   function render(dtMs, frame) {
     // 3D 场景始终渲染：stanza 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
-    if (!gl || contextLost) return;
+    if (!gl || contextLost || recordingSource && recordingSource.retiring) return;
     // 创意编排与动画绘景都不画 GL：前者把舞台交给 CreativeStage，后者交给
     // StageAnimeSvg 的 SVG 层。两条路都要继续推进歌词（paintWords）。
     if (sceneSource === 'creative' || sceneSource === 'anime-svg') {
@@ -1907,6 +1966,9 @@
   }
 
   function selectDivisor() {
+    // Stanza may keep this shared gate alive after raw context loss. Its late
+    // recording consumer still owns this generation's graphics allocations.
+    if (recordingSource && recordingSource.retiring) return perf.divisor;
     var now = performance.now();
     var boost = now < interactUntil;
     if (boost) return 1;
@@ -1960,7 +2022,8 @@
     if (!frame || frame.version !== 1 || frame.frameId === lastRawFrameId) return;
     lastRawFrameId = frame.frameId;
     if (!active || frame.documentHidden || !layoutWidth || !layoutHeight) { sceneAdvancing = false; spectrumWatermark = frame.spectrumRevision; return; }
-    var moving = frame.playing && !frame.reduced && !reducedMotion() && gl && !contextLost && !sceneCovered();
+    var moving = frame.playing && !frame.reduced && !reducedMotion() && gl && !contextLost && !sceneCovered()
+      && !(recordingSource && recordingSource.retiring);
     if (!moving) { sceneAdvancing = false; spectrumWatermark = frame.spectrumRevision; }
     var t0 = performance.now();
     // 帧停摆后的一记补帧不是性能证据：内嵌视图/遮挡窗口里「偶发泵帧 + 被
@@ -2598,7 +2661,16 @@
   }
 
   function setQueue(list) {
-    queueData = Array.isArray(list) ? list : [];
+    var nextBorrows = [], seen = new Set();
+    queueData = (Array.isArray(list) ? list : []).map(function (item) {
+      if (!item.cover || seen.has(item.cover) || !global.HertzCovers || !HertzCovers.borrow) return item;
+      try {
+        var lease = HertzCovers.borrow(item.cover); if (lease) nextBorrows.push(lease); seen.add(item.cover);
+        return lease ? Object.assign({}, item, { cover: lease.url }) : item;
+      }
+      catch (_) { return Object.assign({}, item, { cover: null }); }
+    });
+    queueCoverBorrows.forEach(function (lease) { lease.release(); }); queueCoverBorrows = nextBorrows;
     if (queueOpen) renderQueuePanel();
     // 3D 歌单架消费同一份队列（含封面 URL），切歌交叉淡化与封面流由它自管。
     if (shelf) shelf.setItems(queueData);
@@ -3373,6 +3445,8 @@
   }
 
   function syncLayout() {
+    if (recordingSource && recordingSource.consumers.size && sceneCovered())
+      invalidateRecordingSource(recordingSource, '舞台来源已切换，停止并保留此前片段。');
     syncCreativeStage();
     syncCoastStage();
     syncZodiacStage();
@@ -3798,6 +3872,8 @@
     fadeTarget = 0;
     active = false;
     sceneAdvancing = false;
+    if (recordingSource && recordingSource.consumers.size)
+      invalidateRecordingSource(recordingSource, '舞台已关闭，停止并保留此前片段。');
     document.dispatchEvent(new CustomEvent('stage:visibility', { detail: { open: false } }));
     syncCreativeStage();
     syncCoastStage();
@@ -4497,6 +4573,7 @@
     close();
     var stanzaError = disposeStanza();
     if (shelf) { shelf.destroy(); shelf = null; }
+    queueData = []; queueCoverBorrows.forEach(function (lease) { lease.release(); }); queueCoverBorrows = [];
     if (lyricView) lyricView.destroy();
     lyricView = null;
     active = false;
@@ -4509,10 +4586,8 @@
     document.removeEventListener('visibilitychange', onVisibilityChange);
     document.removeEventListener('stage:playing-changed', onPlayingChanged);
     if (rawFrameDisposer) rawFrameDisposer(); rawFrameDisposer = null;
+    destroyInputPending = true;
     releaseGl();
-    proj = view = viewR = audioBands = onset = null;
-    releaseGraphicsTicket(inputTicket); inputTicket = null;
-    if (inputPort) inputPort.forgetReport(); inputPort = null;
     glFailed = false;
     sceneTimeMs = time = 0; phaseScene = ''; sceneAdvancing = rawFirstSubmit = false; rawDirty = true; lastRawFrameId = -1;
     inited = false;
@@ -4537,8 +4612,11 @@
       if (sceneSource === 'creative' && global.CreativeStage && CreativeStage.recordingSurface) {
         return CreativeStage.recordingSurface();
       }
-      return sceneSource === 'immersive' && !sceneCovered() && gl && !contextLost && canvas
-        ? {canvas:canvas,source:'immersive',ownsLyrics:false} : null;
+      var source = recordingSource;
+      return sceneSource === 'immersive' && !sceneCovered() && gl && !contextLost && source && !source.retiring && rawFirstSubmit
+        ? {canvas:source.canvas,source:'immersive',ownsLyrics:false,
+          acquire:function (options) { return acquireRecordingSource(source, options); },
+          requestFrame:function () { requestRecordingFrame(source); }} : null;
     },
     setQueue: setQueue,
     // 全屏舞台入口（stage-immersive / 模式键）统一走这里申请原生全屏；
@@ -4633,7 +4711,8 @@
         time: time,
         sceneTimeMs: sceneTimeMs,
         buffer: bw + 'x' + bh,
-        resources: { coverage:'raw-gl-context-input-post-program-buffer-and-raster-cover',generation:graphicsGeneration,failure:graphicsFailure }
+        resources: { coverage:'raw-gl-context-input-post-program-buffer-and-raster-cover',generation:graphicsGeneration,failure:graphicsFailure,
+          recordingUses:recordingSource ? recordingSource.consumers.size : 0,retiring:!!(recordingSource && recordingSource.retiring) }
       };
     }
   };

@@ -27,6 +27,19 @@ enum PreviewContent {
     Composition(crate::wallpaper::composition_plan::PreparedComposition),
 }
 
+impl PreviewContent {
+    fn frame_kind(&self) -> crate::wallpaper::session::FrameKind {
+        use crate::wallpaper::{media::Container, session::FrameKind};
+        match self {
+            Self::Media(media) if media.input().metadata.container == Container::Image => {
+                FrameKind::Image
+            }
+            Self::Media(_) => FrameKind::Video,
+            _ => FrameKind::Gl,
+        }
+    }
+}
+
 pub(super) struct PreviewOwner {
     id: u64,
     owner: u64,
@@ -47,8 +60,21 @@ pub(super) struct PreviewOwner {
     pub(super) frame: Option<Handoff>,
     error: Option<String>,
     heartbeat_at: Instant,
+    generation_resume_pending: bool,
 }
 impl PreviewOwner {
+    fn generation_gate(&self, paused: bool, now: Instant) -> policy::PreviewGenerationGate {
+        policy::preview_generation_gate(
+            paused,
+            self.prepared.as_ref().map(PreviewContent::frame_kind),
+            self.surface
+                .as_ref()
+                .map(WallpaperSurface::media_frame_kind),
+            self.surface
+                .as_ref()
+                .is_some_and(|surface| surface.session.media_pause_expired(now)),
+        )
+    }
     pub(super) fn composition_target_changed(
         &self,
         settings_hwnd: HWND,
@@ -110,6 +136,20 @@ impl PreviewOwner {
                         .is_some_and(|v| v.matches(work_key, package_hash))
             })
     }
+}
+
+/// Transfer failed controllers to the normal physical-exit owner. A usable old
+/// preview can survive a successor's preparation failure, but an expired pause
+/// acknowledgement makes that old controller unsafe to retain as well.
+fn recover_preview_surface<T>(
+    surface: &mut Option<T>,
+    old_live: bool,
+    captured_frame: bool,
+    pause_ack_expired: bool,
+) -> (bool, Option<T>) {
+    let keep_old = old_live && !captured_frame && !pause_ack_expired;
+    let retiring = if keep_old { None } else { surface.take() };
+    (captured_frame || keep_old, retiring)
 }
 
 fn preview_monitor() -> JobResult<native::WallpaperMonitor> {
@@ -570,6 +610,7 @@ impl App {
             frame,
             error: None,
             heartbeat_at: Instant::now(),
+            generation_resume_pending: false,
         });
         if let Err(error) = self.stage_preview(target) {
             self.fail_preview(error.to_string());
@@ -618,6 +659,13 @@ impl App {
         };
         if preview.error.is_some() {
             return Ok(());
+        }
+        match preview.generation_gate(self.ai_generation_paused, Instant::now()) {
+            policy::PreviewGenerationGate::HoldDynamic => return Ok(()),
+            policy::PreviewGenerationGate::PauseUnconfirmed => {
+                return Err(anyhow::anyhow!("预览未在期限内确认暂停，请重新预览"))
+            }
+            policy::PreviewGenerationGate::Continue => {}
         }
         if let Some(surface) = &preview.surface {
             if surface.binding.generation() == preview.id {
@@ -847,16 +895,26 @@ impl App {
                 .surface
                 .as_ref()
                 .is_some_and(|surface| surface.binding.generation() != preview.id);
-            if retained || old_live {
+            let pause_ack_expired = preview
+                .surface
+                .as_ref()
+                .is_some_and(|surface| surface.session.media_pause_expired(Instant::now()));
+            let (keep_preview, retiring) = recover_preview_surface(
+                &mut preview.surface,
+                old_live,
+                retained,
+                pause_ack_expired,
+            );
+            if let Some(surface) = retiring {
+                self.wallpaper_retiring
+                    .push(RetiringWallpaper::new(surface));
+            }
+            if keep_preview {
                 preview.error = Some(message.clone());
                 preview.prepared = None;
                 if retained {
                     if let Some(frame) = &mut preview.frame {
                         frame.reveal = None;
-                    }
-                    if let Some(surface) = preview.surface.take() {
-                        self.wallpaper_retiring
-                            .push(RetiringWallpaper::new(surface));
                     }
                 }
                 self.send_settings_status(Some(&message), None);
@@ -904,6 +962,7 @@ impl App {
     }
 
     pub(super) fn handle_preview_page(&mut self, generation: u64, event: &str) -> bool {
+        self.recompute_preview_generation_pause();
         let Some(preview) = self.preview.as_mut().filter(|preview| {
             preview
                 .surface
@@ -1000,6 +1059,15 @@ impl App {
         }
         // Recording one receipt does not itself prove all four readiness facts.
         // Reveal only on the actual Ready -> Running transition, regardless of receipt order.
+        if self.ai_generation_paused
+            && surface.dynamic()
+            && matches!(
+                surface.binding.parse(event),
+                Some(PageEvent::Handshake | PageEvent::FirstFrame(_))
+            )
+        {
+            surface.pause_keep_visible();
+        }
         if surface.session.start_presentation(Instant::now()) {
             if let Err(error) = native::wallpaper_opacity(surface.hwnd(), 255) {
                 self.fail_preview(error.to_string());
@@ -1015,6 +1083,7 @@ impl App {
     }
 
     pub(super) fn tick_preview(&mut self, target: &EventLoopWindowTarget<()>) {
+        self.recompute_preview_generation_pause();
         let Some(preview) = self.preview.as_ref() else {
             return;
         };
@@ -1044,6 +1113,14 @@ impl App {
         }) {
             self.close_preview();
             return;
+        }
+        match preview.generation_gate(self.ai_generation_paused, Instant::now()) {
+            policy::PreviewGenerationGate::PauseUnconfirmed => {
+                self.fail_preview("预览未在期限内确认暂停，请重新预览".into());
+                return;
+            }
+            policy::PreviewGenerationGate::HoldDynamic => return,
+            policy::PreviewGenerationGate::Continue => {}
         }
         if preview
             .frame
@@ -1121,6 +1198,64 @@ impl App {
     pub(super) fn preview_active(&self) -> bool {
         self.preview.is_some()
     }
+
+    pub(super) fn recompute_preview_generation_pause(&mut self) {
+        use crate::wallpaper::session::PauseScope;
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
+        let Some(surface) = preview.surface.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        let name = policy::REASON_AI_GENERATION;
+        let scope = PauseScope::AllPresentations;
+        if self.ai_generation_paused && surface.dynamic() {
+            preview.generation_resume_pending = false;
+            let already = surface
+                .session
+                .pause_reasons()
+                .iter()
+                .any(|(reason, s)| reason == name && *s == scope);
+            surface.session.add_pause_reason(name, scope, now);
+            if !already {
+                surface.pause_keep_visible();
+            }
+        } else if surface.session.remove_pause_reason(name, scope, now) {
+            preview.generation_resume_pending = true;
+            // A pause is not a missing heartbeat. Give the resumed page its usual grace.
+            preview.heartbeat_at = now;
+            if !surface.first_frame_ready() {
+                surface.created_at = now;
+            }
+            if let Some(frame) = &mut preview.frame {
+                if let Some((generation, _)) = frame.reveal {
+                    frame.reveal = Some((generation, now));
+                }
+            }
+        }
+        if preview.generation_resume_pending
+            && !surface
+                .session
+                .pause_reasons()
+                .iter()
+                .any(|(_, scope)| *scope != PauseScope::DesktopOnly)
+            && surface.session.clear_media_pause(now)
+        {
+            surface.start(preview.configuration.presentation().fps);
+            preview.generation_resume_pending = false;
+            if surface.session.start_presentation(now) {
+                if let Err(error) = native::wallpaper_opacity(surface.hwnd(), 255) {
+                    preview.error = Some(error.to_string());
+                } else {
+                    if let Some(frame) = &mut preview.frame {
+                        frame.reveal = Some((preview.id, now));
+                    }
+                    surface.eval("window.hertzWallpaper && window.hertzWallpaper.reveal();");
+                }
+            }
+        }
+    }
     pub(super) fn preview_lease(&self) -> Option<&str> {
         self.preview
             .as_ref()
@@ -1147,6 +1282,7 @@ impl App {
         serde_json::json!({"kind":if !preview.image_candidate && preview.configuration.builtin().is_some() {"builtin"} else {"media"},
             "preparing":surface.is_none(),"leaseId":preview.lease_id,"generation":preview.id,
             "firstFrameReady":surface.is_some_and(|surface| surface.binding.generation() == preview.id && surface.first_frame_ready()),"binding":surface.map(|surface| &surface.binding),
+            "pauseReasons":surface.map(|surface| surface.session.pause_reasons().into_iter().map(|(name, _)| name).collect::<Vec<_>>()),
             "handoff":preview.frame.as_ref().map(Handoff::diagnostics),"error":preview.error,
             "runtimeBuiltin":preview.frame.as_ref().and_then(|frame| frame.runtime_builtin.as_ref()).or_else(|| surface.and_then(|surface| surface.runtime_builtin.as_ref())),
             "mediaAllocation":surface.and_then(|surface| surface.session.media_allocation()),
@@ -1162,6 +1298,72 @@ mod tests {
     use super::*;
     use crate::wallpaper::config::{AudioInput, DisplaySelection, Fit};
     use serde_json::json;
+
+    #[test]
+    fn expired_old_preview_moves_to_retirement_even_without_a_captured_frame() {
+        struct Controller(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Controller {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut surface = Some(Controller(closed.clone()));
+        // A new preview owns id N+1 while the stopped video controller still
+        // belongs to N. Its pause proof expired before the generation resumed.
+        let (keep_preview, retiring) = recover_preview_surface(&mut surface, true, false, true);
+        assert!(
+            !keep_preview,
+            "an unconfirmed old controller is not a recovery surface"
+        );
+        assert!(
+            surface.is_none(),
+            "the preview cannot keep ticking the faulty controller"
+        );
+        assert!(
+            retiring.is_some(),
+            "App transfers this exact owner into RetiringWallpaper"
+        );
+        assert_eq!(
+            closed.load(Ordering::SeqCst),
+            0,
+            "transfer does not invent physical exit"
+        );
+        let (_, again) = recover_preview_surface(&mut surface, false, false, true);
+        assert!(
+            again.is_none(),
+            "repeat failure cannot enqueue the controller twice"
+        );
+        drop(retiring);
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn successor_failure_preserves_a_healthy_older_preview() {
+        let mut surface = Some("older usable controller");
+        let (keep_preview, retiring) = recover_preview_surface(&mut surface, true, false, false);
+        assert!(keep_preview);
+        assert_eq!(surface, Some("older usable controller"));
+        assert!(
+            retiring.is_none(),
+            "a new candidate failure must not close its healthy predecessor"
+        );
+    }
+
+    #[test]
+    fn failed_controller_retires_while_the_captured_static_frame_remains() {
+        for old_live in [false, true] {
+            let mut surface = Some("failed controller");
+            let (keep_preview, retiring) =
+                recover_preview_surface(&mut surface, old_live, true, true);
+            assert!(
+                keep_preview,
+                "the captured frame belongs to the preview, not the faulty controller"
+            );
+            assert!(surface.is_none());
+            assert_eq!(retiring, Some("failed controller"));
+        }
+    }
 
     fn multiple_groups(mode: LayoutMode) -> config::WallpaperConfig {
         let mut configuration = config::WallpaperConfig {

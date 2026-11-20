@@ -133,6 +133,53 @@ async function main(){browser=await chromium.launch({channel:process.env.PLAYWRI
     }return{baseline,samples};});for(const sample of result.samples){assert.equal(sample.active.held.gpuContexts,1);assert.equal(sample.active.held.canvases,1);assert.equal(sample.active.held.ownedCpuBytes,2896);assert.deepEqual(sample.closed.held,result.baseline.held);}return result;
     }finally{await close(page);}
   });
+  await check('paused raw recording requests one original-gate frame and pins dimensions until its consumer releases',async()=>{
+    const page=await pageFor();try{await mount(page);const result=await page.evaluate(async()=>{
+      harness.stops=[];
+      const surface=Stage3D.recordingSurface(),lease=surface.acquire({onInvalidated:reason=>harness.stops.push(reason)}),before=Stage3D.stats(),draws=harness.draws;
+      surface.requestFrame();await harness.advance(12);const presented={draws:harness.draws,phase:Stage3D.stats().sceneTimeMs};
+      const size={width:surface.canvas.width,height:surface.canvas.height};
+      const wrap=document.getElementById('s3d-canvas-wrap');wrap.style.width='680px';wrap.style.height='460px';dispatchEvent(new Event('resize'));
+      await harness.advance(12);const held={width:surface.canvas.width,height:surface.canvas.height,stats:Stage3D.stats()};
+      lease.release();lease.release();await harness.advance(12);
+      const after={width:surface.canvas.width,height:surface.canvas.height,stats:Stage3D.stats()};
+      delete window.VideoExport;return{before,draws,presented,size,held,after,stops:harness.stops};
+    });assert.ok(result.presented.draws>result.draws);assert.equal(result.presented.phase,result.before.sceneTimeMs);
+      assert.deepEqual({width:result.held.width,height:result.held.height},result.size);assert.equal(result.held.stats.resources.recordingUses,1);
+      assert.equal(result.stops.length,1);assert.match(result.stops[0],/尺寸或画质/);
+      assert.notDeepEqual({width:result.after.width,height:result.after.height},result.size);assert.equal(result.after.stats.resources.recordingUses,0);return result;
+    }finally{await close(page);}
+  });
+  await check('raw destruction retains its context and original inputs until the final recording consumer releases',async()=>{
+    const page=await pageFor();try{const result=await page.evaluate(async()=>{
+      const baseline=Stage.resources().snapshot();Stage3D.open('aurora');await harness.advance(12);
+      const surface=Stage3D.recordingSurface(),a=surface.acquire(),b=surface.acquire(),before=Stage.resources().snapshot();
+      harness.stops=[];window.VideoExport={stop:reason=>harness.stops.push(reason)};
+      Stage3D.destroy();const retired={ledger:Stage.resources().snapshot(),stats:Stage3D.stats(),connected:surface.canvas.isConnected,width:surface.canvas.width};
+      let staleError='';try{surface.acquire();}catch(error){staleError=error.message;}
+      const draws=harness.draws;surface.requestFrame();await harness.advance(12);const afterDraws=harness.draws;
+      a.release();const first=Stage.resources().snapshot();b.release();b.release();const after=Stage.resources().snapshot();
+      delete window.VideoExport;return{baseline,before,retired,staleError,draws,afterDraws,first,after,stops:harness.stops,width:surface.canvas.width};
+    });assert.equal(result.retired.stats.resources.recordingUses,2);assert.equal(result.retired.stats.resources.retiring,true);
+      assert.equal(result.retired.connected,false);assert.ok(result.retired.width>0);assert.deepEqual(result.retired.ledger.held,result.before.held);
+      assert.equal(result.staleError,'recording-source-unavailable');assert.equal(result.afterDraws,result.draws);
+      assert.deepEqual(result.first.held,result.before.held);assert.deepEqual(result.after.held,result.baseline.held);assert.equal(result.width,0);return result;
+    }finally{await close(page);}
+  });
+  await check('raw context loss keeps the captured generation charged and restored events cannot revive it',async()=>{
+    const page=await pageFor();try{await mount(page);await page.evaluate(()=>{
+      harness.surface=Stage3D.recordingSurface();harness.lease=harness.surface.acquire();harness.before=Stage.resources().snapshot();
+      harness.gl.getExtension('WEBGL_lose_context').loseContext();
+    });await page.waitForFunction(()=>Stage3D.stats().resources.retiring);
+      const result=await page.evaluate(async()=>{
+        const retired=Stage.resources().snapshot(),contexts=harness.contexts;
+        harness.surface.canvas.dispatchEvent(new Event('webglcontextrestored'));await harness.advance(12);
+        const stillRetired=Stage3D.stats(),afterContexts=harness.contexts;harness.lease.release();
+        return{before:harness.before,retired,contexts,afterContexts,stillRetired,after:Stage.resources().snapshot()};
+      });assert.deepEqual(result.retired.held,result.before.held);assert.equal(result.stillRetired.resources.retiring,true);
+      assert.equal(result.afterContexts,result.contexts);assert.equal(result.after.held.gpuContexts,0);assert.equal(result.after.held.renderTargetDeclaredBytes,0);return result;
+    }finally{await close(page);}
+  });
   await check('real context loss retires this generation and restored events cannot allocate a replacement',async()=>{
     const page=await pageFor();try{await mount(page);await page.evaluate(()=>{harness.canvas=document.querySelector('.s3d-canvas');harness.gl.getExtension('WEBGL_lose_context').loseContext();});
       await page.waitForFunction(()=>!document.querySelector('.s3d-canvas'));

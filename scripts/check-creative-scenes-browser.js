@@ -183,7 +183,23 @@ async function main() {
       const shown = visible(); state.lyricVisible = false; const hidden = visible();
       return { shown, hidden, passes, error: gl.getError() };
     });
-    fs.writeFileSync(path.join(out, 'metrics.json'), JSON.stringify({ captures, stress, geometry, extension, errors }, null, 2));
+    const family=await page.evaluate(()=>{
+      const evidence=[];
+      for(const id of ['towers','towers-flat']){
+        const item=checkStates.find(value=>value.state.scene===id),gl=item.canvas.getContext('webgl2');
+        item.engine.resize(360,240,1);
+        const snapshot=state=>{const result=item.engine.render(state);if(!result.ok)throw new Error(JSON.stringify(result));
+          const bytes=new Uint8Array(360*240*4);gl.readPixels(0,0,360,240,gl.RGBA,gl.UNSIGNED_BYTE,bytes);return bytes;};
+        const base={...item.state,p:{...item.state.p,span:30},post:{...item.state.post,bloom:0,grain:0,chroma:0,vignette:0}};
+        const start=snapshot(base),span=snapshot({...base,p:{...base.p,span:60}}),
+          scale=snapshot({...base,modelMatrix:new Float32Array([2,0,0,0,0,2,0,0,0,0,2,0,0,0,0,1])});
+        const changed=value=>value.reduce((sum,byte,index)=>sum+(byte!==start[index]?1:0),0);
+        evidence.push({id,spanChanges:changed(span),scaleChanges:changed(scale),error:gl.getError()});
+      }
+      return evidence;
+    });
+    for(const item of family){assert(item.spanChanges>100,item.id+' responds throughout the declared span range');assert(item.scaleChanges>100,item.id+' respects stage scale');assert.equal(item.error,0);}
+    fs.writeFileSync(path.join(out, 'metrics.json'), JSON.stringify({ captures, stress, geometry, extension, family, errors }, null, 2));
     console.log(JSON.stringify({ captures, geometry, errors }, null, 2));
     if (process.env.SCENE_CAPTURE !== 'before') {
       assert.ok(extension.shown > 100, 'registered scene renders through the actual GL dispatcher');

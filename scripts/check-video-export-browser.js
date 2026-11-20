@@ -4,9 +4,11 @@
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { startFixture } = require('./ui-browser-fixture');
 const { uiUrl } = require('./ui-token');
+const { readAssets } = require('./ui-assets');
 
 async function main() {
   const fixture = await startFixture();
@@ -18,6 +20,19 @@ async function main() {
   const page = await context.newPage(), errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   try {
+    if (process.env.R6_SOURCE_ASSETS === '1') {
+      const assets = new Map(readAssets().map(asset=>[asset.path,asset.file]));
+      await page.route('**/*',route=>{
+        const url = new URL(route.request().url());
+        if (url.origin !== fixture.base) return route.continue();
+        if (url.pathname === '/') return route.fulfill({contentType:'text/html; charset=utf-8',
+          body:fs.readFileSync(path.resolve(__dirname,'../plugin/ui/index.html'),'utf8')
+            .replaceAll('__VMUSIC_TOKEN_VALUE__',new URL(uiUrl(fixture.base)).searchParams.get('token'))});
+        if (url.pathname.startsWith('/v1/')) return route.continue();
+        const file = assets.get(url.pathname);
+        return file && fs.existsSync(file) ? route.fulfill({path:file}) : route.continue();
+      });
+    }
     const track = await fixture.seed();
     const currentLyric = 'Hertz video export lyric sentinel 这一句混合中英文的长歌词用于验证导出不会被横向压扁 '.repeat(5);
     const nextLyric = 'Next lyric 下一句较长的歌词也需要按画布宽度换行保持清晰 '.repeat(5);
@@ -27,7 +42,7 @@ async function main() {
     await page.goto(uiUrl(fixture.base),{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.VideoExport && window.Stage3D && window.CreativeStage);
     await page.evaluate(()=>{
-      window.captureTracks=[];window.capturedRecorders=[];window.captureAudio=[];window.captureCanvases=[];window.captureStreams=[];
+      window.captureTracks=[];window.capturedRecorders=[];window.captureAudio=[];window.captureCanvases=[];window.captureStreams=[];window.permissionCalls=0;
       const capture=HTMLCanvasElement.prototype.captureStream;
       HTMLCanvasElement.prototype.captureStream=function(...args){
         const stream=capture.apply(this,args);captureTracks.push(...stream.getTracks());captureCanvases.push(this);captureStreams.push(stream);return stream;
@@ -40,6 +55,7 @@ async function main() {
         capturedRecorders.push(recorder);return recorder;
       }});
       Object.defineProperty(navigator.mediaDevices,'getDisplayMedia',{configurable:true,value:async()=>{
+        window.permissionCalls++;
         const audio=new AudioContext(),osc=audio.createOscillator(),dest=audio.createMediaStreamDestination();
         osc.frequency.value=440;osc.connect(dest);osc.start();await audio.resume();captureAudio.push(audio);
         captureTracks.push(...dest.stream.getTracks());return dest.stream;
@@ -85,7 +101,7 @@ async function main() {
 
     async function start({systemAudio=false,preset='720p',format='auto'}={}) {
       await page.evaluate(options=>{
-        window.outputHasLyric=false;window.outputLyricDraws={current:[],next:[]};
+        window.outputHasLyric=false;window.outputLyricDraws={current:[],next:[]};window.recordingError=null;
         window.recordingDone=VideoExport.begin({preset:{id:options.preset},systemAudio:options.systemAudio,format:options.format});
         recordingDone.catch(error=>{window.recordingError=error.message;});
       },{systemAudio,preset,format});
@@ -98,6 +114,10 @@ async function main() {
           throw error;
         });
       assert.equal(await page.evaluate(()=>window.recordingError || VideoExport.status().phase),'recording');
+      const resources=await page.evaluate(()=>Stage.resources().snapshot());
+      assert.equal(resources.caps.ownedCpuBytes,128*1024*1024);
+      assert.equal(resources.caps.decodeReservedBytes,64*1024*1024);
+      assert.ok(resources.held.ownedCpuBytes<=resources.caps.ownedCpuBytes);
       await page.waitForTimeout(1700);
     }
     function assertLyricLayout(layout,height) {
@@ -192,6 +212,19 @@ async function main() {
     await page.waitForFunction(()=>Stage3D.recordingSurface()?.source==='creative');
     assert.equal(await page.evaluate(()=>Stage3D.recordingSurface().canvas.classList.contains('creative-canvas')),true,
       'Creative recordings must use the creative owner canvas');
+    const refused=await page.evaluate(async()=>{
+      const before=Stage.resources().snapshot(),captures=captureTracks.length,permissions=permissionCalls;
+      let error='';try{await VideoExport.begin({preset:{id:'portrait'},format:'webm',systemAudio:true});}catch(e){error=e.message;}
+      return{before,after:Stage.resources().snapshot(),captures,afterCaptures:captureTracks.length,permissions,afterPermissions:permissionCalls,error};
+    });
+    assert.match(refused.error,/缩小舞台窗口或选择 720p/);
+    assert.deepEqual(refused.after.held,refused.before.held,'Refused startup must preserve all existing resource ownership');
+    assert.equal(refused.afterCaptures,refused.captures);assert.equal(refused.afterPermissions,refused.permissions);
+    await page.setViewportSize({width:390,height:760});
+    await page.waitForFunction(()=>{
+      const source=Stage3D.recordingSurface()?.canvas;
+      return source && (source.width*source.height+1080*1920)*4*6<=Stage.resources().snapshot().caps.decodeReservedBytes;
+    });
     await start({systemAudio:true,preset:'portrait',format:'webm'});
     assertLyricLayout(await page.evaluate(()=>outputLyricDraws),1920);
     assert.ok(await page.evaluate(()=>outputLyricDraws.current.some(row=>row.text.endsWith('…'))),
@@ -201,9 +234,59 @@ async function main() {
     await page.evaluate(()=>VideoExport.open());
     await page.getByText('已包含系统音轨（可能包含其它应用声音）',{exact:true}).waitFor();
     const portrait=await save(1080,1920,true);
+    // Native encoders, with only the old stop callback delayed: an expired raw
+    // session may retain its allocation lease while a new Creative session runs.
+    await page.setViewportSize({width:640,height:480});
+    await page.evaluate(()=>{VideoExport.close();Stage3D.configure({sceneSource:'immersive'});Stage3D.open('aurora');});
+    await page.waitForFunction(()=>Stage3D.recordingSurface()?.source==='immersive');
+    await start({preset:'720p',format:'webm'});
+    const timedOut=await page.evaluate(async()=>{
+      const recorder=capturedRecorders.at(-1);
+      window.retiredRaw={source:Stage3D.recordingSurface(),recorder,onstop:recorder.onstop};
+      recorder.onstop=null;VideoExport.stop();const result=await recordingDone;
+      return{result:{bytes:result.bytes,failed:result.failed},status:VideoExport.status(),source:Stage3D.stats().resources};
+    });
+    assert.equal(timedOut.result.failed,true);assert.equal(timedOut.status.retiring,1);assert.equal(timedOut.source.recordingUses,1);
+    await page.evaluate(()=>{VideoExport.close();Stage3D.configure({sceneSource:'creative'});Stage3D.open();});
+    await page.waitForFunction(()=>Stage3D.recordingSurface()?.source==='creative');
+    await start({preset:'720p',format:'webm'});
+    await page.evaluate(()=>retiredRaw.source.canvas.getContext('webgl2').getExtension('WEBGL_lose_context').loseContext());
+    await page.waitForFunction(()=>Stage3D.stats().resources.retiring);
+    assert.equal(await page.evaluate(()=>VideoExport.status().phase),'recording','Old raw invalidation must not stop the new Creative session');
+    const resumed=await page.evaluate(()=>{
+      retiredRaw.onstop();return{status:VideoExport.status(),raw:Stage3D.stats().resources};
+    });
+    assert.equal(resumed.status.phase,'recording');assert.equal(resumed.status.retiring,0);assert.equal(resumed.raw.recordingUses,0);
+    const isolated=await save(1280,720,false);
+    await page.setViewportSize({width:1000,height:650});
+    await page.evaluate(()=>{VideoExport.close();Stage3D.configure({sceneSource:'immersive'});Stage3D.open('aurora');});
+    await page.waitForFunction(()=>Stage3D.recordingSurface()?.source==='immersive');
+    await start({preset:'720p',format:'webm'});
+    const destruction=await page.evaluate(async()=>{
+      const source=Stage3D.recordingSurface(),before=Stage.resources().snapshot();
+      Stage3D.destroy();
+      const retiring={stats:Stage3D.stats(),ledger:Stage.resources().snapshot(),width:source.canvas.width};
+      const result=await recordingDone;
+      return{before,retiring,after:Stage.resources().snapshot(true),status:VideoExport.status(),width:source.canvas.width,
+        result:{bytes:result.bytes,failed:result.failed,message:result.message},ended:captureTracks.every(track=>track.readyState==='ended')};
+    });
+    assert.equal(destruction.retiring.stats.resources.retiring,true);
+    assert.equal(destruction.retiring.stats.resources.recordingUses,1);assert.ok(destruction.retiring.width>0);
+    assert.equal(destruction.retiring.ledger.held.gpuContexts,destruction.before.held.gpuContexts);
+    assert.equal(destruction.width,0);assert.equal(destruction.status.retiring,0);assert.equal(destruction.ended,true);
+    assert.ok(destruction.result.bytes>1000);assert.equal(destruction.result.failed,false);
+    assert.ok(!destruction.after.entries.some(entry=>entry.owner==='stage3d-gl'||entry.owner==='stage3d-input'));
+    await page.evaluate(()=>{VideoExport.close();Stage3D.init();Stage3D.configure({sceneSource:'immersive'});});
+    const beforeCold=await page.evaluate(()=>({surface:!!Stage3D.recordingSurface(),resources:Stage.resources().snapshot()}));
+    assert.equal(beforeCold.surface,false);assert.equal(beforeCold.resources.held.gpuContexts,0);
+    await start({preset:'720p',format:'webm'});
+    const cold=await save(1280,720,false);
     await page.evaluate(async()=>{for(const audio of captureAudio) await audio.close();});
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({horizontal,portrait,narrowDialog:'passed',downloadRetry:'passed',
+    console.log(JSON.stringify({horizontal,portrait,narrowDialog:'passed',downloadRetry:'passed',oversizedSourcePreflight:'passed',
+      sourceDestruction:{bytes:destruction.result.bytes,ended:destruction.ended},
+      retiredSourceIsolation:{bytes:isolated.bytes,lateStop:'passed',oldContextLoss:'passed'},
+      uncreatedSourceStartup:{bytes:cold.bytes},
       scope:'Real browser encode/decode and synthetic audio; not a cross-GPU or actual system-audio acceptance'}));
   } finally {await context.close();await browser.close();await fixture.close();}
 }

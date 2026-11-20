@@ -13,12 +13,164 @@ use std::io::{Cursor, Write};
 use std::sync::atomic::AtomicUsize;
 
 const WORK_ID: &str = "c17ed10a-5c55-4a52-85dc-7509f9e88aae";
+
+#[tokio::test]
+async fn composition_mirror_inspection_uses_clock_class_and_unique_video_ranges_without_decode() {
+    for (label, nodes, video, expected, decoders) in [
+        (
+            "particles",
+            json!([{"id":"p","type":"particles","stateVersion":1}]),
+            false,
+            true,
+            0,
+        ),
+        (
+            "shared-video",
+            json!([
+            {"id":"a","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":1500}},
+            {"id":"b","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":1500}}]),
+            true,
+            true,
+            1,
+        ),
+        (
+            "different-ranges",
+            json!([
+            {"id":"a","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":1500}},
+            {"id":"b","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopStartMs":500,"loopEndMs":1500}}]),
+            true,
+            true,
+            2,
+        ),
+        (
+            "integrated-builtin",
+            json!([{"id":"b","type":"builtinScene","stateVersion":1,
+            "properties":{"sceneId":"coast","stateVersion":1,"params":{}}}]),
+            false,
+            false,
+            0,
+        ),
+    ] {
+        let root = tempfileish::temp_dir(label);
+        let (jobs, hash, probes) = install(root.path(), nodes, json!([]), video).await;
+        let package = jobs.assets().read_installed_manifest(&hash).unwrap();
+        let facts = inspect_layout(jobs.assets(), &package, &serde_json::Map::new()).unwrap();
+        assert_eq!(facts.reconstructable, expected, "{label}");
+        assert_eq!(facts.decoders, decoders, "{label}");
+        assert_eq!(
+            probes.load(Ordering::Acquire),
+            0,
+            "layout inspection is read-only: {label}"
+        );
+        jobs.library().pool().close().await;
+    }
+}
+
 fn document(nodes: Value) -> Value {
     document_full(nodes, json!([]), json!([]), json!([]))
+}
+
+#[tokio::test]
+async fn composition_mirror_offline_preflight_uses_final_public_video_ranges() {
+    let root = tempfileish::temp_dir("mirror-final-ranges");
+    let property = json!([{"id":"range","label":"range","type":"number","default":1500,
+        "constraints":{"min":0.001,"max":86400000},"target":{"kind":"node","nodeId":"b","property":"loopEndMs","component":null}}]);
+    let (jobs, hash, probes) = install(root.path(), json!([
+        {"id":"a","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":1500}},
+        {"id":"b","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":1500}}
+    ]), property, true).await;
+    let selection = super::super::config::Selection::Package {
+        work_key: format!("local-{WORK_ID}"),
+        package_hash: hash,
+    };
+    selection_plan::validate_mirror_layouts(
+        &jobs,
+        vec![(selection.clone(), 2, serde_json::Map::new())],
+        &AtomicBool::new(false),
+    )
+    .await
+    .unwrap();
+    let changed = serde_json::from_value(json!({"range":1000})).unwrap();
+    assert_eq!(
+        selection_plan::validate_mirror_layouts(
+            &jobs,
+            vec![(selection, 2, changed)],
+            &AtomicBool::new(false)
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "unsupported_layout"
+    );
+    assert_eq!(
+        probes.load(Ordering::Acquire),
+        0,
+        "offline preflight must not use a decoder"
+    );
+    jobs.library().pool().close().await;
 }
 fn document_full(nodes: Value, effects: Value, tracks: Value, bindings: Value) -> Value {
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
     "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":tracks},"bindings":bindings,"effects":effects})
+}
+
+#[tokio::test]
+async fn composition_mirror_layout_snapshot_cache_tracks_final_ranges_in_both_directions() {
+    for (default_end, override_end, default_eligible) in [(1500, 1000, true), (1000, 1500, false)] {
+        let root = tempfileish::temp_dir("mirror-query-ranges");
+        let property = json!([{"id":"range","label":"range","type":"number","default":default_end,
+            "constraints":{"min":0.001,"max":86400000},"target":{"kind":"node","nodeId":"b","property":"loopEndMs","component":null}}]);
+        let (jobs, hash, probes) = install(root.path(), json!([
+            {"id":"a","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":1500}},
+            {"id":"b","type":"video","stateVersion":1,"assets":{"asset":"movie"},"properties":{"loopEndMs":default_end}}
+        ]), property, true).await;
+        let selection = super::super::config::Selection::Package {
+            work_key: format!("local-{WORK_ID}"),
+            package_hash: hash,
+        };
+        let original =
+            selection_plan::layout_snapshot(&jobs, selection.clone(), 2, serde_json::Map::new())
+                .await
+                .unwrap();
+        let properties = serde_json::from_value(json!({"range":override_end})).unwrap();
+        let changed = selection_plan::layout_snapshot(&jobs, selection.clone(), 2, properties)
+            .await
+            .unwrap();
+        assert_ne!(
+            original.cache_key(),
+            changed.cache_key(),
+            "public values cannot share cached eligibility"
+        );
+        let same = selection_plan::layout_snapshot(
+            &jobs,
+            selection,
+            2,
+            serde_json::from_value(json!({"range":override_end})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(same.cache_key(), changed.cache_key());
+        let original = serde_json::to_value(
+            selection_plan::inspect_layout_snapshot(&jobs, original, &AtomicBool::new(false))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let changed = serde_json::to_value(
+            selection_plan::inspect_layout_snapshot(&jobs, changed, &AtomicBool::new(false))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(original["mirrorEligible"], default_eligible);
+        assert_eq!(changed["mirrorEligible"], !default_eligible);
+        assert_eq!(
+            probes.load(Ordering::Acquire),
+            0,
+            "query must not prepare a decoder"
+        );
+        jobs.library().pool().close().await;
+    }
 }
 fn document_model(nodes: Value) -> Value {
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000",
@@ -81,6 +233,9 @@ const TEXTURED_PNG: &[u8] = &[
     33, 20, 0, 69, 204, 7, 249, 102, 203, 255, 57, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ];
 fn textured_model_glb(external: bool) -> Vec<u8> {
+    textured_model_glb_sided(external, false)
+}
+fn textured_model_glb_sided(external: bool, double_sided: bool) -> Vec<u8> {
     let mut bin = vec![
         0_u8;
         if external {
@@ -137,7 +292,7 @@ fn textured_model_glb(external: bool) -> Vec<u8> {
         "textures":[{"source":0,"sampler":0}],
         "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
             "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
-            "alphaMode":"OPAQUE"}]
+            "alphaMode":"OPAQUE","doubleSided":double_sided}]
     });
     let text = serde_json::to_vec(&document).unwrap();
     let json_len = text.len().div_ceil(4) * 4;
@@ -1164,7 +1319,7 @@ async fn production_selection_projects_final_particles_into_one_native_plan() {
     );
     assert_eq!(
         gl.session.request().cpu_bytes - plan.costs().unwrap().semantic_bytes,
-        92 + 11 * 20
+        92 + 11 * 20 + super::super::gl_plan::THREE_DEFAULT_CPU_BYTES
     );
     assert_eq!(gl.session.request().decoders, 0);
     assert_eq!(probes.load(Ordering::Acquire), 0);
@@ -1240,7 +1395,9 @@ async fn final_video_range_uses_true_duration_and_single_preparation_owner() {
     );
     assert_eq!(
         gl.session.request().cpu_bytes - plan.costs().unwrap().semantic_bytes,
-        u64::from(metadata.encoded_width) * u64::from(metadata.encoded_height) * 12 + 184
+        u64::from(metadata.encoded_width) * u64::from(metadata.encoded_height) * 12
+            + 184
+            + super::super::gl_plan::THREE_DEFAULT_CPU_BYTES
     );
     assert!(metadata.duration_ms.unwrap() >= 1000);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
@@ -1494,7 +1651,10 @@ async fn native_mask_fixture_prepares_effect_texture_and_projects_it_to_the_page
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 2);
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 16);
-    assert_eq!(page["textureDeclaredBytes"], 2 * 64 * 64 * 4);
+    assert_eq!(
+        page["textureDeclaredBytes"],
+        2 * 64 * 64 * 4 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("mask");
         std::fs::create_dir_all(&output).unwrap();
@@ -1660,7 +1820,10 @@ async fn native_model_textured_fixture_projects_texture_facts_and_uploads() {
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 3);
     assert_eq!(page["bufferDeclaredBytes"], 194);
-    assert_eq!(page["textureDeclaredBytes"], 32 + 4096);
+    assert_eq!(
+        page["textureDeclaredBytes"],
+        32 + 4096 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-textured");
@@ -1751,7 +1914,10 @@ async fn native_model_morph_fixture_projects_weights_and_texture_budget() {
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 3);
     assert_eq!(page["bufferDeclaredBytes"], 194);
-    assert_eq!(page["textureDeclaredBytes"], 32 + 96 + 4096);
+    assert_eq!(
+        page["textureDeclaredBytes"],
+        32 + 96 + 4096 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-morph");
         std::fs::create_dir_all(&output).unwrap();
@@ -1837,7 +2003,10 @@ async fn native_model_skin_fixture_projects_bones_and_texture_budget() {
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 3);
     assert_eq!(page["bufferDeclaredBytes"], 254);
-    assert_eq!(page["textureDeclaredBytes"], 32 + 256 + 4096);
+    assert_eq!(
+        page["textureDeclaredBytes"],
+        32 + 256 + 4096 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-skin");
         std::fs::create_dir_all(&output).unwrap();
@@ -1928,7 +2097,10 @@ async fn native_model_multi_material_program_count_is_exact() {
         let page = &projection["pageLimits"];
         assert_eq!(page["programs"], if masked { 4 } else { 3 });
         assert_eq!(page["bufferDeclaredBytes"], 194);
-        assert_eq!(page["textureDeclaredBytes"], 32 + 4096);
+        assert_eq!(
+            page["textureDeclaredBytes"],
+            32 + 4096 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+        );
         if !masked {
             if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
                 let output = std::path::PathBuf::from(output).join("model-multimaterial");
@@ -2111,7 +2283,10 @@ async fn native_model_ktx2_fixture_projects_container_facts_and_uploads() {
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 3);
     assert_eq!(page["bufferDeclaredBytes"], 194);
-    assert_eq!(page["textureDeclaredBytes"], 16 + 4096);
+    assert_eq!(
+        page["textureDeclaredBytes"],
+        16 + 4096 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-ktx2");
@@ -2197,7 +2372,10 @@ async fn native_model_basis_ktx2_projects_transcode_and_rgba_upload() {
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 3);
     assert_eq!(page["bufferDeclaredBytes"], 194);
-    assert_eq!(page["textureDeclaredBytes"], 21_844 + 4096);
+    assert_eq!(
+        page["textureDeclaredBytes"],
+        21_844 + 4096 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-ktx2-basis");
@@ -2528,7 +2706,10 @@ async fn native_model_opacity_projects_material_clone_budget() {
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 3);
     assert_eq!(page["bufferDeclaredBytes"], 170);
-    assert_eq!(page["ownedCpuBytes"], 3112);
+    assert_eq!(
+        page["ownedCpuBytes"],
+        3112 + super::super::gl_plan::THREE_DEFAULT_CPU_BYTES
+    );
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-opacity");
         std::fs::create_dir_all(&output).unwrap();
@@ -2609,6 +2790,183 @@ async fn native_model_rejects_cross_space_order_opacity_and_animation() {
     )
     .await;
     assert_eq!(animation, "adapter_unavailable");
+}
+
+#[tokio::test]
+async fn native_model_tracks_and_bindings_reserve_their_sample_workspace() {
+    let root = tempfileish::temp_dir("composition-native-model-timeline");
+    let mut document = document_model(json!([model_node("mesh", json!({}))]));
+    document["timeline"]["tracks"] = json!([{
+        "id":"move","target":{"nodeId":"mesh","property":"position","component":0},
+        "keys":[{"timeSeconds":0,"value":0,"easing":"linear"},
+                {"timeSeconds":1,"value":1,"easing":"linear"}]
+    }]);
+    document["bindings"] = json!([{
+        "id":"fade","target":{"nodeId":"mesh","property":"opacity","component":null},
+        "mode":"replace","parameters":{},"program":[{"op":"input","name":"energy"}]
+    }]);
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", model_glb(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let manifest = jobs
+        .assets()
+        .read_installed_manifest(&hash)
+        .unwrap()
+        .manifest;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let compiled = &plan.compiled;
+    assert_eq!(compiled.ir().tracks().len(), 1);
+    assert_eq!(compiled.ir().bindings().len(), 1);
+    let animated_cost = geometry_costs(compiled, &plan.final_values).unwrap();
+    let mut plain = document;
+    plain["timeline"]["tracks"] = json!([]);
+    plain["bindings"] = json!([]);
+    let plain = hertz_wallpaper::document::compile_document(
+        &serde_json::to_vec(&plain).unwrap(),
+        &manifest,
+    )
+    .unwrap();
+    let plain_cost = geometry_costs(
+        &plain,
+        &plain.final_public_values(&Default::default()).unwrap(),
+    )
+    .unwrap();
+    let ir = compiled.ir();
+    let expected = ir.numeric_slots().len() as u64 * 17
+        + ir.nodes().len() as u64 * 4
+        + ir.inputs().len() as u64 * 8
+        + (ir.bindings()[0].max_stack as u64 + 1) * 8;
+    assert_eq!(
+        animated_cost.private_cpu_bytes - plain_cost.private_cpu_bytes,
+        expected
+    );
+    assert_eq!(animated_cost.buffer_bytes, plain_cost.buffer_bytes);
+    assert_eq!(animated_cost.programs, plain_cost.programs);
+}
+
+#[tokio::test]
+async fn native_double_sided_fade_accounts_for_both_material_passes() {
+    let root = tempfileish::temp_dir("composition-native-double-sided-fade");
+    let mut document = document_model(json!([model_node("mesh", json!({}))]));
+    document["timeline"]["tracks"] = json!([{
+        "id":"fade","target":{"nodeId":"mesh","property":"opacity","component":null},
+        "keys":[{"timeSeconds":0,"value":1,"easing":"linear"},
+                {"timeSeconds":1,"value":0,"easing":"linear"}]
+    }]);
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document).unwrap(),
+            "application/json",
+        ),
+        (
+            "assets/model.glb",
+            textured_model_glb_sided(false, true),
+            "model/gltf-binary",
+        ),
+    ];
+    let (jobs, hash, _) = install_document(
+        root.path(),
+        entries,
+        json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]),
+        json!([]),
+    )
+    .await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let cost = plan.costs().unwrap();
+    assert_eq!(
+        plan.assets["model"].as_model().unwrap().facts()["resources"]["programCount"],
+        1
+    );
+    assert_eq!(cost.programs, 4);
+    assert_eq!(cost.draw_calls, 3);
+    assert_eq!(cost.triangles, 4);
+}
+
+#[test]
+fn builtin_primitive_admission_includes_output_effect_passes() {
+    let mut nodes = vec![
+        json!({"id":"background","type":"builtinScene","stateVersion":1,
+        "properties":{"sceneId":"spectrum-towers","stateVersion":1,"params":{}}}),
+    ];
+    for i in 0..36 {
+        nodes.push(
+            json!({"id":format!("particle-{i}"),"type":"particles","stateVersion":1,
+            "properties":{"count":1}}),
+        );
+    }
+    let mut data = document(json!(nodes));
+    let manifest:hertz_wallpaper::Manifest = serde_json::from_value(json!({
+        "formatVersion":1,"workId":WORK_ID,"version":1,"title":"budget",
+        "content":{"kind":"composition","document":"composition.json"},"assets":[],
+        "files":[{"path":"composition.json","bytes":1,"sha256":"a".repeat(64),"mime":"application/json"}],
+        "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
+        "license":{"code":"none","assets":"none","attribution":""}
+    })).unwrap();
+    let compile = |value: &Value| {
+        hertz_wallpaper::document::compile_document(&serde_json::to_vec(value).unwrap(), &manifest)
+            .unwrap()
+    };
+    let plain = compile(&data);
+    let plain_cost = geometry_costs(
+        &plain,
+        &plain.final_public_values(&Default::default()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plain_cost.draw_calls, 40);
+    data["effects"] = json!([{"id":"glow","type":"glow","stateVersion":1,
+        "target":{"kind":"output"},"properties":{"strength":1,"radius":8,"threshold":0.5}}]);
+    let glow = compile(&data);
+    assert_eq!(
+        geometry_costs(
+            &glow,
+            &glow.final_public_values(&Default::default()).unwrap()
+        )
+        .unwrap_err()
+        .code,
+        "budget_exceeded"
+    );
+}
+
+#[tokio::test]
+async fn aliases_of_identical_model_content_do_not_bypass_single_instance_admission() {
+    let root = tempfileish::temp_dir("composition-native-model-alias");
+    let mut second = model_node("alias", json!({}));
+    second["assets"]["asset"] = json!("alias");
+    let document = document_model(json!([model_node("mesh", json!({})), second]));
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", model_glb(), "model/gltf-binary"),
+    ];
+    let (jobs, hash, _) = install_document(
+        root.path(),
+        entries,
+        json!([
+            {"id":"model","kind":"model","source":"assets/model.glb","variants":[]},
+            {"id":"alias","kind":"model","source":"assets/model.glb","variants":[]}
+        ]),
+        json!([]),
+    )
+    .await;
+    assert_eq!(
+        selected(jobs, hash, Default::default())
+            .await
+            .unwrap_err()
+            .error
+            .code,
+        "adapter_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -3113,7 +3471,12 @@ async fn internal_mixed_closure_keeps_alias_pins_and_deduplicates_font_and_raste
     assert_eq!(cost.font_cpu_bytes, font.input().metadata.cpu_budget_bytes);
     assert_eq!(
         cost.cpu,
-        cost.decode_bytes + cost.buffer_bytes + cost.semantic_bytes + cost.font_cpu_bytes + 512
+        cost.decode_bytes
+            + cost.buffer_bytes
+            + cost.semantic_bytes
+            + cost.font_cpu_bytes
+            + 512
+            + super::super::gl_plan::THREE_DEFAULT_CPU_BYTES
     );
     assert_eq!(
         cost.gpu,
@@ -3135,9 +3498,15 @@ async fn internal_mixed_closure_keeps_alias_pins_and_deduplicates_font_and_raste
     assert_eq!(limits["drawingBufferPixels"], 64 * 64 + 128);
     assert_eq!(
         limits["ownedCpuBytes"],
-        cost.buffer_bytes + cost.font_cpu_bytes + 512
+        cost.buffer_bytes
+            + cost.font_cpu_bytes
+            + 512
+            + super::super::gl_plan::THREE_DEFAULT_CPU_BYTES
     );
-    assert_eq!(limits["textureDeclaredBytes"], cost.texture_bytes + 512);
+    assert_eq!(
+        limits["textureDeclaredBytes"],
+        cost.texture_bytes + 512 + super::super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES
+    );
     assert_eq!(limits["decodeReservedBytes"], cost.decode_bytes);
     assert_eq!(limits["programs"], 2);
     assert_eq!(
@@ -3380,7 +3749,8 @@ async fn internal_text_target_fit_and_scale_change_native_keys_and_costs() {
             gl.session.request().cpu_bytes
                 - cost.semantic_bytes
                 - cost.buffer_bytes
-                - cost.font_cpu_bytes,
+                - cost.font_cpu_bytes
+                - super::super::gl_plan::THREE_DEFAULT_CPU_BYTES,
             4 * pixels
         );
         assert_eq!(

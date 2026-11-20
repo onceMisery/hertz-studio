@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 引力星球：有明暗分界的粒子表面、菲涅尔大气、四条倾斜吸积流与两颗卫星；
 // 指针在近半球挖出引力井，点击打出表面冲击环。
@@ -107,6 +109,7 @@ export function createGravitySphere(ctx) {
     uAtmo: { value: 1 }, uColorA: { value: new T.Color(0x76e6ff) }, uColorB: { value: new T.Color(0xff76b4) },
     uColorC: { value: new T.Color(0xffd28a) }, uColorD: { value: new T.Color(0x101b3a) } };
 
+  declaredArrayPayload(ctx.scope, SURFACE * 7, 'Gravity surface attribute backing');
   const dirs = new Float32Array(SURFACE * 3), seeds = new Float32Array(SURFACE);
   for (let i = 0; i < SURFACE; i++) {
     const y = 1 - seed(i, 1) * 2, a = seed(i, 2) * TAU, r = Math.sqrt(Math.max(0, 1 - y * y));
@@ -120,12 +123,13 @@ export function createGravitySphere(ctx) {
     transparent: true, depthWrite: false, blending: T.NormalBlending })));
   surface.frustumCulled = false; world.add(surface);
 
-  const core = new T.Mesh(own(ctx, new T.SphereGeometry(2.97, 48, 32)), own(ctx, new T.MeshBasicMaterial({ color: 0x040810 })));
+  const core = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'SphereGeometry', [2.97, 48, 32])), own(ctx, new T.MeshBasicMaterial({ color: 0x040810 })));
   world.add(core);
-  const atmo = new T.Mesh(own(ctx, new T.SphereGeometry(3.24, 64, 40)), own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: atmoVertex, fragmentShader: atmoFragment,
+  const atmo = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'SphereGeometry', [3.24, 64, 40])), own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: atmoVertex, fragmentShader: atmoFragment,
     transparent: true, depthWrite: false, side: T.FrontSide, blending: T.AdditiveBlending })));
   world.add(atmo);
 
+  declaredArrayPayload(ctx.scope, RING * 7, 'Gravity ring attribute backing');
   const angles = new Float32Array(RING), radii = new Float32Array(RING), rings = new Float32Array(RING), rseeds = new Float32Array(RING);
   for (let i = 0; i < RING; i++) {
     const band = i % 20, ring = band < 14 ? 0 : band < 18 ? 1 : 2;
@@ -143,6 +147,7 @@ export function createGravitySphere(ctx) {
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   ringPoints.frustumCulled = false; world.add(ringPoints);
 
+  declaredArrayPayload(ctx.scope, 3 * 128 * 6, 'Gravity guide numeric scratch and attributes', 4, 1);
   const guidePositions = [];
   for (let ring = 0; ring < 3; ring++) {
     const b = ringBases[ring], ex = new T.Vector3(b[0], b[1], b[2]).normalize(), ey = new T.Vector3(b[3], b[4], b[5]).normalize();
@@ -218,3 +223,6 @@ export function createGravitySphere(ctx) {
     stats: () => ({ particles: surfaceGeometry.drawRange.count + ringGeometry.drawRange.count, drawCalls: 13 })
   });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createGravitySphere.resourcePlan = () => sourcePlan(16).array(SURFACE*7).array(RING*7).array(3*128*6,4,1).geometry('SphereGeometry',[2.97,48,32]).geometry('SphereGeometry',[3.24,64,40]).stars(1600).glows(4).sky().shock(6).result();

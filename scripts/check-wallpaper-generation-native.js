@@ -81,7 +81,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     assert.ok(fs.existsSync(desktopBinary));
   }
   if (ollamaFixture) {
-    providerFixture = await require('./wallpaper-ollama-fixture')();
+    providerFixture = await require('./wallpaper-ollama-fixture')({ holdResponse: true });
     fs.mkdirSync(data, { recursive: true });
     fs.writeFileSync(path.join(data, 'config.toml'), '[ai]\nprovider = "ollama"\nmodel = "test-local"\norigin = "' + providerFixture.origin + '"\n');
   }
@@ -286,8 +286,26 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     // Native dialog visibility can invalidate the first quote. Request a new
     // explicit quote before the separately confirmed Yes operation.
     await page.waitForSelector('#generation-quote:enabled');
+    let pausedPreviewPage;
+    if (ollamaFixture) {
+      await page.locator('#preview').click();
+      await until(() => page.evaluate(() => window.generationMediaPreview?.firstFrameReady), 'real builtin preview before local inference');
+      const previewBinding = await page.evaluate(() => window.generationMediaPreview.binding);
+      pausedPreviewPage = await until(async () => {
+        for (const candidate of browser.contexts().flatMap(context => context.pages())) {
+          try {
+            if (await candidate.evaluate(binding => window.hertzWallpaper?.debug?.().session?.sessionId === binding.sessionId, previewBinding)) return candidate;
+          } catch { /* unrelated native page */ }
+        }
+        return null;
+      }, 'original preview renderer identity');
+    }
     await page.locator('#generation-quote').click();
     await page.waitForSelector('#generation-confirm:enabled');
+    if (ollamaFixture) {
+      assert.equal(await page.locator('#generation-pause-dynamic').isVisible(), true);
+      assert.equal(await page.locator('#generation-pause-dynamic').isChecked(), true);
+    }
     // Delay only delivery to the page after the native operation has completed.
     await page.evaluate(() => {
       const request = hertzWallpaperSettings.requestManagement;
@@ -300,8 +318,31 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.locator('#generation-confirm').click();
     await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', probe, '-TargetPid', String(standalone ? desktopChild.pid : child.pid), '-Button', '6'], { windowsHide: true, timeout: 25000, encoding: 'utf8' });
     await page.waitForFunction(() => window.heldGenerationReceipt);
-    await page.locator('#wallpaper-generation > summary').click(); await page.evaluate(() => window.releaseGenerationReceipt());
-    await page.locator('#wallpaper-generation > summary').click();
+    if (ollamaFixture) {
+      await until(() => providerFixture.calls() === 1, 'one held local provider request');
+      const paused = await nativeStatus();
+      assert.equal(paused.generationPause.active, true);
+      assert.equal(paused.generationPause.requests.length, 1);
+      await page.waitForFunction(() => window.generationMediaPreview?.pauseReasons?.includes('aiGeneration'));
+      const frozen = await pausedPreviewPage.evaluate(() => hertzWallpaper.debug());
+      await delay(500);
+      const still = await pausedPreviewPage.evaluate(() => hertzWallpaper.debug());
+      assert.equal(still.sceneTime, frozen.sceneTime, 'real preview remains stationary while local provider is running');
+      await page.locator('#wallpaper-generation > summary').click();
+      await page.evaluate(() => window.releaseGenerationReceipt());
+      await page.locator('#wallpaper-generation > summary').click();
+      providerFixture.releaseResponse();
+      await until(async () => !(await nativeStatus()).generationPause.active, 'matching provider completion releases its presentation pause');
+      await until(async () => (await pausedPreviewPage.evaluate(() => hertzWallpaper.debug().sceneTime)) > frozen.sceneTime, 'original preview resumes after inference');
+      fs.writeFileSync(path.join(output, 'local-inference-pause.json'), JSON.stringify({ paused, frozen, still }, null, 2));
+      await page.evaluate(() => hertzWallpaperSettings.releasePreview());
+      await until(() => page.evaluate(() => !window.generationMediaPreview), 'pre-inference preview exit');
+      pass('default local inference pause freezes a real native preview and matching completion resumes it');
+    }
+    if (!ollamaFixture) {
+      await page.locator('#wallpaper-generation > summary').click(); await page.evaluate(() => window.releaseGenerationReceipt());
+      await page.locator('#wallpaper-generation > summary').click();
+    }
     await until(async () => {
       const current = await nativeStatus();
       if (current.job && ['failed', 'cancelled', 'interrupted'].includes(current.job.state))
@@ -484,7 +525,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.locator('#tab-wallpaper').click(); await until(() => polling > paused, 'polling resumes'); pass('hidden settings tab stops polling and visible tab resumes');
     await page.locator('#wallpaper-generation > summary').click();
     await nativeStatus();
-    if (externalChecks) await externalChecks.run(saved);
+    if (externalChecks) await externalChecks.run({ ...saved, title: savedTitle });
     assert.equal((await native('disconnect')).ok, true);
     assert.equal((await nativeStatus()).connected, false);
     assert.ok((await api('/v1/ai/grants')).grants.every(row => row.delivery_mode !== 'native_session' || row.revoked));

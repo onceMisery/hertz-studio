@@ -325,6 +325,37 @@ async function checkPublicProperties(page) {
  await page.evaluate(value=>hertzWallpaperSettings.applyStatus(value),newProfile);await releaseProperty();await page.waitForFunction(()=>propertyPending===0);
  assert.equal(await page.locator('#public-properties').isVisible(),false);assert.equal(await page.locator('.public-property').count(),0);assert.equal(await page.evaluate(()=>propertyMaxPending),1);
  checks.push('conflicting external revisions retain edited values with Apply disabled; Discard adopts saved overrides; previous-profile responses cannot restore controls after source replacement');
+
+ const mirrorValue=structuredClone(single);
+ mirrorValue.capabilities={...mirrorValue.capabilities,mirrorInspection:true,mirrorPackages:false};
+ mirrorValue.config.groups[0].mode='mirror';
+ mirrorValue.config.groups[0].displays=[{kind:'fixed',displayId:'screen-a'},{kind:'fixed',displayId:'screen-b'}];
+ mirrorValue.config.groups[0].selection={kind:'package',workKey:'composition-ranges',packageHash:'c'.repeat(64)};
+ mirrorValue.config.groups[0].properties={range:1500};
+ const rangeSchema=[{id:'range',label:'视频范围',type:'number',default:1500,constraints:{min:1,max:2000},target:{kind:'node',nodeId:'b',property:'loopEndMs',component:null}}];
+ await reset(mirrorValue,{propertySchemas:{'composition-ranges':rangeSchema}});await waitReady(1);
+ const mirrorOption=()=>page.locator('[data-focus-key=mode] option[value=mirror]');
+ await page.waitForFunction(()=>!document.querySelector('[data-focus-key=mode] option[value=mirror]').disabled);
+ await page.evaluate(()=>{gateCommand='wallpaper.layout.inspect';window.dispatchEvent(new Event('wallpaper-layout-invalidated'));});
+ await page.waitForFunction(()=>!!gates['wallpaper.layout.inspect']);
+ await input('range').fill('1000');
+ assert.equal(await mirrorOption().evaluate(node=>node.disabled),true);
+ await page.evaluate(()=>{gateCommand='wallpaper.layout.inspect';const reply=gates['wallpaper.layout.inspect'];delete gates['wallpaper.layout.inspect'];reply();});
+ await page.waitForFunction(()=>!!gates['wallpaper.layout.inspect']&&requests.filter(r=>r.command==='wallpaper.layout.inspect').at(-1).payload.properties.range===1000);
+ assert.equal(await mirrorOption().evaluate(node=>node.disabled),true,'late eligibility for previous public values cannot enable mirror');
+ assert.equal(await page.locator('#apply').isDisabled(),true);
+ await page.evaluate(()=>{const reply=gates['wallpaper.layout.inspect'];delete gates['wallpaper.layout.inspect'];reply();});
+ await page.waitForFunction(()=>layoutPending===0);
+ assert.equal(await mirrorOption().evaluate(node=>node.disabled),true,'different ranges need two decoders per member');
+ await input('range').fill('1500');
+ await page.waitForFunction(()=>layoutPending===0&&!document.querySelector('[data-focus-key=mode] option[value=mirror]').disabled);
+ assert.equal(await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.layout.inspect').at(-1).payload.properties.range),1500);
+ const inspectedCount=await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.layout.inspect').length);
+ await input('range').fill('1000');assert.equal(await mirrorOption().evaluate(node=>node.disabled),true);
+ await input('range').fill('1500');assert.equal(await mirrorOption().evaluate(node=>node.disabled),false);
+ assert.equal(await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.layout.inspect').length),inspectedCount,'cache is keyed by exact typed public values');
+ assert.equal(await page.evaluate(()=>layoutMaxPending),1);
+ checks.push('mirror inspection sends typed public values, fences late replies after range edits, rejects split decoders and re-enables merged ranges using value-specific cache entries');
 }
 (async()=>{
  fs.mkdirSync(output,{recursive:true});
@@ -351,7 +382,8 @@ async function checkPublicProperties(page) {
      if(layoutPendingReplies>0){layoutPendingReplies--;queueMicrotask(()=>hertzWallpaperSettings.applyManagement({protocol:2,requestId:req.requestId,ok:true,result:{pending:true}}));return;}
      if(layoutFailures>0){layoutFailures--;queueMicrotask(()=>hertzWallpaperSettings.applyManagement({protocol:2,requestId:req.requestId,ok:false,error:{code:'query_timeout',message:'检查超时'}}));return;}
      const selection=req.payload.selection,integrated=['builtin','followHertz'].includes(selection.kind),video=selection.kind==='package'&&selection.workKey.startsWith('video');
-     const maxMembers=video?2:4,mirrorEligible=!integrated&&!layoutDenied&&req.payload.members<=maxMembers;
+     const composition=selection.kind==='package'&&selection.workKey==='composition-ranges';
+     const maxMembers=composition?(req.payload.properties?.range===1500?2:1):video?2:4,mirrorEligible=!integrated&&!layoutDenied&&req.payload.members<=maxMembers;
      result={layouts:mirrorEligible?['single','span','mirror']:['single','span'],mirrorEligible,maxMembers,...(!mirrorEligible?{reason:integrated?'内置场景仅支持单屏或跨屏':layoutDenied?'列表中有尚未就绪的版本':'视频镜像最多支持 2 个显示器'}:{})};
     }
     if(req.command==='wallpaper.capabilities')result=capabilities;

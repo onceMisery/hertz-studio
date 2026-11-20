@@ -22,10 +22,12 @@ async function main() {
     module: { exports: {} }, console,
     StanzaUtil: util, StanzaSonnetFx: effects,
     document: { createElement: element },
-    Stage: { kick() {} },
+    Stage: { kick() {}, resources: () => ({port: () => ({contractVersion:1})}) },
     StanzaSonnet: {
+      releaseFrame() {}, finishFrame() {},
       buildFrame: () => ({ reduced: false }),
       loadPixi: async () => ({
+        HertzResourceAdmission: {create: () => ({run: fn => fn(), cancel() {}, retire() {}})},
         Application: class {
           constructor() { applications += 1; }
           init() { return ready; }

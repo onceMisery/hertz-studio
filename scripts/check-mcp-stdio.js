@@ -28,8 +28,7 @@ const BIN = process.env.HERTZ_BIN
 const PROTOCOL_VERSION = '2025-11-25';
 
 function fail(message) {
-  console.error(`✗ ${message}`);
-  process.exit(1);
+  throw new Error(message);
 }
 
 if (!fs.existsSync(BIN)) {
@@ -127,6 +126,7 @@ class McpClient {
 async function main() {
   console.log(`data dir: ${dataDir}`);
   const server = spawn(BIN, ['--data-dir', dataDir, '--port', '0'], { stdio: 'ignore' });
+  let adapter;
   server.on('exit', (code) => {
     if (code !== 0 && code !== null) fail(`独立服务异常退出（${code}）`);
   });
@@ -161,7 +161,7 @@ async function main() {
     if (enabled.status !== 200) fail('开启舞台契约工具失败');
 
     // 起适配器（真协议客户端这边的「被测服务」）。
-    const adapter = spawn(
+    adapter = spawn(
       BIN,
       ['--mcp-stdio', '--data-dir', dataDir, '--grant', created.body.grant_id],
       { stdio: ['pipe', 'pipe', 'pipe'] }
@@ -231,7 +231,7 @@ async function main() {
     const stage = await client.request('tools/call', {
       name: 'stage_capabilities_get', arguments: { limit: 2 },
     });
-    if (stage.result.isError) fail('stage_capabilities_get 失败');
+    if (stage.result.isError) fail('stage_capabilities_get 失败：' + JSON.stringify(stage.result.structuredContent || stage.result.content));
     const contract = stage.result.structuredContent;
     if (contract.scenes.length !== 2 || contract.nextOffset !== 2) fail('契约分页不一致');
     const scene = contract.scenes[0].id;
@@ -260,6 +260,7 @@ async function main() {
     adapter.kill();
     console.log('✓ MCP stdio 端到端检查全部通过');
   } finally {
+    if (adapter) adapter.kill();
     server.kill();
     await sleep(200);
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -267,5 +268,5 @@ async function main() {
 }
 
 main().catch((error) => {
-  fail(error.message);
+  console.error('✗ ' + error.message); process.exitCode = 1;
 });

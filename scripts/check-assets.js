@@ -55,7 +55,7 @@ entries.forEach(e => {
   const sourceRoot = e.packaged.startsWith('splash/') ? path.join(ROOT, 'splash') : WEB;
   ok(path.resolve(e.file).startsWith(path.resolve(sourceRoot) + path.sep), `${e.path} 来自声明的 UI 来源`);
   ok(e.path === '/' + e.packaged, `${e.path} 与打包路径相同`);
-  ok(e.path.endsWith({ JS: '.js', CSS: '.css', HTML: '.html' }[e.mime]), `${e.path} 的 MIME 正确`);
+  ok(e.path.endsWith({ JS: '.js', CSS: '.css', HTML: '.html', JSON: '.json', WASM: '.wasm' }[e.mime]), `${e.path} 的 MIME 正确`);
 });
 console.log('\n目录消费');
 ok(/\.merge\(ui_asset_router\(\)\)/.test(mainRs), '主路由挂载资源目录');
@@ -98,8 +98,12 @@ const linkedJsSource = linkedJs
 includes.forEach((inc) => {
   if (STANDALONE_PAGES.has(inc.name)) return;
   const href = inc.href;
+  const deferredStageAsset = href.startsWith('vendor/stage-assets/')
+    && linkedJs.includes('vendor/stage-runtime.js')
+    && linkedJsSource.includes('stage-assets/')
+    && linkedJsSource.includes(href.slice('vendor/stage-assets/'.length));
   ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`)
-    || linkedJsSource.includes(`'/${href}'`),
+    || linkedJsSource.includes(`'/${href}'`) || deferredStageAsset,
     `${inc.name}（${href}）被 index.html 引用`);
 });
 
@@ -113,6 +117,9 @@ const REQUIRE_BEFORE = [
   ['room-workspace.js', 'room.js'],
   ['room-view.js', 'room.js'],
   ['room.js', 'app.js'],
+  ['stage.js', 'stage-scene-host.js'],
+  ['stage-scene-host.js', 'stage-coast.js'],
+  ['stage-scene-host.js', 'stage-zodiac.js'],
   ['vendor/stage-runtime.js', 'vendor/coast-stage.js'],
   ['vendor/stage-runtime.js', 'vendor/zodiac-stage.js'],
   ['vendor/stage-runtime.js', 'vendor/space-stage.js'],

@@ -318,6 +318,12 @@
     const receipt = await request('wallpaper.draft.create', { kind: 'work', workKey: work.workKey, packageHash: version.packageHash });
     await show(receipt); await refreshDrafts(); open.value = receipt.draftId;
   }); }
+  function forkVersion(work, version) { return exclusive(async () => {
+    await flushCurrent();
+    const receipt = await request('wallpaper.draft.create', { kind: 'fork', workKey: work.workKey, packageHash: version.packageHash });
+    await show(receipt); await refreshDrafts(); open.value = receipt.draftId;
+    message('已创建独立的新作品草稿，来源署名与许可会保留。保存并生成版本后可选择或导出；原作品保持不变。', false);
+  }).then(() => { title.focus(); section.scrollIntoView({ block: 'nearest' }); }); }
   function publish() { return exclusive(async () => {
     await flushCurrent(); if (!draft) return;
     const result = await serial(() => request('wallpaper.draft.publish', ref()));
@@ -339,5 +345,5 @@
   section.addEventListener('toggle', () => { if (section.open && !busy) refresh().catch(error => message(error.message, true)); });
   window.addEventListener('pagehide', () => clearTimeout(timer));
   async function openDraft(id) { await load(id); if (draft?.draftId === id) { title.focus(); section.scrollIntoView({ block: 'nearest' }); } }
-  window.hertzWallpaperWork = { flush, openVersion, openDraft };
+  window.hertzWallpaperWork = { flush, openVersion, forkVersion, openDraft };
 })();

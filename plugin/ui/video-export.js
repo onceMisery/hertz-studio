@@ -44,6 +44,11 @@ window.VideoExport = (function () {
   // Real-time recording is buffered by the browser, so stop before it can grow
   // without bound. These limits are recording limits, not output-file promises.
   var MAX_BYTES = 256 * 1024 * 1024;
+  // Chunks and their final Blob coexist. Bound that pair to 64 MiB of work,
+  // leaving the other half of the candidate 128 MiB page cap for stage owners.
+  // This is an application input limit, not a measured device/encoder capacity.
+  var RECORDING_BYTES = 32 * 1024 * 1024;
+  var MIN_RECORDING_BYTES = 8 * 1024 * 1024;
   var MAX_DURATION_MS = 10 * 60 * 1000;
   var AUDIO_BITS_PER_SECOND = 320000;
   // folia 的码率阶梯：像素越多给得越足，避免高分辨率糊成一团。
@@ -291,7 +296,7 @@ window.VideoExport = (function () {
           '  <div class="vex-row"><label for="vex-audio">系统声音</label>',
           '    <span class="vex-audio"><input id="vex-audio" type="checkbox" checked>',
           '    <span class="vex-hint">录制开始时会请求「共享屏幕」——选择整个屏幕并勾选「共享系统音频」；取消授权则只录画面。</span></span></div>',
-          '  <p class="vex-note">支持沉浸声场和高级编排的三维画布，按目标画幅居中裁切；外部背景、页面与 DOM 歌词特效不进入文件，歌词按当前行/下一行另行合成。系统音轨可能包含其它应用声音；实际有无音轨会在开始后显示。离开前台、共享结束或发生异常时停止并尝试保留已有片段。最长 10 分钟，缓冲达到 256 MiB 时停止。新录制会替换上轮文件缓存；下载后请确认文件已保存。</p>',
+          '  <p class="vex-note">支持沉浸声场和高级编排的三维画布，按目标画幅居中裁切；外部背景、页面与 DOM 歌词特效不进入文件，歌词按当前行/下一行另行合成。系统音轨可能包含其它应用声音；实际有无音轨会在开始后显示。离开前台、共享结束或发生异常时停止并尝试保留已有片段。最长 10 分钟，或先达到本次缓冲上限时停止；当前最多 32 MiB，可用容量较少时会下调，开始后显示实际限制，不保证录满 10 分钟。新录制会替换上轮文件缓存；下载后请确认文件已保存。</p>',
           '  <div class="vex-actions"><button type="button" class="btn" data-vex="cancel">取消</button>',
           '    <button type="button" class="btn vex-primary" data-vex="start">开始录制</button></div>'
         ].join('')
@@ -336,6 +341,7 @@ window.VideoExport = (function () {
         + (pending ? '正在准备…' : stopping ? '正在生成文件…' : '正在录制…')
         + ' <span class="vex-elapsed" id="vex-elapsed">0:00</span></p>',
       '  <p class="vex-note">' + esc(audioLabel(s)) + '</p>',
+      '  <p class="vex-note">本次缓冲上限 ' + (s.maxBytes / (1024 * 1024)) + ' MiB；最长 10 分钟，任一先到即停止。</p>',
       s.mimeType ? '<p class="vex-note">' + esc(s.mimeType + ' · ' + s.preset.width + ' × ' + s.preset.height) + '</p>' : '',
       '  <div class="vex-actions"><button type="button" class="btn vex-primary" data-vex="stop"'
         + (stopping ? ' disabled' : '') + '>' + (pending ? '取消准备' : '停止并保存') + '</button></div>'
@@ -403,6 +409,38 @@ window.VideoExport = (function () {
     var ticket = s.resources.require(plan, source, 0, precision);
     s.allocations.add(ticket); return ticket;
   }
+  function prepareRecording(s, ledger) {
+    var snapshot = ledger.snapshot(), MiB = 1024 * 1024;
+    var pixels = s.preset.width * s.preset.height;
+    var available = snapshot.caps.ownedCpuBytes - snapshot.held.ownedCpuBytes - pixels * 4;
+    s.maxBytes = Math.min(MAX_BYTES, RECORDING_BYTES, Math.floor(available / (2 * MiB)) * MiB);
+    if (s.maxBytes < MIN_RECORDING_BYTES) {
+      throw new Error('可用录制容量不足 8 MiB，请停止其它录制或释放页面资源后重试。');
+    }
+    // Synchronous admission precedes permission and capture. Reserve the final
+    // Blob now as well, so unrelated page allocations cannot steal save space.
+    try {
+      s.chunkTicket = allocation(s, { ownedCpuBytes:s.maxBytes }, 'VideoExport bounded recorder chunk envelope');
+      s.resultTicket = allocation(s, { ownedCpuBytes:s.maxBytes }, 'VideoExport final encoded Blob envelope');
+      s.outputTicket = allocation(s, { canvases:1,drawingBufferPixels:pixels,ownedCpuBytes:pixels * 4 },
+        'VideoExport RGBA8 composition canvas');
+    } catch (error) {
+      s.allocations.forEach(releaseTicket); s.allocations.clear();
+      throw error;
+    }
+  }
+  function preflightCapture(s, sourceCanvas) {
+    var sourcePixels = sourceCanvas ? sourceCanvas.width * sourceCanvas.height : 0;
+    if (!Number.isSafeInteger(sourcePixels) || sourcePixels < 0) throw new Error('estimate-unavailable');
+    var checked = s.resources.preflight({ decoderLeases:sourceCanvas ? 2 : 1,
+      decodeReservedBytes:(sourcePixels + s.preset.width * s.preset.height) * 4 * 6 }, []);
+    if (!checked.ok) {
+      var error = new Error(checked.reason === 'aggregate-budget'
+        ? '当前画幅和舞台尺寸所需的录制资源不足，请缩小舞台窗口或选择 720p 后重试。'
+        : checked.reason);
+      error.resourceFailure = checked; throw error;
+    }
+  }
   function retireAllocations(s) {
     if (!s.cleaned || s.asyncAllocations || s.nativePending || s.cleanupFailed) return;
     try { if (s.sourceLease) { s.sourceLease.release(); s.sourceLease = null; } }
@@ -421,11 +459,12 @@ window.VideoExport = (function () {
   function retainedResult(s, result) {
     // Blob composition is charged as a distinct retained source. Its physical
     // sharing with recorder chunks is an independent browser observation.
-    var ticket = s.resources.require({ ownedCpuBytes: s.bytes }, 'VideoExport retained encoded Blob output', 0);
+    var ticket = s.resultTicket;
     try {
       var blob = new Blob(s.chunks, { type:s.mimeType.split(';')[0] });
       var committed = ticket.commit({ ownedCpuBytes: blob.size });
       if (!committed.ok) throw new Error('contract-violation');
+      s.allocations.delete(ticket); s.resultTicket = null;
       result.blob = blob; result.bytes = blob.size;
       var consumers = 1;
       function release() { if (consumers && !--consumers) { result.blob = null; blob = null; releaseTicket(ticket); } }
@@ -486,7 +525,7 @@ window.VideoExport = (function () {
   function finish(s, save, reason) {
     if (s.finished) return;
     s.finished = true; s.cancelWait();
-    var result = { audioMode:s.audioMode, mimeType:s.mimeType || '', bytes:0, filename:'', failed: !!s.failed,
+    var result = { audioMode:s.audioMode, mimeType:s.mimeType || '', bytes:0, maxBytes:s.maxBytes, filename:'', failed: !!s.failed,
       downloadRequested:false, message:reason || s.reason || '已停止。' };
     try {
       if (save && s.chunks.length) {
@@ -552,9 +591,11 @@ window.VideoExport = (function () {
       control:new AbortController(),audioMode:opts.systemAudio ? 'pending' : 'silent',audioReason:'未请求系统声音'};
     s.done = new Promise(function (resolve) { s.resolve = resolve; });
     s.cancelled = new Promise(function (resolve) { s.cancelWait = resolve; });
-    // Reserve the original recording maximum before replacing the previous
-    // result, requesting permissions or starting an encoder.
-    s.chunkTicket = allocation(s, { ownedCpuBytes:MAX_BYTES }, 'VideoExport original256MiB recorder chunk envelope');
+    // A currently presented source can be rejected before invoking a permission
+    // prompt. Recheck after stage setup because that source may have changed.
+    var presented = window.Stage3D && Stage3D.recordingSurface ? Stage3D.recordingSurface() : null;
+    preflightCapture(s, presented && presented.canvas);
+    prepareRecording(s, ledger);
     session = s; recording = true;
     try {
       revokeDownload(); releaseResult(lastResult); lastResult = null;
@@ -590,12 +631,20 @@ window.VideoExport = (function () {
       var srcCanvas = surface && surface.canvas;
       if (!srcCanvas) throw new Error('当前舞台没有可录制的三维画布，请选择沉浸声场或高级编排的三维场景');
       if (!surface.acquire) throw new Error('当前舞台尚未提供录制资源计划，请选择高级编排的三维场景');
-      s.sourceLease = surface.acquire();
+      s.sourceLease = surface.acquire({ onInvalidated:function (reason) {
+        // A timed-out encoder can still hold its old source after a new session
+        // starts. Its owner may revoke that lease's presentation, never the new one.
+        if (session === s && !s.finished) stop(reason);
+      } });
       if (s.sourceLease.canvas !== srcCanvas) throw new Error('recording-source-unavailable');
       var sourcePixels = srcCanvas.width * srcCanvas.height;
       if (!Number.isSafeInteger(sourcePixels) || sourcePixels <= 0) throw new Error('estimate-unavailable');
+      preflightCapture(s, srcCanvas);
       var decodeTicket = allocation(s, { decoderLeases:1,decodeReservedBytes:sourcePixels * 4 * 6 },
         'VideoExport captured source decoder six-frame workspace', 'bounded-estimate');
+      var outputPixels = preset.width * preset.height;
+      var encoderTicket = allocation(s, { decoderLeases:1,decodeReservedBytes:outputPixels * 4 * 6 },
+        'VideoExport native encoder six-frame workspace', 'bounded-estimate');
       var lost = function () { s.failed = true; stop('舞台图形上下文中断，尝试保留此前片段。'); };
       srcCanvas.addEventListener('webglcontextlost',lost);
       s.dispose.push(function () { srcCanvas.removeEventListener('webglcontextlost',lost); });
@@ -631,9 +680,7 @@ window.VideoExport = (function () {
       // lifetime until cleanup: stopping it early can also end the audio capture.
 
       // 4. 合成画布：cover 重采样到目标画幅 + 自绘歌词层。
-      var outputPixels = preset.width * preset.height;
-      var outputTicket = allocation(s, { canvases:1,drawingBufferPixels:outputPixels,ownedCpuBytes:outputPixels * 4 },
-        'VideoExport RGBA8 composition canvas');
+      var outputTicket = s.outputTicket;
       var out = document.createElement('canvas');
       s.out = out;
       out.width = preset.width;
@@ -751,8 +798,6 @@ window.VideoExport = (function () {
         audioTracks.forEach(function (t) { outStream.addTrack(t); });
       var fmt = pickFormat(opts.format);
       if (!fmt) throw new Error('浏览器没有可用的视频编码格式');
-      var encoderTicket = allocation(s, { decoderLeases:1,decodeReservedBytes:outputPixels * 4 * 6 },
-        'VideoExport native encoder six-frame workspace', 'bounded-estimate');
       var recorder = new MediaRecorder(outStream, {
           mimeType: fmt.mimeType,
           audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
@@ -775,13 +820,13 @@ window.VideoExport = (function () {
       });
       recorder.ondataavailable = function (e) {
         if (s.finished || session !== s || !e.data || !e.data.size) return;
-        if (s.bytes + e.data.size <= MAX_BYTES) {
+        if (s.bytes + e.data.size <= s.maxBytes) {
           var charged = s.chunkTicket.materialize({ ownedCpuBytes:e.data.size });
           if (!charged.ok) { s.failed = true; stop('录制数据超过资源计划，尝试保存此前片段。'); return; }
           s.chunks.push(e.data); s.bytes += e.data.size;
         }
-        else s.reason = '录制缓冲已满，尝试保存此前片段，文件可能不完整。';
-        if (s.bytes >= MAX_BYTES || s.reason) stop(s.reason || '达到录制大小限制。');
+        else s.reason = '录制缓冲已满（本次上限 ' + (s.maxBytes / (1024 * 1024)) + ' MiB），尝试保存此前片段，文件可能不完整。';
+        if (s.bytes >= s.maxBytes || s.reason) stop(s.reason || '达到本次录制大小限制（' + (s.maxBytes / (1024 * 1024)) + ' MiB），保存此前片段。');
       };
       recorder.onerror = function () { s.failed = true; stop('录制器发生异常，尝试保存此前片段，文件可能不完整。'); };
       recorder.onstop = function () {
@@ -862,9 +907,9 @@ window.VideoExport = (function () {
   window.addEventListener('pagehide',function () { if (session) stop('页面已关闭，尝试保留此前片段。'); revokeDownload(); releaseResult(lastResult); });
 
   return { supported:supported,open:open,close:close,begin:begin,stop:stop,isRecording:function () { return !!session; },
-    status:function () { return session ? {phase:session.phase,audioMode:session.audioMode,mimeType:session.mimeType || '',bytes:session.bytes,retiring:retiringSessions.size}
+    status:function () { return session ? {phase:session.phase,audioMode:session.audioMode,mimeType:session.mimeType || '',bytes:session.bytes,maxBytes:session.maxBytes,retiring:retiringSessions.size}
       : {phase:'idle',audioMode:lastResult && lastResult.audioMode || null,mimeType:lastResult && lastResult.mimeType || '',
         retiring:retiringSessions.size,
-        bytes:lastResult && lastResult.bytes || 0,downloadRequested:!!(lastResult && lastResult.downloadRequested),
+        bytes:lastResult && lastResult.bytes || 0,maxBytes:lastResult && lastResult.maxBytes || 0,downloadRequested:!!(lastResult && lastResult.downloadRequested),
         failed:!!(lastResult && lastResult.failed),message:lastResult && lastResult.message || ''}; } };
 })();

@@ -99,6 +99,9 @@ async function main() {
 
     // Real adapters share this lifecycle contract. Exercise an actual lost
     // context through the bounded rebuild path, then quality downgrade/remount.
+    for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'stage-image-source.js', 'stage.js', 'onset.js', 'stage-scene-host.js'])
+      await page.addScriptTag({ path: path.join(root, 'plugin/ui', file) });
+    await page.evaluate(() => { Stage.init(); Stage.tier = () => 0; document.body.classList.add('stage-lowfx'); });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/stage-coast.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/zodiac-stage.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/stage-zodiac.js') });
@@ -118,7 +121,7 @@ async function main() {
         return snapshot;
       }, name);
       await page.waitForFunction(name => !!window['Stage' + name].degradedBecause(), name, { polling: 20 });
-      await page.waitForFunction(name => !window['Stage' + name].degradedBecause(), name, { polling: 20, timeout: 6000 });
+      await page.evaluate(name => window['Stage' + name].retry(), name);
       const restored = await page.evaluate(name => {
         __step(); __step();
         const engine = window[name + 'StagePure'];
@@ -145,10 +148,10 @@ async function main() {
       near(restored.downgraded.position, before.position, name + ' quality rebuild preserves position');
       assert.equal(restored.downgraded.fov, 48, name + ' quality rebuild preserves FOV');
       assert.equal(restored.count, 1, name + ' rebuild leaves one canvas');
-      assert.equal(restored.loops, 2, name + ' retains only the existing engine and adapter loops');
+      assert.ok(restored.loops <= 1, name + ' uses only the Stage scheduler');
       assert.equal(restored.freshControlled, false, name + ' fresh Stage3D mount releases camera');
       assert.equal(restored.freshInteractive, true, name + ' Stage3D can restore pointer preference');
-      assert.equal(restored.pendingAfterUnmount, 0, name + ' unmount cancels both loops');
+      assert.ok(restored.pendingAfterUnmount <= 1, name + ' leaves only Stage scheduler');
       result.adapters[name] = restored;
     }
     assert.deepEqual(errors, [], 'no browser errors');

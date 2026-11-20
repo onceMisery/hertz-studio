@@ -1516,3 +1516,19 @@ html[data-skin="hertz"] #stage3d #s3d-close:focus-visible { outline: 2px solid v
 @media (prefers-reduced-motion: reduce) {
   html[data-skin="hertz"] #stage3d .s3d-head #s3d-close { transition: none; }
 }
+.stage-scene-resource-status {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  z-index: 12;
+  width: min(90%, 32rem);
+  padding: 1rem;
+  border: 1px solid currentColor;
+  border-radius: .5rem;
+  color: var(--text, #eee);
+  background: var(--bg, #16181b);
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+.stage-scene-resource-status button { flex-shrink: 0; padding: .4rem .7rem; }

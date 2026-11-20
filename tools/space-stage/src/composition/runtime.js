@@ -3,7 +3,7 @@ import { buildNode, createModelAnimation, loadResource, loadTextRaster, updateNo
 import { loadModelResource } from './model-node.js';
 import { createScope } from '../scope.js';
 import { createBackground, createInputSampler } from './builtin.js';
-import { evaluateBinding, evaluateTrack } from './animation.js';
+import { evaluateBinding, evaluateTrack, timelineWorkspaceBytes } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const modelConstructionBytes = facts => facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2
   + (facts.resources.animationCpuBytes || 0) + (facts.resources.skinCpuBytes || 0);
@@ -66,6 +66,12 @@ function reserveAll(context, scope, plan, generation) {
     const outputPlan = scope.bufferPlan(92,92,'Composition final output quad');
     const inputTicket = plan.builtin ? require({ownedCpuBytes:plan.builtin.clock.inputBytes},'Composition pending/committed input arrays') : null;
     if(inputTicket)unclaimedPrivate.add(inputTicket);
+    const timelineBytes = timelineWorkspaceBytes(plan.ir);
+    const timelineTicket = timelineBytes ? require({ownedCpuBytes:timelineBytes},'Composition numeric timeline workspace') : null;
+    if (timelineTicket) {
+      timelineTicket.commit();
+      scope.defer(() => timelineTicket.release({apiReleased:true,allocationEnded:true}));
+    }
     for (const spec of plan.nodePlans) {
       if (spec.node.nodeType === 'builtinScene') {
         for(const buffer of plan.builtin.profile.sourceResources.buffers)
@@ -114,7 +120,7 @@ function reserveAll(context, scope, plan, generation) {
       for (const ticket of programTickets) ticket?.release({apiReleased:true,allocationEnded:true});
       for (const ticket of unclaimedPrivate) ticket.release({apiReleased:true,allocationEnded:true});
     });
-    return { sources, unclaimed, unclaimedPrivate, targetTicket, glowTicket, inputTicket, outputPlan, programTickets, nodeScopes };
+    return { sources, unclaimed, unclaimedPrivate, targetTicket, glowTicket, inputTicket, timelineTicket, outputPlan, programTickets, nodeScopes };
   } catch (error) {
     nodeScopes.forEach(nodeScope=>nodeScope.dispose());
     for (const ticket of reserved) ticket.release({apiReleased:true,allocationEnded:true});
@@ -124,7 +130,8 @@ function reserveAll(context, scope, plan, generation) {
 export async function createCompositionRuntime(THREE, context, scope, plan, options = {}) {
   const signal = scope.signal, generation = options.generation, leases = new Map(), values = new Map();
   let disposed = false, target = null, targetTicket = null, glowA = null, glowB = null, sceneTime = 0, frameReady = false, outputDirty=true;
-  let timelineBase = null, bindingStacks = [], inputValues = null;
+  let timelineBase = null, timelinePrevious = null, timelineSlots = null, timelineMasks = null;
+  let bindingStacks = [], inputValues = null;
   let bindingErrors = 0;
   let updateGeneration=0, pendingController=null, visualTime=null, mediaShouldPlay=false;
   const dirty=new Uint32Array(plan.ir.nodes.length), localDirty=new Uint8Array(plan.ir.nodes.length), worldDirty=new Uint8Array(plan.ir.nodes.length);
@@ -243,6 +250,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   outputScene.add(new THREE.Mesh(outputGeometry, outputMaterial));
   const clearColor = new THREE.Color(plan.projection.canvas.background), viewport = new THREE.Vector2(), canvasClip=new THREE.Vector4();
   const savedScissor=new THREE.Vector4(), savedClear=new THREE.Color();
+  const transformPosition=new THREE.Vector3(), transformScale=new THREE.Vector3();
+  const transformRotation=new THREE.Euler(), transformQuaternion=new THREE.Quaternion();
   let videos = [...values.values()].filter(value => value.video);
   function pause() { for (const value of videos) value.video.pause(); }
   scope.listen(document, 'visibilitychange', () => { if (document.hidden) pause(); });
@@ -258,7 +267,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         for(const material of node.modelMaterials){
           const base=material.userData.modelBaseOpacity??1,next=base*node.opacity;
           if(material.opacity!==next)material.opacity=next;
-          const transparent=next<1||!!material.userData.modelAuthoredTransparent;
+          const transparent=spec.dynamicOpacity||next<1||!!material.userData.modelAuthoredTransparent;
           if(material.transparent!==transparent){material.transparent=transparent;material.needsUpdate=true;}
           const depthWrite=next<1?false:material.userData.modelAuthoredDepthWrite!==false;
           if(material.depthWrite!==depthWrite)material.depthWrite=depthWrite;
@@ -266,15 +275,19 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       }
       work.materialUpdates[spec.index]++;
     }
-    if (!changeLocal) return;
+    if (node.model) {
+      node.animationWeight = n('animationWeight');
+      node.animationSpeed = n('animationSpeed');
+    }
+    if (!changeLocal || !(mask & (MATRIX|LAYOUT))) return;
     if (spec.node.space === '3d') {
-      const vector = name => spec.node.propertySlots[name].map(slot => plan.values.numeric[slot]);
-      const position = vector('position'), rotation = vector('rotation'), scale = vector('scale');
-      const euler = new THREE.Euler(rotation[0] * Math.PI / 180, rotation[1] * Math.PI / 180,
-        rotation[2] * Math.PI / 180, 'XYZ');
+      const slots = spec.node.propertySlots, numeric = plan.values.numeric;
+      transformPosition.set(numeric[slots.position[0]], numeric[slots.position[1]], numeric[slots.position[2]]);
+      transformScale.set(numeric[slots.scale[0]], numeric[slots.scale[1]], numeric[slots.scale[2]]);
+      transformRotation.set(numeric[slots.rotation[0]] * Math.PI / 180,
+        numeric[slots.rotation[1]] * Math.PI / 180, numeric[slots.rotation[2]] * Math.PI / 180, 'XYZ');
       node.object.matrixAutoUpdate = false;
-      node.object.matrix.compose(new THREE.Vector3(position[0], position[1], position[2]),
-        new THREE.Quaternion().setFromEuler(euler), new THREE.Vector3(scale[0], scale[1], scale[2]));
+      node.object.matrix.compose(transformPosition, transformQuaternion.setFromEuler(transformRotation), transformScale);
       node.object.matrixWorldNeedsUpdate = true;
       work.matrixUpdates[spec.index]++;
       return;
@@ -308,9 +321,19 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   plan.ir.painterOrder.forEach(index => applyNode(nodes[index]));
   function refreshTimeline() {
     const animated = plan.ir.tracks.length || plan.ir.bindings.length;
-    timelineBase = animated ? Float64Array.from(plan.values.numeric) : null;
-    bindingStacks = plan.ir.bindings.map(binding => new Float64Array(binding.maxStack + 1));
-    inputValues = new Float64Array(plan.ir.inputs.length);
+    if (!animated) return;
+    timelineBase ||= new Float64Array(plan.values.numeric.length);
+    timelineBase.set(plan.values.numeric);
+    timelinePrevious ||= new Float64Array(plan.values.numeric.length);
+    timelinePrevious.fill(NaN);
+    timelineSlots ||= new Uint8Array(plan.values.numeric.length);
+    timelineMasks ||= new Uint32Array(nodes.length);
+    if (animated) {
+      for (const track of plan.ir.tracks) timelineSlots[track.targetSlot] = 1;
+      for (const binding of plan.ir.bindings) timelineSlots[binding.targetSlot] = 1;
+    }
+    if (!bindingStacks.length) bindingStacks = plan.ir.bindings.map(binding => new Float64Array(binding.maxStack + 1));
+    inputValues ||= new Float64Array(plan.ir.inputs.length);
   }
   function inputAt(name, frame, time) {
     if (name.startsWith('spectrum')) {
@@ -330,11 +353,11 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     return Number.isFinite(value) ? value : 0;
   }
   function applyTimeline(time, frame) {
-    const numeric = plan.values.numeric, changed = [];
+    const numeric = plan.values.numeric;
+    numeric.set(timelineBase);
+    timelineMasks.fill(0);
     for (const track of plan.ir.tracks) {
       numeric[track.targetSlot] = evaluateTrack(track.keys, time);
-      // Always re-apply: the previous frame may hold a different sampled value.
-      changed.push(track.targetSlot);
     }
     if (plan.ir.bindings.length) {
       for (let index = 0; index < plan.ir.inputs.length; index++) {
@@ -348,13 +371,30 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
           : binding.mode === 'multiply' ? current * value : value;
         if (!Number.isFinite(next)) continue;
         numeric[binding.targetSlot] = next;
-        changed.push(binding.targetSlot);
       }
     }
-    for (const slot of changed) {
+    // Public values own the last override, after tracks and input modulation.
+    for (const property of plan.ir.publicProperties) {
+      if (property.target.kind === 'numeric') numeric[property.target.slot] = timelineBase[property.target.slot];
+    }
+    for (let slot = 0; slot < timelineSlots.length; slot++) {
+      if (!timelineSlots[slot]) continue;
+      const spec = plan.ir.numericSlots[slot];
+      const finite = Number.isFinite(numeric[slot]) ? numeric[slot] : timelineBase[slot];
+      numeric[slot] = Math.max(spec.min, Math.min(spec.max, spec.integer ? Math.round(finite) : finite));
+      if (numeric[slot] === timelinePrevious[slot]) continue;
+      timelinePrevious[slot] = numeric[slot];
       const dependency = plan.ir.slotDependencies[slot];
-      for (const affected of dependency.nodes) applyNode(nodes[affected.nodeIndex], affected.mask);
+      for (const affected of dependency.nodes) timelineMasks[affected.nodeIndex] |= affected.mask;
+      if (dependency.nodes.some(affected => affected.mask & MATRIX)) {
+        worldDirty[spec.nodeIndex] = 1;
+        for (const index of plan.ir.matrixDependents[spec.nodeIndex]) worldDirty[index] = 1;
+      }
       if (dependency.output) outputDirty = true;
+    }
+    // Parents must be sampled before descendants even when binding order differs.
+    for (const index of plan.ir.painterOrder) {
+      if (timelineMasks[index]) applyNode(nodes[index], timelineMasks[index]);
     }
     // Plan diffs compare authored/public values, not the sampled track frame.
     numeric.set(timelineBase);
@@ -377,7 +417,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       output ||= dep.output;
     }
     function matrix(index){
-      locals[index]=1;worlds[index]=1;
+      masks[index]|=MATRIX;locals[index]=1;worlds[index]=1;
       for(const descendant of plan.ir.matrixDependents[index])worlds[descendant]=1;
     }
     if (JSON.stringify(plan.bindingParameters) !== JSON.stringify(next.bindingParameters)) {
@@ -400,6 +440,9 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     }
     for(let index=0;index<nodes.length;index++){
       const previous=plan.nodePlans[index].resources,replacement=next.nodePlans[index].resources;
+      if (plan.ir.nodes[index].nodeType === 'model'
+          && previous.asset.presentation.compositionTransparent !== replacement.asset.presentation.compositionTransparent)
+        rebuilds.add(index);
       for(const field of new Set([...Object.keys(previous),...Object.keys(replacement)])){
         const old=previous[field],current=replacement[field];
         if(old?.key===current?.key&&old?.assetId===current?.assetId)continue;
@@ -431,7 +474,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     for(const index of changes.rebuilds){const spec=next.nodePlans[index];
       if(spec.node.nodeType==='model'){
         const facts=spec.resources.asset.modelFacts;
-        modelPrograms+=Math.max(1, facts.resources?.programCount||facts.materials?.length||1);
+        modelPrograms+=Math.max(1, facts.resources?.programCount||facts.materials?.length||1)
+          * spec.resources.asset.presentation.passMultiplier;
         amount.ownedCpuBytes+=spec.materialBytes||0;
         variants.add('model');continue;
       }
@@ -692,13 +736,14 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     if(timeChanged)for(const node of nodes)if(node.particles){node.material.uniforms.sceneTime.value=time;outputDirty=true;}
     if(timeChanged)for(const node of nodes)if(node.material&&node.spec.effects){node.material.uniforms.effectTime.value=time;outputDirty=true;}
     for(const node of nodes)if(node.animation){
-      const animation=node.animation,weight=animation.actionB?Number(node.spec.number('animationWeight')):0;
+      const animation=node.animation,weight=animation.actionB?node.animationWeight:0,speed=node.animationSpeed;
       if(!Number.isFinite(weight)||weight<0||weight>1)throw new Error('composition-model-animation-missing');
       if(animation.actionA)animation.actionA.setEffectiveWeight(animation.actionB?1-weight:1);
       if(animation.actionB)animation.actionB.setEffectiveWeight(animation.actionA?weight:1);
-      if(timeChanged||animation.weight!==weight){
-        animation.weight=weight;
-        animation.mixer.setTime(animation.duration>0?time%animation.duration:0);
+      if(timeChanged||animation.weight!==weight||animation.speed!==speed){
+        animation.weight=weight;animation.speed=speed;
+        const phase=time*speed;
+        animation.mixer.setTime(animation.duration>0?((phase%animation.duration)+animation.duration)%animation.duration:0);
         node.object.updateMatrixWorld(true);
         outputDirty=true;
       }
@@ -779,6 +824,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(const [program,count] of programUses)if(count===program.usedTimes&&program.hertzProgramResourceId)ids.push(program.hertzProgramResourceId);
       if(targetTicket)ids.push(targetTicket.resourceId);
       if(allocation.glowTicket)ids.push(allocation.glowTicket.resourceId);
+      if(allocation.timelineTicket)ids.push(allocation.timelineTicket.resourceId);
       for(const ticket of allocation.programTickets)if(ticket)ids.push(ticket.resourceId);
       ids.push(...context.pool.retirementCandidates([...leases.values(),
         ...nodes.filter(node=>node.spec.node.nodeType==='text').map(node=>node.spec.textRasterLease)]));

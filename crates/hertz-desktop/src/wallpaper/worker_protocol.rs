@@ -10,10 +10,82 @@ pub const RESOURCE_CHUNK: usize = 64 * 1024;
 pub const RESOURCE_STREAM_LIMIT: usize = 1024 * 1024;
 pub const RESOURCE_CONCURRENCY: usize = 8;
 pub const CONTROL_QUEUE_FRAMES: usize = 32;
+pub const PROBE_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+pub const PROBE_BUSY_MS: u64 = 8_000;
 // Rust 1.88 does not count the anonymous const assertion as a live reference.
 #[allow(dead_code)]
 pub const CONTROL_QUEUE_BYTES: usize = 256 * 1024;
 const _: () = assert!(CONTROL_QUEUE_FRAMES * CONTROL_LIMIT <= CONTROL_QUEUE_BYTES);
+
+/// Fixed, paired-binary qualification workloads. This is not an author script or command API.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProbeMode {
+    #[default]
+    Startup,
+    OsBoundaries,
+    BusySuspend,
+    BoundedMemory,
+    MessageFlood,
+}
+impl ProbeMode {
+    pub fn from_cli(value: &str) -> io::Result<Self> {
+        match value {
+            "startup" => Ok(Self::Startup),
+            "os-boundaries" => Ok(Self::OsBoundaries),
+            "busy-suspend" => Ok(Self::BusySuspend),
+            "bounded-memory" => Ok(Self::BoundedMemory),
+            "message-flood" => Ok(Self::MessageFlood),
+            _ => invalid("unknown fixed qualification probe"),
+        }
+    }
+    pub fn expects_termination(self) -> bool {
+        matches!(
+            self,
+            Self::BusySuspend | Self::BoundedMemory | Self::MessageFlood
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoundaryProbe {
+    pub canary_path: String,
+    pub excluded_handle: u64,
+    pub tcp_port: u16,
+    pub udp_port: u16,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoundaryReceipt {
+    pub own_udf_read_write: bool,
+    pub outside_read_error: Option<i32>,
+    pub outside_write_error: Option<i32>,
+    pub outside_create_error: Option<i32>,
+    pub inherited_parent_duplicate_error: Option<i32>,
+    pub parent_harmful_open_error: Option<i32>,
+    pub tcp_connect_error: Option<i32>,
+    pub udp_send_error: Option<i32>,
+    pub udp_denial_operation: UdpProbeOperation,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UdpProbeOperation {
+    Bind,
+    SendTo,
+}
+impl BoundaryReceipt {
+    pub fn passed(&self) -> bool {
+        self.own_udf_read_write
+            && self.outside_read_error == Some(5)
+            && self.outside_write_error == Some(5)
+            && self.outside_create_error == Some(5)
+            && self.inherited_parent_duplicate_error == Some(5)
+            && self.parent_harmful_open_error == Some(5)
+            && self.tcp_connect_error == Some(10013)
+            && self.udp_send_error == Some(10013)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -83,6 +155,8 @@ pub struct Bootstrap {
     pub runtime_folder: String,
     pub runtime_version: String,
     pub user_data_folder: String,
+    pub probe_mode: ProbeMode,
+    pub boundary_probe: Option<BoundaryProbe>,
 }
 impl Bootstrap {
     pub fn validate(&self) -> io::Result<()> {
@@ -111,6 +185,26 @@ impl Bootstrap {
         {
             return invalid("invalid private bootstrap");
         }
+        match (&self.boundary_probe, self.probe_mode) {
+            (None, mode) if mode != ProbeMode::OsBoundaries => {}
+            (Some(probe), ProbeMode::OsBoundaries) => {
+                let expected = std::path::Path::new(&self.user_data_folder)
+                    .parent()
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "missing UDF parent")
+                    })?
+                    .join("denied-canary/existing.txt");
+                if std::path::Path::new(&probe.canary_path) != expected
+                    || probe.excluded_handle == 0
+                    || probe.excluded_handle == u64::MAX
+                    || probe.tcp_port == 0
+                    || probe.udp_port == 0
+                {
+                    return invalid("boundary fixture differs from fixed owned scope");
+                }
+            }
+            _ => return invalid("boundary fixture and probe mode differ"),
+        }
         Ok(())
     }
     pub fn origin(&self) -> String {
@@ -137,10 +231,32 @@ pub enum ParentControl {
     Bootstrap { bootstrap: Box<Bootstrap> },
     Mounted { identity: Identity, hwnd: u64 },
     Stop { identity: Identity },
+    RunProbe { identity: Identity },
+    SuspendProbe { identity: Identity },
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkerControl {
+    Boundaries {
+        identity: Identity,
+        receipt: BoundaryReceipt,
+    },
+    ProbeStarted {
+        identity: Identity,
+        mode: ProbeMode,
+        allocated_bytes: u64,
+    },
+    SuspendRequested {
+        identity: Identity,
+    },
+    SuspendResult {
+        identity: Identity,
+        succeeded: bool,
+    },
+    ProbeRejected {
+        identity: Identity,
+        reason: String,
+    },
     Stage {
         identity: Identity,
         stage: String,
@@ -182,6 +298,11 @@ impl WorkerControl {
         match self {
             Self::Stage { identity, .. } => identity,
             Self::Window { identity, .. }
+            | Self::Boundaries { identity, .. }
+            | Self::ProbeStarted { identity, .. }
+            | Self::SuspendRequested { identity }
+            | Self::SuspendResult { identity, .. }
+            | Self::ProbeRejected { identity, .. }
             | Self::Environment { identity, .. }
             | Self::FirstFrame { identity, .. }
             | Self::Closed { identity, .. }
@@ -193,6 +314,20 @@ impl WorkerControl {
             return invalid("stale worker generation");
         }
         match self {
+            Self::ProbeRejected { reason, .. } if reason.len() > 128 => {
+                invalid("oversize probe rejection")
+            }
+            Self::ProbeStarted {
+                mode,
+                allocated_bytes,
+                ..
+            } if !mode.expects_termination()
+                || (*mode == ProbeMode::BoundedMemory
+                    && *allocated_bytes != PROBE_MEMORY_BYTES)
+                || (*mode != ProbeMode::BoundedMemory && *allocated_bytes != 0) =>
+            {
+                invalid("invalid fixed probe start")
+            }
             Self::Stage { stage, .. } if stage.len() > 128 => invalid("oversize startup stage"),
             Self::Environment {
                 runtime_version,
@@ -334,6 +469,63 @@ pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn boundary_receipts_require_access_denied_not_unreachable_or_absent() {
+        let mut receipt = BoundaryReceipt {
+            own_udf_read_write: true,
+            outside_read_error: Some(5),
+            outside_write_error: Some(5),
+            outside_create_error: Some(5),
+            inherited_parent_duplicate_error: Some(5),
+            parent_harmful_open_error: Some(5),
+            tcp_connect_error: Some(10013),
+            udp_send_error: Some(10013),
+            udp_denial_operation: UdpProbeOperation::SendTo,
+        };
+        assert!(receipt.passed());
+        receipt.outside_read_error = Some(2);
+        assert!(!receipt.passed());
+        receipt.outside_read_error = Some(5);
+        for code in [None, Some(10060), Some(10061)] {
+            receipt.tcp_connect_error = code;
+            assert!(!receipt.passed());
+        }
+        receipt.tcp_connect_error = Some(10013);
+        receipt.inherited_parent_duplicate_error = None;
+        assert!(!receipt.passed());
+    }
+    #[test]
+    fn fixed_probe_modes_reject_arbitrary_commands_and_oversized_claims() {
+        assert!(ProbeMode::from_cli("busy-suspend")
+            .unwrap()
+            .expects_termination());
+        for mode in [
+            "powershell",
+            "javascript:alert(1)",
+            "../probe",
+            "",
+            "STARTUP",
+        ] {
+            assert!(ProbeMode::from_cli(mode).is_err());
+        }
+        let identity = Identity {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            generation: 1,
+            package_hash: "0".repeat(64),
+        };
+        let receipt = WorkerControl::ProbeStarted {
+            identity: identity.clone(),
+            mode: ProbeMode::BoundedMemory,
+            allocated_bytes: PROBE_MEMORY_BYTES + 1,
+        };
+        assert!(receipt.validate(&identity).is_err());
+        let receipt = WorkerControl::ProbeStarted {
+            identity: identity.clone(),
+            mode: ProbeMode::Startup,
+            allocated_bytes: 0,
+        };
+        assert!(receipt.validate(&identity).is_err());
+    }
     #[test]
     fn rejects_length_before_body_allocation() {
         let mut bytes = std::io::Cursor::new((CONTROL_LIMIT as u32 + 1).to_le_bytes());

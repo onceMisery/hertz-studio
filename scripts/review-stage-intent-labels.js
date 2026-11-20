@@ -32,24 +32,25 @@ function writeNew(file, bytes) {
   fs.writeFileSync(file, bytes, { flag: 'wx' });
 }
 
-function loadCorpus(version = 'v3') {
-  ensure(version === 'v3', 'Only the active stage-intent v3 corpus can be reviewed');
+function loadCorpus(version = 'v4') {
+  ensure(version === 'v4', 'Only the active stage-intent v4 corpus can be reviewed');
   const dir = path.join(DATA_ROOT, version);
   const caseBytes = fs.readFileSync(path.join(dir, 'cases.jsonl'));
   const manifest = readJson(path.join(dir, 'manifest.json'));
   const contractBytes = fs.readFileSync(CONTRACT_FILE);
   const contract = JSON.parse(contractBytes.toString('utf8'));
   const cases = parseJsonl(caseBytes, 'Corpus');
-  ensure(manifest.corpusVersion === 'stage-intent-v3'
+  ensure(manifest.corpusVersion === 'stage-intent-v4'
     && manifest.corpusSha256 === sha(caseBytes)
     && manifest.schemaHash === contract.schemaHash,
   'Corpus or contract fingerprint mismatch');
   ensure(cases.length === manifest.total && new Set(cases.map(item => item.id)).size === cases.length,
     'Corpus coverage or case identity mismatch');
+  const candidateCount = cases.filter(item => item.expect.kind === 'candidate').length;
   ensure(manifest.mechanicalAudit && manifest.mechanicalAudit.status === 'passed'
     && manifest.mechanicalAudit.contractHash === manifest.schemaHash
-    && manifest.mechanicalAudit.candidateLabelsChecked === 89
-    && manifest.mechanicalAudit.candidateLabelsMaterialized === 89
+    && manifest.mechanicalAudit.candidateLabelsChecked === candidateCount
+    && manifest.mechanicalAudit.candidateLabelsMaterialized === candidateCount
     && manifest.mechanicalAudit.refusalLabelsStructurallyConflicted === 0
     && manifest.mechanicalAudit.semanticReviewComplete === false,
     'Corpus must remain pending its independent semantic review');
@@ -319,7 +320,7 @@ function main(argv = process.argv.slice(2)) {
   const allowed = mode === '--export' ? ['--corpus', '--out']
     : ['--corpus', '--bundle', '--answers', '--reviewer', '--out'];
   ensure(Object.keys(options).every(key => allowed.includes(key)), 'Option does not apply to ' + mode);
-  const corpus = loadCorpus(options['--corpus'] || 'v3');
+  const corpus = loadCorpus(options['--corpus'] || 'v4');
   if (mode === '--export') {
     ensure(options['--out'], '--export requires --out');
     const result = exportBundle(options['--out'], corpus);

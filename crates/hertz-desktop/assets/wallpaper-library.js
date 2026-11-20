@@ -9,7 +9,7 @@
   var operationCommand = 'wallpaper.import.begin';
   var recoveryJob = null;
   var referenceEpoch = 0, referenceTarget = null, referenceLoading = false, pageLeaving = false, deleteInFlight = false;
-  var referenceKinds = { savedConfiguration: '已保存配置', settingsDraft: '设置草稿', desktop: '桌面正在使用', preparing: '正在准备', retiring: '正在释放', preview: '预览', applying: '正在应用', playlist: '轮播列表', workDraft: '作品草稿', publication: '正在发布' };
+  var referenceKinds = { savedConfiguration: '已保存配置', settingsDraft: '设置草稿', desktop: '桌面正在使用', preparing: '正在准备', retiring: '正在释放', preview: '预览', applying: '正在应用', playlist: '轮播列表', workDraft: '作品草稿', workDraftResource: '作品素材或来源', publication: '正在发布' };
   var references = document.createElement('section'); references.id = 'library-references'; references.className = 'library-references'; references.hidden = true;
   references.setAttribute('aria-labelledby', 'library-references-title');
   var referenceHeading = document.createElement('div'); referenceHeading.className = 'library-references-heading';
@@ -186,7 +186,7 @@
       var item = document.createElement('li'), title = document.createElement('strong');
       var meta = document.createElement('span'), button = document.createElement('button'), detail = document.createElement('div');
       title.textContent = work.title;
-      meta.className = 'small'; meta.textContent = ({ image: '图片', video: '视频', scene: '场景', builtin: '内置场景' })[work.kind] || '壁纸';
+      meta.className = 'small'; meta.textContent = ({ image: '图片', video: '视频', scene: '场景', builtin: '内置场景', composition: '组合' })[work.kind] || '壁纸';
       button.textContent = '查看版本'; detail.className = 'hint library-versions'; detail.hidden = true;
       button.addEventListener('click', async function () {
         if (!detail.hidden) { detail.hidden = true; button.textContent = '查看版本'; return; }
@@ -221,7 +221,7 @@
               row.appendChild(choose);
             }
             if (version.state === 'installed') {
-              if (work.kind === 'builtin') {
+              if (['builtin', 'composition'].includes(work.kind) && work.sourceId === 'local' && version.locallyAuthored) {
                 var edit = document.createElement('button'); edit.type = 'button'; edit.textContent = '编辑此版本';
                 edit.addEventListener('click', async function () {
                   edit.disabled = true;
@@ -230,6 +230,16 @@
                   finally { edit.disabled = false; }
                 });
                 row.appendChild(edit);
+              }
+              if (['builtin', 'composition'].includes(work.kind)) {
+                var fork = document.createElement('button'); fork.type = 'button'; fork.textContent = '另存为新作品';
+                fork.addEventListener('click', async function () {
+                  fork.disabled = true;
+                  try { await window.hertzWallpaperWork.forkVersion(work, version); }
+                  catch (error) { libraryMessage(error.message, true); }
+                  finally { fork.disabled = false; }
+                });
+                row.appendChild(fork);
               }
               var exportButton = document.createElement('button'); exportButton.type = 'button'; exportButton.textContent = '导出此版本';
               exportButton.addEventListener('click', async function () {

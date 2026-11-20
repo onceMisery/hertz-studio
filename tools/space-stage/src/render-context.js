@@ -2,6 +2,8 @@
 // One renderer, drawing-buffer reservation and context lifetime per target.
 import { createResourcePool } from './resources/pool.js';
 
+export const THREE_DEFAULT_RESOURCES = Object.freeze({ textureDeclaredBytes: 9 * 4, ownedCpuBytes: 4 * 4 });
+
 let nextContextId = 0;
 export function createRenderContext(THREE, canvas, options = {}) {
   if (!canvas || typeof canvas.addEventListener !== 'function') throw new Error('Stage requires a canvas');
@@ -9,24 +11,38 @@ export function createRenderContext(THREE, canvas, options = {}) {
   if (pagePort && pagePort.contractVersion !== 1) throw new Error('resource-policy-required');
   const contextId = `space-context-${++nextContextId}`;
   const release = ticket => ticket?.release({ apiReleased: true, allocationEnded: true });
-  let renderer = null, contextTicket = null, surfaceTicket = null, retired = false, lost = false, admissionFailure = '';
+  let renderer = null, gl = null, contextTicket = null, surfaceTicket = null, defaultsTicket = null;
+  let retired = false, cleanupComplete = false, cleanupFailed = false, lost = false, admissionFailure = '';
   const pool = createResourcePool({ contextId, maxEntries: options.maxResourceEntries || 512 });
+  function confirmRetirement() {
+    if (!retired || cleanupComplete || cleanupFailed || gl && !gl.isContextLost()) return;
+    cleanupComplete = true;
+    canvas.removeEventListener('webglcontextlost', onLost);
+    canvas.removeEventListener('webglcontextrestored', onRestored);
+    renderer = gl = null; canvas.width = canvas.height = 0;
+    release(surfaceTicket); release(defaultsTicket); release(contextTicket);
+    surfaceTicket = defaultsTicket = contextTicket = null;
+  }
   function retire() {
-    if (retired) return;
+    if (retired) { confirmRetirement(); return; }
     retired = true; pool.dispose();
     try {
-      if (renderer) {
-        renderer.dispose();
-        if (!renderer.getContext().isContextLost()) renderer.forceContextLoss();
-      }
-    } finally {
-      renderer = null; canvas.width = canvas.height = 0;
-      release(surfaceTicket); release(contextTicket); surfaceTicket = contextTicket = null;
+      renderer?.dispose();
+    } catch (_) { cleanupFailed = true; }
+    try {
+      if (gl && !gl.isContextLost()) gl.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch (_) { /* No cleanup receipt: keep the original held tickets. */ }
+    finally { confirmRetirement(); }
+    if (!cleanupComplete) {
+      // Losing a native context is asynchronous on some hosts. Retain the
+      // original capability and its reservation until loss is actually proven.
+      canvas.addEventListener('webglcontextlost', onLost);
     }
   }
   const onLost = event => {
     event.preventDefault();
-    if (retired || lost) return;
+    if (retired) { confirmRetirement(); return; }
+    if (lost) return;
     lost = true;
     // Borrowers release private objects/leases before their renderer retires.
     try { options.onContextLost?.(); } finally { retire(); }
@@ -37,10 +53,19 @@ export function createRenderContext(THREE, canvas, options = {}) {
     const pixels = Math.max(1, canvas.width * canvas.height);
     surfaceTicket = pagePort?.require({ drawingBufferPixels: pixels, renderTargetDeclaredBytes: pixels * 8 },
       'SpaceStage original RGBA8/depth drawing buffer', 0, 'bounded-estimate');
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+    defaultsTicket = pagePort?.require(THREE_DEFAULT_RESOURCES,
+      'Three r186 WebGLState original 1x1 RGBA8 2D,cube6,array,3D defaults and four upload arrays', 0);
+    // The original context owner keeps the handle even if a subsequent Three
+    // initialization allocation throws before the constructor returns.
+    gl = canvas.getContext('webgl2', { alpha: true, depth: true, stencil: false,
+      antialias: options.antialias === true, premultipliedAlpha: true,
+      preserveDrawingBuffer: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false });
+    if (!gl) throw new Error('WebGL2 unavailable');
+    contextTicket?.commit(); surfaceTicket?.commit();
+    renderer = new THREE.WebGLRenderer({ canvas, context: gl, antialias: options.antialias === true, powerPreference: 'high-performance' });
     renderer.hertzProgramResources = pagePort; renderer.hertzBufferResources = pagePort;
     renderer.info.autoReset = false;
-    contextTicket?.commit(); surfaceTicket?.commit();
+    defaultsTicket?.commit();
     canvas.addEventListener('webglcontextlost', onLost);
     canvas.addEventListener('webglcontextrestored', onRestored);
   } catch (error) {
@@ -76,6 +101,9 @@ export function createRenderContext(THREE, canvas, options = {}) {
       canvas.removeEventListener('webglcontextrestored', onRestored);
       retire();
     },
-    stats() { return { contextId, retired, contextLost: lost, ...pool.stats() }; }
+    stats() { return { contextId, retired, cleanupComplete, cleanupFailed, contextLost: lost, antialiasRequested: options.antialias === true,
+      // Default framebuffer samples are browser/driver storage, observed rather
+      // than a fabricated application-owned render-target allocation.
+      defaultFramebufferSamples: renderer?.capabilities.samples ?? null, ...pool.stats() }; }
   };
 }

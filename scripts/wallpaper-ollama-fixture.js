@@ -4,8 +4,10 @@
 const assert = require('node:assert/strict');
 const http = require('node:http');
 
-module.exports = async function wallpaperOllamaFixture() {
+module.exports = async function wallpaperOllamaFixture({ holdResponse = false } = {}) {
   let calls = 0;
+  let releaseResponse;
+  const responseReady = holdResponse ? new Promise(resolve => { releaseResponse = resolve; }) : Promise.resolve();
   const failures = [];
   const server = http.createServer(async (request, response) => {
     try {
@@ -30,6 +32,7 @@ module.exports = async function wallpaperOllamaFixture() {
       assert.equal(body.format.oneOf[0].properties.params.properties.tod.maximum, 1);
       assert.equal(body.messages[1].content, '柔和夜色，宁静频谱');
       const output = { kind: 'builtin', sceneId: 'coast', stateVersion: 1, params: { tod: 0.72, reduced: true } };
+      await responseReady;
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ model: 'test-local', done: true, done_reason: 'stop',
         message: { role: 'assistant', content: JSON.stringify(output) }, prompt_eval_count: 1234, eval_count: 42 }));
@@ -43,7 +46,8 @@ module.exports = async function wallpaperOllamaFixture() {
   return {
     origin: 'http://127.0.0.1:' + server.address().port,
     calls: () => calls,
+    releaseResponse: () => releaseResponse?.(),
     verify: () => { assert.deepEqual(failures, []); assert.equal(calls, 1); },
-    close: () => new Promise((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeAllConnections(); }),
+    close: () => new Promise((resolve, reject) => { releaseResponse?.(); server.close(error => error ? reject(error) : resolve()); server.closeAllConnections(); }),
   };
 };

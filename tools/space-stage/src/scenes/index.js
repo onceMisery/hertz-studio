@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-import { commonParams, number, select, createParticles, particlesResourcePlan, createTowers, towersResourcePlan, createRings, createTerrain, createHanddrawn, motionFrame } from './factories.js';
-import { createSpatialLyrics } from './text.js';
+import { commonParams, number, select, createParticles, particlesResourcePlan, createTowers, towersResourcePlan, createRings, ringsResourcePlan, createTerrain, terrainResourcePlan, createHanddrawn, handdrawnResourcePlan, motionFrame } from './factories.js';
+import { createSpatialLyrics, spatialLyricsResourcePlan } from './text.js';
 import { createCoverWall } from './cover-wall.js';
 import { createCoverSphere } from './cover-sphere.js';
 import { createCoverParticles, coverParticlesResourcePlan } from './cover-particles.js';
@@ -68,9 +68,14 @@ function definition([id, label, category, factory, aliases = []]) {
   const toggle = (label, value = true) => ({ type: 'boolean', label, default: value });
   const sphere = id.includes('sphere') || id === 'background-cover', towers = id === 'spectrum-towers';
   const silkScene = id === 'particle-silk', orbScene = id === 'gravity-sphere', warpScene = id === 'warp-tunnel', prismScene = id === 'prism-galaxy';
-  // Source-owned declared buffer plans; remaining Three/media paths still keep coverage incomplete.
+  // Every built-in factory supplies a source-owned construction plan before a
+  // serial handoff. Runtime reservations remain authoritative after retirement.
   const bufferPlanner = id === 'cover-particles' ? coverParticlesResourcePlan : towers ? towersResourcePlan :
     ['spectrum-sphere', 'spectrum-nebula', 'background-flow', 'background-cover'].includes(id) ? particlesResourcePlan : null;
+  const sourcePlanner = factory.resourcePlan || (id === 'light-tunnel' ? () => ringsResourcePlan(true)
+    : terrain ? terrainResourcePlan : category === 'material' ? handdrawnResourcePlan
+    : lyrics ? () => spatialLyricsResourcePlan(stanzaRenderer) : null);
+  if (!bufferPlanner && !sourcePlanner) throw new Error('scene-source-plan-unavailable:' + id);
   return {
     apiVersion: 1, id, stateVersion: 1, label, category: { particles: '星空', artwork: '封面艺术', spectrum: '频谱', lyrics: '歌词', material: '材质', background: '空间背景' }[category], aliases, preview: '/space-scene-preview/' + id + '.jpg',
     params: { ...commonParams, ...postSpecs,
@@ -117,12 +122,14 @@ function definition([id, label, category, factory, aliases = []]) {
       { low: { particles: 4000, drawCalls: 16 }, medium: { particles: 7000, drawCalls: 20 }, high: { particles: 10000, drawCalls: 24 } },
     ...(towers ? { composition: towersComposition() } : {}),
     ...(towers ? { compositionResourcePlan: request => towersCompositionResources(request.quality) } : {}),
-    resourcePlan: bufferPlanner ? () => {
-      const primary = bufferPlanner(), effects = effectsResourcePlan();
+    resourcePlan: () => {
+      const primary = (bufferPlanner || sourcePlanner)(), effects = effectsResourcePlan();
       // One primary program and the three original effect materials. Hidden
       // effects may remain uncompiled; actual aliases belong to Three's cache.
-      return { programs: 4, ownedCpuBytes: primary.ownedCpuBytes + effects.ownedCpuBytes, bufferDeclaredBytes: primary.bufferDeclaredBytes + effects.bufferDeclaredBytes };
-    } : undefined,
+      return { programs: (primary.programs || 1) + 3, textureDeclaredBytes: primary.textureDeclaredBytes || 0,
+        ownedCpuBytes: primary.ownedCpuBytes + effects.ownedCpuBytes,
+        bufferDeclaredBytes: primary.bufferDeclaredBytes + effects.bufferDeclaredBytes };
+    },
     create(ctx) {
       const primary = factory(ctx);
       // The registry already permits asynchronous scene preparation. Attach

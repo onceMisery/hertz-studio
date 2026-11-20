@@ -56,10 +56,17 @@
     return h.map(function (v) { return ('00000000'+(v>>>0).toString(16)).slice(-8); }).join('');
   }
   async function hash(v) {
-    var data = new TextEncoder().encode(canonical(v));
-    if (typeof crypto === 'undefined' || !crypto.subtle) return sha256(data);
-    var bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
-    return Array.from(bytes, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    var scratch = StageJsonSource.reserve('creative-draft-hash', 2048, 'bounded JSON hash planning stack');
+    var work, data, bytes;
+    try {
+      var plan = StageJsonSource.measure(v, { maxArrayLength:LIMIT });
+      work = StageJsonSource.reserve('creative-draft-hash', plan.chars * 64 + 4096,
+        'canonical nested text joins, UTF8 input, native digest copy or bounded SHA256 padding/workspace');
+      data = new TextEncoder().encode(canonical(v));
+      if (typeof crypto === 'undefined' || !crypto.subtle) return sha256(data);
+      bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+      return Array.from(bytes, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    } finally { data = bytes = null; if (work) work.release(); scratch.release(); }
   }
   function guard(value, depth) {
     if (depth > 8) fail('草稿嵌套超过 8 层');
@@ -70,8 +77,8 @@
     });
   }
   function bounded(value) {
-    var text = JSON.stringify(value);
-    if (!text || new TextEncoder().encode(text).length > LIMIT) fail('草稿超过 16 KiB');
+    var text = StageJsonSource.stringify(value, { owner: 'creative-draft', limit: LIMIT, maxArrayLength:LIMIT, limitMessage: '草稿超过 16 KiB' });
+    text.release();
     guard(value, 0);
   }
   function commonParams() {
@@ -147,34 +154,52 @@
     return { artifactVersion: 1, mode: 'create', intent: JSON.parse(JSON.stringify(intent)),
       schemaVersion: c.schemaVersion, schemaHash: c.schemaHash, basePresetHash: c.basePresetHashes[intent.scene] };
   }
-  async function prepare(input) {
-    if (typeof input === 'string') {
-      if (new TextEncoder().encode(input).length > LIMIT) fail('草稿超过 16 KiB');
-      input = JSON.parse(input);
+  async function prepareLease(input) {
+    var parsed, snapshot, work, normalized, codeSource, decodedSource;
+    try {
+      if (typeof input === 'string') {
+        parsed = StageJsonSource.parse(input, { owner: 'creative-draft', limit: LIMIT, limitMessage: '草稿超过 16 KiB' });
+        input = parsed.value;
+      }
+      bounded(input); keys(input, ENVELOPE);
+      // Snapshot before awaits so caller mutations cannot change what was validated.
+      snapshot = StageJsonSource.ownedClone(input, 'creative-draft', { maxArrayLength:LIMIT });
+      var value = snapshot.value, c = manifest();
+      work = StageJsonSource.reserve('creative-draft', LIMIT * 32,
+        'bounded 16KiB artifact materialization, candidate copies, canonical comparison and diagnostic slots');
+      if (value.artifactVersion !== 1 || value.mode !== 'create') fail('不支持的草稿版本或模式');
+      validateIntent(value.intent);
+      if (value.schemaVersion !== c.schemaVersion || value.schemaHash !== c.schemaHash
+        || value.basePresetHash !== c.basePresetHashes[value.intent.scene]) fail('草稿与当前舞台版本不兼容，请重新生成');
+      if (await hash(CreativeStage.canonicalBaseline(value.intent.scene)) !== value.basePresetHash
+        || await hash(schemaFingerprint(c)) !== value.schemaHash) fail('当前舞台资源与契约不一致，请刷新或更新应用');
+      var out = CreativeStage.materializeIntent(null, value.intent);
+      if (!out.ok || out.ignored.length) fail(out.message || '草稿存在未消费参数');
+      normalized = CreativeStage.normalizeShareLease(out.preset);
+      var preset = normalized.value;
+      codeSource = await CreativeShareCode.encodeLease(preset, { compress: false });
+      var shareCode = codeSource.value;
+      decodedSource = await CreativeShareCode.decodeLease(shareCode);
+      var decoded = decodedSource.value;
+      if (canonical(decoded) !== canonical(preset)) fail('草稿分享校验失败');
+      var diagnostics = Object.keys(value.intent.patch).map(function (key) {
+        var parts = key.split('.'), normalized = preset[parts[0]][parts[1]], requested = value.intent.patch[key];
+        return { path: key, requested: requested, normalized: normalized, clamped: requested !== normalized };
+      });
+      var result = { artifact: value, preset: preset, shareCode: shareCode, diagnostics: diagnostics,
+        proposalHash: await hash(value), persisted: false, applied: false };
+      // The output lease becomes the single owner of these references. Child
+      // reservations retire only after that replacement reservation is committed.
+      return work.finish(result, StageJsonSource.measure(result, { maxArrayLength:LIMIT }).bytes);
+    } finally {
+      input = value = out = preset = shareCode = decoded = result = null;
+      if (parsed) parsed.release(); if (snapshot) snapshot.release(); if (normalized) normalized.release();
+      if (codeSource) codeSource.release(); if (decodedSource) decodedSource.release(); if (work) work.release();
     }
-    bounded(input); keys(input, ENVELOPE);
-    // Snapshot before awaits so caller mutations cannot change what was validated.
-    var value = JSON.parse(JSON.stringify(input)), c = manifest();
-    if (value.artifactVersion !== 1 || value.mode !== 'create') fail('不支持的草稿版本或模式');
-    validateIntent(value.intent);
-    if (value.schemaVersion !== c.schemaVersion || value.schemaHash !== c.schemaHash
-      || value.basePresetHash !== c.basePresetHashes[value.intent.scene]) fail('草稿与当前舞台版本不兼容，请重新生成');
-    if (await hash(CreativeStage.canonicalBaseline(value.intent.scene)) !== value.basePresetHash
-      || await hash(schemaFingerprint(c)) !== value.schemaHash) fail('当前舞台资源与契约不一致，请刷新或更新应用');
-    var out = CreativeStage.materializeIntent(null, value.intent);
-    if (!out.ok || out.ignored.length) fail(out.message || '草稿存在未消费参数');
-    var preset = CreativeStage.normalizeSharePreset(out.preset);
-    var shareCode = await CreativeShareCode.encode(preset, { compress: false });
-    var decoded = await CreativeShareCode.decode(shareCode);
-    if (canonical(decoded) !== canonical(preset)) fail('草稿分享校验失败');
-    var diagnostics = Object.keys(value.intent.patch).map(function (key) {
-      var parts = key.split('.'), normalized = preset[parts[0]][parts[1]], requested = value.intent.patch[key];
-      return { path: key, requested: requested, normalized: normalized, clamped: requested !== normalized };
-    });
-    return { artifact: value, preset: preset, shareCode: shareCode, diagnostics: diagnostics,
-      proposalHash: await hash(value), persisted: false, applied: false };
   }
+  async function prepare(input) { return StageJsonSource.transfer(await prepareLease(input)); }
   window.CreativeDraft = { prepare: prepare, artifact: artifact, validateIntent: validateIntent,
+    prepareLease: prepareLease,
     canonical: canonical, hash: hash, hashBytes: sha256, commonParams: commonParams, schema: schema,
     schemaFingerprint: schemaFingerprint };
 })();

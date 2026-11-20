@@ -236,6 +236,9 @@ impl SemanticIr {
     pub fn bindings(&self) -> &[CompiledBinding] {
         &self.bindings
     }
+    pub fn inputs(&self) -> &[String] {
+        &self.inputs
+    }
     pub fn public_properties(&self) -> &[PublicProperty] {
         &self.public_properties
     }

@@ -9,6 +9,8 @@ const {coreGlb,animatedGlb,twoClipGlb,texturedGlb,morphGlb,skinGlb,ktx2Glb,basis
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.resolve(process.env.HERTZ_COMPOSITION_BROWSER_OUTPUT || path.join(root,'output/a04-p2-20261108/composition-browser'));
 const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), twoClipFixture=twoClipGlb(), texturedFixture=texturedGlb(), morphFixture=morphGlb(), skinFixture=skinGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
+const doubleFixture=texturedGlb(true);
+const mixedFixture=multiMaterialGlb(true,true);
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -17,6 +19,11 @@ function png(width,height,pixel){const header=Buffer.alloc(13);header.writeUInt3
  const data=Buffer.alloc(height*(width*4+1));for(let y=0;y<height;y++)for(let x=0;x<width;x++)Buffer.from(pixel(x,y)).copy(data,y*(width*4+1)+1+x*4);
  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),chunk('IDAT',zlib.deflateSync(data)),chunk('IEND',Buffer.alloc(0))]);}
 const sourceAssets=[
+ {assetId:'mixed-sided',kind:'model',file:'mixed-sided.glb',mime:'model/gltf-binary',bytes:mixedFixture.glb,
+  modelInput:mixedFixture.input,textured:true,uploadBytes:64},
+ {assetId:'mesh-alias',kind:'model',file:'mesh-alias.glb',mime:'model/gltf-binary',bytes:modelFixture.glb,modelInput:modelFixture.input},
+ {assetId:'double-sided',kind:'model',file:'double-sided.glb',mime:'model/gltf-binary',bytes:doubleFixture.glb,
+  modelInput:doubleFixture.input,textured:true,uploadBytes:64,imageBytes:doubleFixture.imageBytes},
  {assetId:'blue',kind:'image',file:'blue.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[0,0,255,255])},
  {assetId:'red',kind:'image',file:'red.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[255,0,0,255])},
  {assetId:'soft',kind:'image',file:'soft.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[255,0,0,128])},
@@ -102,20 +109,55 @@ editorWindow.hertzWallpaperWorkStructure.reorder(groupedEditor.nodes,['outer','b
 const groupedAfter=compile(groupedEditor.nodes);
 const mask=compile([image('back','blue'),image('front','soft',{}, {maskAsset:'mask'})]);
 const fit=compile([image('wide-layer','wide',{width:64,height:64,fit:'contain'})]);
+const fitPublic=compile([image('wide-layer','wide',{fit:'cover'})],undefined,[
+ property('fit','select','wide-layer','fit','cover',{options:['cover','contain','stretch'].map(value=>({value,label:value}))}),
+ property('picture','asset','wide-layer','asset','wide',{kind:'image',options:['wide','red']})]);
 const modelCanvas={width:64,height:64,colorSpace:'srgb',background:'#000000',
  scene3d:{position:[0,0,3],target:[0,0,0],fovDegrees:45,near:0.1,far:100}};
 const modelNode=(id='mesh',properties={},asset='mesh')=>({id,type:'model',stateVersion:1,assets:{asset},
  properties:{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],...properties}});
 const model=compile([modelNode()],modelCanvas);
+const aliasedModels=compile([modelNode(),modelNode('alias',{},'mesh-alias')],modelCanvas);
+const modelTrack=compile([modelNode()],modelCanvas,[],{durationSeconds:2,loop:true,tracks:[
+ {id:'move',target:{nodeId:'mesh',property:'position',component:0},
+  keys:[{timeSeconds:0,value:0,easing:'linear'},{timeSeconds:1,value:1,easing:'linear'}]},
+ {id:'fade',target:{nodeId:'mesh',property:'opacity',component:null},
+  keys:[{timeSeconds:0,value:1,easing:'linear'},{timeSeconds:1,value:0,easing:'linear'}]}
+]});
+const modelBound=compile([modelNode()],modelCanvas,[],undefined,[
+ {id:'move',target:{nodeId:'mesh',property:'position',component:0},mode:'replace',parameters:{},
+  program:[{op:'input',name:'energy'}]},
+ {id:'fade',target:{nodeId:'mesh',property:'opacity',component:null},mode:'replace',parameters:{},
+  program:[{op:'input',name:'bass'}]}
+]);
+const modelPublic=compile([modelNode()],modelCanvas,
+ [property('visible-opacity','number','mesh','opacity',.25,{min:0,max:1})],undefined,[
+ {id:'fade',target:{nodeId:'mesh',property:'opacity',component:null},mode:'replace',parameters:{},
+  program:[{op:'const',value:1}]}
+]);
 const coreRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mesh.glb'),compilerInputs.get(model)[0],'assets/mesh.glb'],{cwd:root,encoding:'utf8'}));
 const animatedModel=compile([modelNode('mesh',{animationClip:'move'},'animated')],modelCanvas);
+const spedModel=compile([modelNode('mesh',{animationClip:'move',animationSpeed:2},'animated')],modelCanvas);
+const reverseModel=compile([modelNode('mesh',{animationClip:'move',animationSpeed:-1},'animated')],modelCanvas);
 const animatedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'animated.glb'),compilerInputs.get(animatedModel)[0],'assets/animated.glb'],{cwd:root,encoding:'utf8'}));
 const twoClipModel=compile([modelNode('mesh',{animationClip:'slide'},'two-clip')],modelCanvas,
  [property('clip','text','mesh','animationClip','slide',{maxLength:128})]);
+const weightedModel=compile([modelNode('mesh',{animationClip:'slide',animationClipB:'fall'},'two-clip')],modelCanvas,[],
+ {durationSeconds:2,loop:true,tracks:[{id:'weight',target:{nodeId:'mesh',property:'animationWeight',component:null},
+  keys:[{timeSeconds:0,value:0,easing:'linear'},{timeSeconds:1,value:1,easing:'linear'}]}]});
 const twoClipRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'two-clip.glb'),compilerInputs.get(twoClipModel)[0],'assets/two-clip.glb'],{cwd:root,encoding:'utf8'}));
 const blendModel=compile([modelNode('mesh',{animationClip:'slide',animationClipB:'fall',animationWeight:1},'two-clip')],modelCanvas,
  [property('blend-clip','text','mesh','animationClipB','fall',{maxLength:128}),property('blend-weight','number','mesh','animationWeight',1,{min:0,max:1})]);
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
+const doubleModel=compile([modelNode('mesh',{},'double-sided'),image('overlay','blue',{width:4,height:4})],modelCanvas,[],
+ {durationSeconds:2,loop:true,tracks:[{id:'fade',target:{nodeId:'mesh',property:'opacity',component:null},
+  keys:[{timeSeconds:0,value:1,easing:'linear'},{timeSeconds:1,value:0,easing:'linear'}]}]});
+const doubleFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'double-sided.glb'),compilerInputs.get(doubleModel)[0],'assets/double-sided.glb','textured'],{cwd:root,encoding:'utf8'}));
+const mixedModel=compile([{id:'group',type:'group',stateVersion:1,children:['mesh'],properties:{space:'3d'}},
+ modelNode('mesh',{},'mixed-sided'),image('overlay','blue',{width:4,height:4})],modelCanvas,
+ [property('group-alpha','number','group','opacity',1,{min:0,max:1})]);
+const mixedFade=publicValues(mixedModel,{'group-alpha':.5});
+const mixedFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mixed-sided.glb'),compilerInputs.get(mixedModel)[0],'assets/mixed-sided.glb','textured'],{cwd:root,encoding:'utf8'}));
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const morphModel=compile([modelNode('mesh',{animationClip:'warp'},'morph')],modelCanvas);
 const morphRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'morph.glb'),compilerInputs.get(morphModel)[0],'assets/morph.glb','textured'],{cwd:root,encoding:'utf8'}));
@@ -140,6 +182,10 @@ const particles=compile([{id:'field',type:'particles',stateVersion:1,properties:
 const video=compile([{id:'movie',type:'video',stateVersion:1,assets:{asset:'video'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,loopStartMs:0,loopEndMs:200}}]);
 const timelineFixture=compile([image('back','blue')],undefined,[],{durationSeconds:2,loop:true,tracks:[
  {id:'fade',target:{nodeId:'back',property:'opacity',component:null},keys:[
+  {timeSeconds:0,value:0.2,easing:'linear'},{timeSeconds:1,value:0.6,easing:'step'},
+  {timeSeconds:2,value:1,easing:'linear'}]}]});
+const timelineReplacement=compile([image('replacement','red')],undefined,[],{durationSeconds:2,loop:true,tracks:[
+ {id:'fade',target:{nodeId:'replacement',property:'opacity',component:null},keys:[
   {timeSeconds:0,value:0.2,easing:'linear'},{timeSeconds:1,value:0.6,easing:'step'},
   {timeSeconds:2,value:1,easing:'linear'}]}]});
 const bindingFixture=compile([image('back','blue')],undefined,[
@@ -255,7 +301,7 @@ const results=[];
     modelFacts:a.assetId==='basis'?basisRustFacts:a.assetId==='basis-uastc'?basisUastcRustFacts
      :a.assetId==='multi'?multiRustFacts:a.assetId==='multi-mask'?multiMaskRustFacts
      :a.ktx2?ktx2RustFacts:a.assetId==='morph'?morphRustFacts:a.assetId==='skin'?skinRustFacts
-     :a.textured?texturedRustFacts
+     :a.assetId==='mixed-sided'?mixedFacts:a.assetId==='double-sided'?doubleFacts:a.textured?texturedRustFacts
      :a.assetId==='animated'?animatedRustFacts:a.assetId==='two-clip'?twoClipRustFacts:coreRustFacts,
     ...(a.textured?{textureUploadBytes:a.uploadBytes
        +(a.assetId==='morph'?morphRustFacts.resources.morphTextureBytes:0)
@@ -296,6 +342,20 @@ const results=[];
   results.push({case:'editor reparent/order projection compiles to exact nested-alpha GL pixels in the same renderer',beforeGroupOrder,afterGroupOrder});
   await select(mask);near(await page.evaluate(()=>pixel(32,32)),[137,0,225]);results.push({case:'linear numeric mask and real straight-alpha source premultiplication'});
   await select(fit);near(await page.evaluate(()=>pixel(8,8)),[0,0,0]);near(await page.evaluate(()=>pixel(8,32)),[255,0,0]);near(await page.evaluate(()=>pixel(56,32)),[0,255,0]);results.push({case:'decoded dimensions contain-fit without canvas refit'});
+  await select(fitPublic);near(await page.evaluate(()=>pixel(8,8)),[255,0,0]);
+  const fitChanges=[];
+  for(const [overrides,expected] of [
+    [{fit:'contain'},[0,0,0]], [{fit:'stretch'},[255,0,0]],
+    [{fit:'contain',picture:'red'},[255,0,0]], [{fit:'contain',picture:'wide'},[0,0,0]]]){
+    const changed=await page.evaluate(async p=>{
+      const before=host.stats().sceneStats.work.matrixUpdates[0];
+      const result=await host.selectComposition(p);host.frame({sceneTime:0,paused:true});
+      return {result,pixel:pixel(8,8),matrixUpdates:host.stats().sceneStats.work.matrixUpdates[0]-before};
+    },projection(publicValues(fitPublic,overrides)));
+    assert.equal(changed.result.changed,true);assert.equal(changed.matrixUpdates,1);
+    near(changed.pixel,expected);fitChanges.push(changed);
+  }
+  results.push({case:'public fit and resource aspect changes update the existing image UV and local matrix',fitChanges});
   async function reject(compiled,mutate){
    const p=JSON.parse(JSON.stringify(projection(compiled)));if(mutate)mutate(p);
    return page.evaluate(async p=>{const before={held:ledger.snapshot().held,state:host.stats().state};let error;
@@ -303,6 +363,10 @@ const results=[];
      return {before,error,after:{held:ledger.snapshot().held,state:host.stats().state}};},p);
   }
   const modelStats=await select(model);
+  const aliasedRejection=await reject(aliasedModels);
+  assert.match(aliasedRejection.error,/model-sharing/);
+  assert.deepEqual(aliasedRejection.after.held,aliasedRejection.before.held);
+  results.push({case:'distinct asset aliases cannot bypass one-instance model resource ownership',aliasedRejection});
   const modelPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),held:ledger.snapshot().held,
    models:host.stats().sceneStats.models,has3d:host.stats().sceneStats.has3d}));
   near(modelPixels.inside,[255,255,255]);near(modelPixels.outside,[0,0,0]);
@@ -395,7 +459,7 @@ const results=[];
   assert.equal(morphRustFacts.resources.programCount,1);
   assert.equal(morphStart.live.programs,2);
   assert.equal(morphStart.live.bufferDeclaredBytes,194);
-  assert.equal(morphStart.live.textureDeclaredBytes,64+morphRustFacts.resources.morphTextureBytes);
+  assert.equal(morphStart.live.textureDeclaredBytes,36+64+morphRustFacts.resources.morphTextureBytes);
   results.push({case:'GLB morph target weights clip moves the triangle and loops on its duration',morphStart,morphHalf,morphLate,morphLoop});
   const morphFactsRejection=await reject(morphModel,p=>{p.resolvedAssets.find(asset=>
    asset.kind==='model'&&asset.assetId==='morph').modelFacts.scene.nodes[0].morphTargetCount=0;});
@@ -417,7 +481,7 @@ const results=[];
   assert.equal(skinRustFacts.resources.programCount,1);
   assert.equal(skinStart.live.programs,2);
   assert.equal(skinStart.live.bufferDeclaredBytes,254);
-  assert.equal(skinStart.live.textureDeclaredBytes,64+256);
+  assert.equal(skinStart.live.textureDeclaredBytes,36+64+256);
   results.push({case:'GLB skinned mesh follows the bone rotation clip and loops',skinStart,skinLate,skinLoop});
   const skinFactsRejection=await reject(skinModel,p=>{delete p.resolvedAssets.find(asset=>
    asset.kind==='model'&&asset.assetId==='skin').modelFacts.skins;});
@@ -428,7 +492,7 @@ const results=[];
   const texturedPixels=await page.evaluate(()=>({red:pixel(36,23),green:pixel(46,23),live:ledger.snapshot().live,
    models:host.stats().sceneStats.models}));
   near(texturedPixels.red,[255,0,0]);near(texturedPixels.green,[0,255,0]);
-  assert.equal(texturedPixels.live.textureDeclaredBytes,64);assert.equal(texturedPixels.live.decodeReservedBytes,0);
+  assert.equal(texturedPixels.live.textureDeclaredBytes,36+64);assert.equal(texturedPixels.live.decodeReservedBytes,0);
   assert.equal(texturedPixels.models,1);
   results.push({case:'embedded 2x2 baseColor texture renders the authored UV split',texturedPixels});
   const missingUpload=await reject(texturedModel,p=>{delete p.resolvedAssets.find(asset=>
@@ -446,7 +510,7 @@ const results=[];
   const ktx2Pixels=await page.evaluate(()=>({red:pixel(36,23),green:pixel(46,23),live:ledger.snapshot().live,
    models:host.stats().sceneStats.models}));
   near(ktx2Pixels.red,[255,0,0]);near(ktx2Pixels.green,[0,255,0]);
-  assert.equal(ktx2Pixels.live.textureDeclaredBytes,16);assert.equal(ktx2Pixels.live.decodeReservedBytes,0);
+  assert.equal(ktx2Pixels.live.textureDeclaredBytes,36+16);assert.equal(ktx2Pixels.live.decodeReservedBytes,0);
   assert.equal(ktx2Pixels.models,1);
   results.push({case:'direct RGBA8 KTX2 baseColor renders through KTX2Loader raw path',ktx2Pixels});
   const ktx2FormatRejection=await reject(ktx2Model,p=>{p.resolvedAssets.find(asset=>
@@ -462,7 +526,7 @@ const results=[];
   const basisPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),live:ledger.snapshot().live,
    models:host.stats().sceneStats.models}));
   near(basisPixels.inside,[253,0,0]);near(basisPixels.outside,[0,0,0]);
-  assert.equal(basisPixels.live.textureDeclaredBytes,basisRustFacts.resources.imageUploadBytes);
+  assert.equal(basisPixels.live.textureDeclaredBytes,36+basisRustFacts.resources.imageUploadBytes);
   assert.equal(basisPixels.models,1);
   results.push({case:'Basis ETC1S KTX2 transcodes through the pinned worker and renders its level-0 color',basisPixels});
   const basisNoRgba=await reject(basisModel,p=>{delete p.resolvedAssets.find(asset=>
@@ -487,7 +551,7 @@ const results=[];
   const basisUastcPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),live:ledger.snapshot().live,
    models:host.stats().sceneStats.models}));
   near(basisUastcPixels.inside,[255,0,0]);near(basisUastcPixels.outside,[0,0,0]);
-  assert.equal(basisUastcPixels.live.textureDeclaredBytes,basisUastcRustFacts.resources.imageUploadBytes);
+  assert.equal(basisUastcPixels.live.textureDeclaredBytes,36+basisUastcRustFacts.resources.imageUploadBytes);
   assert.equal(basisUastcPixels.models,1);
   results.push({case:'Basis UASTC storage transcodes a solid-color block and renders it',basisUastcPixels});
   await select(multiModel);
@@ -525,6 +589,69 @@ const results=[];
    live:ledger.snapshot().live}));
   near(opacityPixels.inside,[188,188,188]);near(opacityPixels.outside,[0,0,0]);
   results.push({case:'3D model per-instance material opacity blends over the background',opacityPixels});
+  await select(modelTrack);
+  const trackFrames=await page.evaluate(()=>{
+   const capture=time=>{host.frame({sceneTime:time,paused:true,redraw:true});
+    const read=(x,y)=>{const bytes=new Uint8Array(4);gl.readPixels(x,63-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);return Array.from(bytes);};
+    return {inside:read(36,23),right:read(52,23),live:ledger.snapshot().live,work:host.stats().sceneStats.work};};
+   const start=capture(0),middle=capture(.5),end=capture(1),reverse=capture(.5),loop=capture(2);
+   const before=host.stats().sceneStats.work;host.frame({sceneTime:2,paused:true});
+   return {start,middle,end,reverse,loop,before,after:host.stats().sceneStats.work};
+  });
+  near(trackFrames.start.inside,[255,255,255]);near(trackFrames.middle.inside,[0,0,0]);
+  near(trackFrames.middle.right,[188,188,188]);near(trackFrames.end.right,[0,0,0]);
+  near(trackFrames.reverse.right,[188,188,188]);near(trackFrames.loop.inside,[255,255,255]);
+  assert.equal(trackFrames.start.live.programs,trackFrames.end.live.programs);
+  assert.deepEqual(trackFrames.before.matrixUpdates,trackFrames.after.matrixUpdates);
+  assert.deepEqual(trackFrames.after.nodeRebuilds,[0]);
+  results.push({case:'3D tracks sample transforms and opacity reversibly without program growth or paused work',trackFrames});
+  await select(doubleModel);
+  const doublePhases=await page.evaluate(()=>{
+   const phase=time=>{host.frame({sceneTime:time,paused:true,redraw:true});
+    const bytes=new Uint8Array(4);gl.readPixels(40,40,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);
+    return {pixel:[...bytes],programs:ledger.snapshot().live.programs};};
+   return {start:phase(0),half:phase(.5),end:phase(1),reverse:phase(.5)};
+  });
+  assert.equal(doublePhases.start.programs,4);
+  assert.equal(doublePhases.half.programs,doublePhases.start.programs);
+  assert.equal(doublePhases.reverse.programs,doublePhases.start.programs);
+  near(doublePhases.end.pixel,[0,0,0]);assert.deepEqual(doublePhases.half.pixel,doublePhases.reverse.pixel);
+  assert(doublePhases.start.pixel.some((value,index)=>index<3&&value>200));
+  results.push({case:'transparent double-sided model and planar layer reserve both Three passes before first draw',doublePhases});
+  await select(mixedModel);
+  const mixedBefore=await page.evaluate(()=>({left:pixel(24,23),right:pixel(45,23)}));
+  await page.evaluate(async p=>{await host.selectComposition(p);host.frame({sceneTime:0,paused:true});},projection(mixedFade));
+  const mixedAfter=await page.evaluate(()=>({left:pixel(24,23),right:pixel(45,23),
+   nodes:host.stats().sceneStats.work.nodeRebuilds,violations:ledger.snapshot().violations}));
+  near(mixedBefore.left,[255,0,0]);near(mixedBefore.right,[0,255,0]);
+  near(mixedAfter.left,[188,0,0]);near(mixedAfter.right,[0,188,0]);
+  assert.equal(mixedAfter.nodes[1],1);assert.deepEqual(mixedAfter.violations,[]);
+  results.push({case:'ancestor opacity changes re-admit mixed BLEND and MASK material variants',mixedBefore,mixedAfter});
+  await select(modelBound);
+  const boundFrames=await page.evaluate(()=>{
+   const capture=(level,bass)=>{host.frame({sceneTime:.5,paused:true,redraw:true,level,bands:{bass}});
+    const bytes=new Uint8Array(4);gl.readPixels(52,40,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);return Array.from(bytes);};
+   return {half:capture(.5,.5),clamped:capture(.5,20),zero:capture(.5,-1),restored:capture(.5,.5)};
+  });
+  near(boundFrames.half,[188,188,188]);near(boundFrames.clamped,[255,255,255]);
+  near(boundFrames.zero,[0,0,0]);near(boundFrames.restored,[188,188,188]);
+  results.push({case:'3D bindings update during static sampling, clamp outputs and preserve authored values',boundFrames});
+  await select(modelPublic);near(await page.evaluate(()=>pixel(40,23)),[137,137,137]);
+  results.push({case:'public numeric override follows track and input modulation'});
+  await select(animatedModel);await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const normalPhase=await page.evaluate(()=>snapshot());
+  await select(spedModel);await page.evaluate(()=>host.frame({sceneTime:.25,paused:true}));
+  assert.deepEqual(await page.evaluate(()=>snapshot()),normalPhase);
+  await select(reverseModel);await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  assert.deepEqual(await page.evaluate(()=>snapshot()),normalPhase);
+  results.push({case:'model animationSpeed maps signed absolute time without accumulating seek history'});
+  await select(weightedModel);await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const weightedHalf=await page.evaluate(()=>snapshot());
+  await page.evaluate(()=>host.frame({sceneTime:.9,paused:true}));
+  assert.notDeepEqual(await page.evaluate(()=>snapshot()),weightedHalf);
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  assert.deepEqual(await page.evaluate(()=>snapshot()),weightedHalf);
+  results.push({case:'animated model blend weight consumes sampled values and reverses deterministically'});
   await select(text);const textPixels=await page.evaluate(()=>({pixels:snapshot(),fonts:document.fonts.size}));assert.ok(textPixels.pixels.some((value,index)=>index%4!==3&&value>200));assert.equal(textPixels.fonts,1);results.push({case:'actual prepared FontFace and text pixels'});
   await select(particles);const first=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});
   await page.evaluate(()=>host.frame({sceneTime:1.4,paused:true}));const backwards=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});assert.deepEqual(backwards,first);assert.ok(first.some((value,index)=>index%4!==3&&value>0));results.push({case:'preallocated particles absolute phase and reverse seek'});
@@ -822,7 +949,7 @@ const results=[];
   const completeRetirement=await page.evaluate(async ({before,after,assets})=>{
     const originalGl=gl,canvas=document.createElement('canvas');canvas.width=canvas.height=64;canvas.style.width=canvas.style.height='64px';document.body.append(canvas);
     const policy={...StageResourcePolicy,caps:{...StageResourcePolicy.caps,gpuContexts:1,drawingBufferPixels:4096,renderTargetDeclaredBytes:65536,
-      programs:2,textureDeclaredBytes:768,bufferDeclaredBytes:368,ownedCpuBytes:368,decodeReservedBytes:768}};
+      programs:2,textureDeclaredBytes:768+36,bufferDeclaredBytes:368,ownedCpuBytes:368+16,decodeReservedBytes:768}};
     const ownLedger=StageResourceBudget.create(policy),limited=SpaceStagePure.create(canvas,{qualityMode:'low',deviceTier:2,compositionTarget:{width:64,height:64},resources:ownLedger.port('retirement','retirement')});
     const project=ir=>({...ir,resolvedAssets:assets,sessionId:'retirement',generation:1,target:{width:64,height:64,fit:'stretch',budgetFps:30,budgetAllocationRevision:1}});
     await limited.selectComposition(project(before));limited.frame({sceneTime:0,paused:true});const old=limited.stats().sceneStats;
@@ -835,6 +962,29 @@ const results=[];
   assert.deepEqual(completeRetirement.initialPhysical,[64,64]);assert.deepEqual(completeRetirement.resizedPhysical,[64,64]);
   assert.equal(completeRetirement.admitted.violations.length,0);assert.ok(Object.values(completeRetirement.ended.held).every(value=>value===0));
   results.push({case:'new semantic IR forecasts and retires the complete old scope/pool/RT/program ownership under its exact original envelope',completeRetirement});
+  const timelineRetirement=await page.evaluate(async ({before,after,assets})=>{
+    const originalGl=gl,canvas=document.createElement('canvas');canvas.width=canvas.height=64;
+    canvas.style.width=canvas.style.height='64px';document.body.append(canvas);
+    const ir=before.ir,workspaceBytes=ir.numericSlots.length*17+ir.nodes.length*4+ir.inputs.length*8
+      +ir.bindings.reduce((sum,binding)=>sum+(binding.maxStack+1)*8,0);
+    const policy={...StageResourcePolicy,caps:{...StageResourcePolicy.caps,ownedCpuBytes:184+16+workspaceBytes}};
+    const ownLedger=StageResourceBudget.create(policy),limited=SpaceStagePure.create(canvas,{
+      qualityMode:'low',deviceTier:2,compositionTarget:{width:64,height:64},resources:ownLedger.port('timeline','timeline')});
+    const project=value=>({...value,resolvedAssets:assets,sessionId:'timeline',generation:1,
+      target:{width:64,height:64,fit:'stretch',budgetFps:30,budgetAllocationRevision:1}});
+    try{
+      await limited.selectComposition(project(before));limited.frame({sceneTime:0,paused:true});
+      const heldBefore=ownLedger.snapshot().held.ownedCpuBytes;
+      await limited.selectComposition(project(after));limited.frame({sceneTime:.5,paused:true,seek:true});
+      const heldAfter=ownLedger.snapshot().held.ownedCpuBytes;
+      limited.dispose();return {workspaceBytes,cap:policy.caps.ownedCpuBytes,heldBefore,heldAfter,ended:ownLedger.snapshot()};
+    }finally{limited.dispose();canvas.remove();window.gl=originalGl;}
+  },{before:timelineFixture,after:timelineReplacement,assets:resolved});
+  assert(timelineRetirement.workspaceBytes>0);assert.equal(timelineRetirement.heldBefore,timelineRetirement.cap);
+  assert.equal(timelineRetirement.heldAfter,timelineRetirement.cap);
+  assert.equal(timelineRetirement.ended.violations.length,0);
+  assert(Object.values(timelineRetirement.ended.held).every(value=>value===0));
+  results.push({case:'animated replacement retires timeline workspace at the exact CPU cap and frees all tickets',timelineRetirement});
   await select(alpha);
   const denied=await page.evaluate(async compiled=>{const original=port.require;let calls=0,loads=0;
     const src=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'src');Object.defineProperty(HTMLImageElement.prototype,'src',{...src,set(value){if(value)loads++;return src.set.call(this,value);}});

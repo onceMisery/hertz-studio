@@ -21,7 +21,8 @@ const spatial = {
   scale: { ...vector([1, 1, 1]), min: 0.0001 }, ...appearance
 };
 const asset = (kinds, required, usage) => ({ kinds, required, usage });
-const node = (type, space, properties, assets = {}) => ({ type, stateVersion: 1, space, properties, assets });
+const node = (type, space, properties, assets = {}) => ({ type, stateVersion: 1, space,
+  timeModel: type === 'builtinScene' ? 'integrated' : 'absolute', properties, assets });
 export const nodeDefinitions = [
   node('image', '2d', { ...planar, fit: select('cover', ['contain', 'cover', 'stretch']) }, {
     asset: asset(['image', 'vector'], true, 'color'), maskAsset: asset(['image', 'texture'], false, 'mask')

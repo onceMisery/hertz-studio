@@ -11,6 +11,20 @@
   }
   var root, initialized = false, page = 'closed', host = null, generation = 0;
   var camera = global.SpaceCamera, returnFocus, background = [], queue = [], panels = [];
+  var queueCoverBorrows = [], frameCoverBorrow = null;
+  function releaseQueueCovers() { queueCoverBorrows.forEach(function (lease) { lease.release(); }); queueCoverBorrows = []; }
+  function retainQueueCovers(list) {
+    var nextBorrows = [], seen = new Set();
+    var next = (Array.isArray(list) ? list : []).map(function (item) {
+      if (!item.cover || seen.has(item.cover) || !global.HertzCovers || !HertzCovers.borrow) return item;
+      try {
+        var lease = HertzCovers.borrow(item.cover); if (lease) nextBorrows.push(lease); seen.add(item.cover);
+        return lease ? Object.assign({}, item, { cover: lease.url }) : item;
+      }
+      catch (_) { return Object.assign({}, item, { cover: null }); }
+    });
+    releaseQueueCovers(); queueCoverBorrows = nextBorrows; return next;
+  }
   var saveTimer = 0, idleTimer = 0, until = 0, dragging = false, pointer = null, point = null;
   var seeking = false, lockRequest = 0, status = { state: 'idle' }, lyricView;
   var performanceHost, lyricPerformance = null, performanceId = '', performanceSignature = '';
@@ -548,6 +562,8 @@
     releasePerformance();
     $('sp-canvas').textContent = ''; status = {state:'idle'}; $('sp-failure').hidden = true;
     if (lyricView) lyricView.reset(); lyricKey = ''; lastPosition = -1; lastTrack = null;
+    if (frameCoverBorrow) frameCoverBorrow.release(); frameCoverBorrow = null;
+    frame.track = frame.preview = null; lastSceneCover = '';
   }
   // -------------------------------------------------------------------------
   // 场景切换转场导演层（design/space3d-scene-transitions.md）
@@ -973,6 +989,13 @@
     if(fresh){for(var bi=0;bi<frame.bands.length;bi++)frame.level+=frame.bands[bi]||0;frame.level/=Math.max(1,frame.bands.length);}
     else {if(inputActive&&onset)onset.reset();if(!moving)spectrumWatermark=borrowed.spectrumRevision;}
     inputActive=fresh;frame.lyrics=lyrics(p);if(onset&&fresh)onset.step(delta,frame.bands,frame.now);frame.onset=fresh&&onset?onset.pulse||0:0;
+    if ((p.cover || '') !== lastSceneCover) {
+      var nextFrameBorrow = null;
+      try { if (global.HertzCovers && HertzCovers.borrow) nextFrameBorrow = HertzCovers.borrow(p.cover); }
+      catch (_) { p.cover = ''; }
+      if (nextFrameBorrow) p.cover = nextFrameBorrow.url;
+      if (frameCoverBorrow) frameCoverBorrow.release(); frameCoverBorrow = nextFrameBorrow;
+    }
     frame.track=p.track?{id:p.track.id,cover:p.cover||''}:null;
     var preview=activePreview();frame.preview=preview?{id:preview.id,cover:preview.cover||'',title:preview.title,artist:preview.artist}:null;
     frame.sceneTime=sceneTimeMs/1000;frame.dynamicDt=frame.dt;
@@ -1306,7 +1329,7 @@
   }
   global.Space3D={init:init,open:open,close:close,toggle:function(id){if(page==='closed')open(id);else close();return page!=='closed';},isActive:function(){return page!=='closed';},
     enterStage:enterStage,goHome:goHome,configure:configure,preferences:preferences,bindPlayer:function(bridge){playerBridge=bridge||{};},openQueue:function(){if(page!=='closed')panel('sp-playlist',true,$('sp-playlist-toggle'));},setQueue:function(list){
-      queue=list||[];panelPreview=panelPreview?trackById(panelPreview.id):null;nodePreview=nodePreview?trackById(nodePreview.id):null;
+      queue=retainQueueCovers(list);frame.preview=null;panelPreview=panelPreview?trackById(panelPreview.id):null;nodePreview=nodePreview?trackById(nodePreview.id):null;
       if(shelf)shelf.setItems(queue);if(panels.some(function(p){return p.id==='sp-playlist';}))buildQueue();
       if(page!=='closed'){syncHud();touch(1800);}
     },
@@ -1314,5 +1337,10 @@
     sceneTransition:function(){return{phase:sceneFxState.phase,target:sceneFxState.target,type:sceneFxEffectiveType(),dur:sceneFxDuration()};},
     stats:function(){return{active:page!=='closed',page:page,source:prefs.sceneSource,sceneTimeMs:sceneTimeMs,spectrumWatermark:spectrumWatermark,inputActive:inputActive,renderer:rendererStats(),camera:camera?camera.pose():null,freeCam:camera?camera.isFreeEngaged():false,state:status,panels:panels.map(function(p){return p.id;}),
       transition:{phase:sceneFxState.phase,target:sceneFxState.target,type:sceneFxEffectiveType(),dur:sceneFxDuration()}};}};
+  if (global.addEventListener) global.addEventListener('pagehide', function (event) {
+    if (event.persisted) return;
+    releaseQueueCovers(); queue = []; frame.track = frame.preview = null;
+    if (frameCoverBorrow) frameCoverBorrow.release(); frameCoverBorrow = null;
+  });
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 }(window));

@@ -6,22 +6,31 @@
 // 角色纹理不移植。
 import * as THREE from 'three';
 import { mulberry32 } from './util.js';
+const canvasAdmissions = new WeakMap();
 
-function makeCanvas(w, h) {
+function makeCanvas(w, h, scope) {
+  const ticket = scope?.reserve({ canvases: 1, ownedCpuBytes: w * h * 4, textureDeclaredBytes: mipBytes(w, h) }, "Coast procedural RGBA8 canvas and mipmapped texture");
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
+  scope?.defer(() => { c.width = c.height = 0; });
+  ticket?.materialize({ canvases: 1, ownedCpuBytes: w * h * 4 });
+  if (ticket) canvasAdmissions.set(c, { ticket, bytes: mipBytes(w, h) });
   return [c, c.getContext('2d')];
 }
 
-function toTexture(c, { srgb = true, repeat = true, aniso = 8 } = {}) {
+function toTexture(c, { srgb = true, repeat = true, aniso = 8 } = {}, scope) {
   const t = new THREE.CanvasTexture(c);
   if (srgb) t.colorSpace = THREE.SRGBColorSpace;
   if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.anisotropy = aniso;
   t.needsUpdate = true;
-  return t;
+  const admission = canvasAdmissions.get(c);
+  if (admission) t.onUpdate = () => admission.ticket.commit({ textureDeclaredBytes: admission.bytes });
+  scope?.track(t); return t;
 }
+
+function mipBytes(w, h) { let bytes = 0; do { bytes += Math.max(1, w) * Math.max(1, h) * 4; w = Math.floor(w / 2); h = Math.floor(h / 2); } while (w || h); return bytes; }
 
 // 可平铺的多倍频值噪声
 function tileNoise(size, octaves, seed) {
@@ -57,8 +66,9 @@ function tileNoise(size, octaves, seed) {
   return out;
 }
 
-export function makeDetailTexture(size = 256, lo = 0.78, hi = 1.0, seed = 7) {
-  const [c, ctx] = makeCanvas(size, size);
+export function makeDetailTexture(size = 256, lo = 0.78, hi = 1.0, seed = 7, scope) {
+  const [c, ctx] = makeCanvas(size, size, scope);
+  const scratch = scope?.reserve({ ownedCpuBytes: size * size * 8 + 4 * (16 + 64 + 256 + 1024 + 4096 + 16384) }, "Coast detail noise six octave grids and ImageData");
   const n = tileNoise(size, 6, seed);
   const img = ctx.createImageData(size, size);
   for (let i = 0; i < n.length; i++) {
@@ -69,15 +79,16 @@ export function makeDetailTexture(size = 256, lo = 0.78, hi = 1.0, seed = 7) {
     img.data[i * 4 + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
-  return toTexture(c, { srgb: false });
+  scope?.releaseReservation(scratch);
+  return toTexture(c, { srgb: false }, scope);
 }
 
 // 路面：24m x 5.4m 一个周期，含边线、虚线中线、自行车道标识
-export function makeRoadTextures() {
+export function makeRoadTextures(scope) {
   const W = 2048;
   const H = 512;
-  const [c, ctx] = makeCanvas(W, H);
-  const [b, bctx] = makeCanvas(W, H);
+  const [c, ctx] = makeCanvas(W, H, scope);
+  const [b, bctx] = makeCanvas(W, H, scope);
   const rnd = mulberry32(42);
   ctx.fillStyle = '#44464b';
   ctx.fillRect(0, 0, W, H);
@@ -170,21 +181,21 @@ export function makeRoadTextures() {
   ctx.fill();
   ctx.restore();
 
-  const map = toTexture(c, { aniso: 16 });
-  const bump = toTexture(b, { srgb: false, aniso: 16 });
+  const map = toTexture(c, { aniso: 16 }, scope);
+  const bump = toTexture(b, { srgb: false, aniso: 16 }, scope);
   return { map, bump };
 }
 
-export function makeSpriteTexture() {
+export function makeSpriteTexture(scope) {
   const S = 128;
-  const [c, ctx] = makeCanvas(S, S);
+  const [c, ctx] = makeCanvas(S, S, scope);
   const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
   g.addColorStop(0, 'rgba(255,255,255,1)');
   g.addColorStop(0.25, 'rgba(255,255,255,0.8)');
   g.addColorStop(1, 'rgba(255,255,255,0)');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, S, S);
-  return toTexture(c, { repeat: false });
+  return toTexture(c, { repeat: false }, scope);
 }
 
 // 标准人形骑行者简笔（交通警示牌画法）：前倾躯干 + 双轮车架，
@@ -248,9 +259,9 @@ function drawRiderGlyph(ctx, x, y, s) {
 }
 
 // 路牌：黄色菱形警示牌
-export function makeSignTexture(kind) {
+export function makeSignTexture(kind, scope) {
   const S = 512;
-  const [c, ctx] = makeCanvas(S, S);
+  const [c, ctx] = makeCanvas(S, S, scope);
   ctx.clearRect(0, 0, S, S);
   if (kind === 'crossing') {
     ctx.save();
@@ -296,7 +307,7 @@ export function makeSignTexture(kind) {
     ctx.font = '700 44px "Arial", sans-serif';
     ctx.fillText('COAST AHEAD  ➜', S / 2, S / 2 + 56);
   }
-  return toTexture(c, { repeat: false });
+  return toTexture(c, { repeat: false }, scope);
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -310,12 +321,12 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // 灯塔条纹 / 遮阳伞条纹
-export function makeStripeTexture(colors, n = 8, vertical = false) {
-  const [c, ctx] = makeCanvas(256, 256);
+export function makeStripeTexture(colors, n = 8, vertical = false, scope) {
+  const [c, ctx] = makeCanvas(256, 256, scope);
   for (let i = 0; i < n; i++) {
     ctx.fillStyle = colors[i % colors.length];
     if (vertical) ctx.fillRect((i * 256) / n, 0, 256 / n + 1, 256);
     else ctx.fillRect(0, (i * 256) / n, 256, 256 / n + 1);
   }
-  return toTexture(c);
+  return toTexture(c, {}, scope);
 }

@@ -67,11 +67,26 @@ const adapterSandbox = {
   },
   requestAnimationFrame: () => 1, cancelAnimationFrame() {}, clearTimeout() {},
 };
+const noop = () => {};
+const ticket = () => ({ commit: noop, release: noop });
+Object.assign(adapterSandbox.window, { addEventListener: noop, removeEventListener: noop,
+  Stage: { gate: noop, removeGate: noop, onFrameState: () => noop, kick: noop,
+    isDocumentHidden: () => false, frameState: () => ({ spectrumRevision: 0 }),
+    resources: () => ({ contractVersion: 1, port: () => ({ require: ticket, report: noop, forgetReport: noop }) }) } });
+adapterSandbox.document.dispatchEvent = noop;
+adapterSandbox.CustomEvent = function () {};
+adapterSandbox.document.removeEventListener = noop;
+fakeEngine.stats = () => ({});
+fakeEngine.setPrefs = prefs => fakeEngine.setInteraction(prefs.interactive);
+vm.runInNewContext(fs.readFileSync(path.join(root, 'plugin/ui/stage-scene-host.js'), 'utf8'), adapterSandbox);
+adapterSandbox.StageSceneHost = adapterSandbox.window.StageSceneHost;
+adapterSandbox.Stage = adapterSandbox.window.Stage;
+adapterSandbox.ZodiacStagePure = fakeEngine;
 vm.runInNewContext(fs.readFileSync(path.join(root, 'plugin/ui/stage-zodiac.js'), 'utf8'), adapterSandbox);
 const adapter = adapterSandbox.window.StageZodiac;
 assert.equal(typeof adapter.setRig, 'function', 'StageZodiac camera adapter export');
 assert.equal(typeof adapter.setInteraction, 'function', 'StageZodiac pointer handoff');
-const host = { clientWidth: 640, clientHeight: 360, appendChild() {} };
+const host = { clientWidth: 640, clientHeight: 360, appendChild() {}, addEventListener() {}, removeEventListener() {} };
 adapter.setHost(host);
 adapter.setInteraction(false);
 const supplied = { position: [1, 2, 3], yaw: 0.6, pitch: 0.2, fov: 48 };

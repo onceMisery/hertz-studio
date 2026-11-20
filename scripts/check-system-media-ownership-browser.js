@@ -10,7 +10,8 @@ const app = fs.readFileSync(path.join(root, 'plugin/ui/app.js'), 'utf8').replace
 const room = fs.readFileSync(path.join(root, 'plugin/ui/room.js'), 'utf8').replace(/\r\n/g, '\n');
 const moduleSource = fs.readFileSync(path.join(root, 'plugin/ui/system-media.js'), 'utf8');
 const appSource = app.slice(app.indexOf('const MEDIA_SESSION_ACTIONS ='), app.indexOf('\n// ---------------------------------------------------------------------------\n// 控件', app.indexOf('const MEDIA_SESSION_ACTIONS =')));
-const roomSource = room.slice(room.indexOf('  function syncMediaSession('), room.indexOf('  function animateMessage('));
+const roomSource = room.slice(room.indexOf('  function isPlaying('), room.indexOf('\n', room.indexOf('  function isPlaying('))) + '\n'
+  + room.slice(room.indexOf('  function syncMediaSession('), room.indexOf('  function animateMessage('));
 assert(appSource.includes('hertz-system-media-owner-changed'));
 assert(roomSource.includes('HertzSystemMedia'));
 assert(app.includes('await window.HertzSystemMedia.init(transport);'), 'initial ownership must resolve before room/app MediaSession startup');
@@ -66,6 +67,9 @@ async function main() {
         current: { id: 'local-track', title: 'Local song', artist: 'Local artist', album: 'Local album', cover: '/local-cover.jpg' }, stopped: false,
       };
       window.Stage = { coverUrl: () => state.current.cover };
+      // This fixture uses HTTP artwork only; data-URL source retention is
+      // exercised with the real ledger in check-cover-resources-browser.js.
+      window.retainCoverSource = url => { if (url && /^data:/i.test(url)) throw new Error('unexpected encoded artwork'); return null; };
       window.playbackDuration = snapshot => snapshot.duration_ms;
       window.setPlayback = action => test.dispatched.push([action]);
       window.stopPlayback = () => test.dispatched.push(['stop']);

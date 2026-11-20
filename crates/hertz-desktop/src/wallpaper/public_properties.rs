@@ -293,6 +293,7 @@ mod tests {
             .create(Document {
                 composition: None,
                 resources: vec![],
+                provenance: None,
                 title: title.into(),
                 description: String::new(),
                 scene_id: "coast".into(),

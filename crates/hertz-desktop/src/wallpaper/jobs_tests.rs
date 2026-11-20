@@ -2639,6 +2639,16 @@ fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit(
         !session.clear_media_pause(timeout_at + Duration::from_secs(2)),
         "late resume cannot erase an expired native deadline"
     );
+    assert_eq!(
+        super::super::policy::preview_generation_gate(
+            false,
+            None,
+            Some(FrameKind::Video),
+            session.media_pause_expired(timeout_at + Duration::from_secs(2)),
+        ),
+        super::super::policy::PreviewGenerationGate::PauseUnconfirmed,
+        "a generation lease ending after the acknowledgement deadline must retire the preview, not leave it frozen"
+    );
     assert_eq!(session.media_pause_confirmed(), Some(false));
     assert_eq!(
         budget.usage().decoder_slots,

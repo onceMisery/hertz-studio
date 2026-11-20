@@ -97,10 +97,14 @@ async function start() {
   save('startup', { ...report, health: { ...report.health }, serverPort: discovery.port });
 }
 async function embedded() {
+  const build = JSON.parse(execFileSync(binary, ['--describe'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }));
+  assert.equal(build.edition, edition, 'selected edition matches the compiled artifact');
+  assert.ok(['debug', 'release'].includes(build.profile), 'known actual build profile');
+  report.build = build;
   const helper = path.join(output, 'edition-ui.exe'), expectedUi = path.join(output, 'expected-ui');
   execFileSync('rustc', ['--edition=2021', path.join(root, 'build-support/edition-ui.rs'), '-o', helper], { windowsHide: true });
   execFileSync(helper, [path.join(root, 'plugin/ui'), expectedUi, edition, 'desktop'], { windowsHide: true });
-  require('./minify-ui').minifyUi(expectedUi);
+  if (build.profile === 'release') require('./minify-ui').minifyUi(expectedUi);
   report.buildOwners = Object.fromEntries(['build-support/edition-ui.rs', 'scripts/minify-ui.js', 'crates/hertz-studio/build.rs']
     .map(file => [file, hash(fs.readFileSync(path.join(root, file)))]));
   const files = ['app.js', 'stage-json-source.js', 'stage-persistence.js', 'stage-resource-budget.js', 'stage-resource-policy.js', 'stage-image-source.js', 'stage.js', 'stage-particles.js',

@@ -375,7 +375,7 @@ function whitePng() {
 // Two nodes with distinct materials over one shared white texture. Both
 // materials are OPAQUE by default (one program variant); `masked` makes the
 // second MASK so active alpha test adds a second variant.
-function multiMaterialGlb(masked = false) {
+function multiMaterialGlb(masked = false, mixedDoubleSided = false) {
   const image = whitePng(), binary = Buffer.alloc(104 + image.length);
   positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
   normals.forEach((value, index) => binary.writeFloatLE(value, 36 + index * 4));
@@ -387,6 +387,7 @@ function multiMaterialGlb(masked = false) {
     pbrMetallicRoughness: { baseColorFactor: factor, baseColorTexture: { index: 0, texCoord: 0 },
       metallicFactor: 0, roughnessFactor: 1 },
     alphaMode,
+    doubleSided: mixedDoubleSided,
     ...(alphaMode === 'MASK' ? { alphaCutoff: 0.5 } : {})
   });
   const json = {
@@ -409,7 +410,7 @@ function multiMaterialGlb(masked = false) {
     images: [{ bufferView: 4, mimeType: 'image/png' }],
     samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
     textures: [{ source: 0, sampler: 0 }],
-    materials: [material([1, 0, 0, 1], 'OPAQUE'), material([0, 1, 0, 1], masked ? 'MASK' : 'OPAQUE')]
+    materials: [material([1, 0, 0, 1], mixedDoubleSided ? 'BLEND' : 'OPAQUE'), material([0, 1, 0, 1], masked ? 'MASK' : 'OPAQUE')]
   };
   const text = Buffer.from(JSON.stringify(json));
   const jsonBytes = Math.ceil(text.length / 4) * 4, binBytes = Math.ceil(binary.length / 4) * 4;
@@ -422,7 +423,7 @@ function multiMaterialGlb(masked = false) {
   return { glb, input: { encodedBytes, jsonBytes, binBytes }, masked };
 }
 
-function texturedGlb() {
+function texturedGlb(doubleSided = false) {
   const image = texturedPng(), binary = Buffer.alloc(104 + image.length);
   positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
   normals.forEach((value, index) => binary.writeFloatLE(value, 36 + index * 4));
@@ -450,7 +451,7 @@ function texturedGlb() {
     materials: [{
       pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], baseColorTexture: { index: 0, texCoord: 0 },
         metallicFactor: 0, roughnessFactor: 1 },
-      alphaMode: 'OPAQUE'
+      alphaMode: 'OPAQUE', doubleSided
     }]
   };
   const text = Buffer.from(JSON.stringify(json));

@@ -1,3 +1,4 @@
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // Deep space and perspective star travel share the performance's frozen clock.
 import { own, seed } from './factories.js';
@@ -169,11 +170,12 @@ void main(){
 
 export function createPhoenixSanctum(ctx, parent, uniforms) {
   const T = ctx.THREE;
-  const ash = new T.Mesh(own(ctx, new T.PlaneGeometry(56, 56)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const ash = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [56, 56])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
     fragmentShader: ashFragment, transparent: true, depthWrite: false, side: T.DoubleSide })));
   ash.name = 'phoenix-ash-bed'; ash.rotation.x = -Math.PI / 2; ash.position.set(0, -5.65, -1.4);
   ash.renderOrder = -3; ash.frustumCulled = false; parent.add(ash);
+  declaredArrayPayload(ctx.scope,3*161*2*3+3*160*6,'Phoenix cinder geometry numeric scratch and typed arrays',4,1);
   const positions = [], indices = [], segments = 160;
   for (let lane = 0; lane < 3; lane++) {
     const start = positions.length / 3;
@@ -189,6 +191,7 @@ export function createPhoenixSanctum(ctx, parent, uniforms) {
     transparent: true, depthWrite: false, side: T.DoubleSide, forceSinglePass: true, blending: T.AdditiveBlending })));
   // Shader-positioned effects must follow the depth-writing hero and egg.
   flow.name = 'phoenix-cinder-flow'; flow.renderOrder = 7; flow.frustumCulled = false; parent.add(flow);
+  declaredArrayPayload(ctx.scope,480*14,'Phoenix near ember typed-array construction and copies');
   const count = 480, embers = new Float32Array(count * 4);
   for (let i = 0; i < count; i++) embers.set([seed(i, 71), seed(i, 72), seed(i, 73), seed(i, 74)], i * 4);
   const emberGeometry = own(ctx, new T.BufferGeometry());
@@ -203,6 +206,7 @@ export function createPhoenixSanctum(ctx, parent, uniforms) {
 export function createPhoenixStarTravel(ctx, parent, uniforms) {
   const T = ctx.THREE, count = 1000;
   function geometry(lines) {
+    declaredArrayPayload(ctx.scope,count*(lines?2:1)*8,'Phoenix travel star numeric scratch and typed arrays',4,1);
     const positions = [], stars = [], ends = [];
     for (let i = 0; i < count; i++) {
       const angle = seed(i, 51) * Math.PI * 2, radius = 3.4 + Math.sqrt(seed(i, 52)) * 25;

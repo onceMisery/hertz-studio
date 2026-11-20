@@ -596,18 +596,110 @@ async function dbxRequest(path, options = {}, attempt = 0) {
 // 或 CSS url()。所以它保持同步只读缓存，未命中时返回 null 并顺手触发异步填充，
 // 填好后经 onCoverReady 通知，由调用方重绘那一格。
 const COVER_CACHE_MAX = 200;
-const coverCache = new Map();    // id -> data URL；Map 的插入序就是 LRU 序
-const coverPending = new Map();  // id -> Promise，避免同一张图被并发取多次
+// plugin/vendor/dbx-plugin-sdk/src/lib.rs rejects JSON frames above 8 MiB.
+// Reserve the UTF16 wire and parsed response together before invoking the bridge.
+const COVER_DBX_JSON_BYTES = 8 * 1024 * 1024;
+const COVER_TIMEOUT_MS = 8000;
+const coverCache = new Map();    // id -> owned source；Map 的插入序就是 LRU 序
+const coverPending = new Map();  // id -> latest request; retired calls stay charged until settlement
+const coverRequests = new Set();
+const coverSources = new Set(); // live representations, including evicted sources with borrowers
 const coverListeners = new Set();
+let coverResourcePort = null;
+let coverOwnerClosed = false;
 
-function coverRemember(id, dataUrl) {
+function coverResources() {
+  if (!coverResourcePort) {
+    const ledger = window.Stage && Stage.resources && Stage.resources();
+    if (!ledger || ledger.contractVersion !== 1) throw new Error('resource-policy-required');
+    coverResourcePort = ledger.port('common-cover');
+  }
+  return coverResourcePort;
+}
+
+function releaseCoverTicket(ticket) {
+  if (ticket) ticket.release({ apiReleased: true, allocationEnded: true });
+}
+
+function reportCoverOwner(reason) {
+  if (!coverResourcePort) return;
+  coverResourcePort.report({ state: coverOwnerClosed ? 'retiring' : 'ready', reason: reason || '',
+    cachedSources: coverCache.size, retainedSources: coverSources.size, requests: coverRequests.size,
+    presentation: 'DOM/CSS and foreign image loading are browser-managed; physical bytes unmeasured' });
+}
+
+function forgetCover(id) {
+  const source = coverCache.get(id);
+  if (!source) return;
   coverCache.delete(id);
-  coverCache.set(id, dataUrl);
-  while (coverCache.size > COVER_CACHE_MAX) coverCache.delete(coverCache.keys().next().value);
+  source.retire();
+}
+
+function coverRemember(id, source) {
+  if (coverCache.get(id) !== source) forgetCover(id);
+  coverCache.delete(id);
+  coverCache.set(id, source);
+  while (coverCache.size > COVER_CACHE_MAX) forgetCover(coverCache.keys().next().value);
+  reportCoverOwner();
+}
+
+function createCoverSource(id, cover, retainedUrl) {
+  const type = cover && (cover.content_type || 'image/jpeg');
+  if (!retainedUrl && (typeof cover.data !== 'string' || typeof type !== 'string'
+      || cover.data.length + type.length > COVER_DBX_JSON_BYTES)) throw new Error('estimate-unavailable');
+  const bytes = (retainedUrl ? retainedUrl.length : cover.data.length + type.length + 13) * 2 + id.length * 2 + 256;
+  const ticket = coverResources().require({ ownedCpuBytes: bytes },
+    'cover UTF16 data URL plus cache identity; DBX response coexists until its request settles', 0, 'bounded-estimate');
+  let url = '', borrowers = 0, retired = false;
+  const source = {
+    get url() { return url; },
+    get borrowers() { return borrowers; },
+    borrow(resources = coverResources()) {
+      if (!url) return null;
+      const metadata = resources.require({ ownedCpuBytes: 128 }, 'cover source lease identity and release closure', 0, 'bounded-estimate');
+      const lease = resources.retain(ticket.resourceId, resources.nextId());
+      if (!lease.ok) { releaseCoverTicket(metadata); throw new Error(lease.reason); }
+      metadata.commit();
+      borrowers++;
+      let released = false;
+      return { url, accounted: true, release() {
+        if (released) return;
+        released = true; lease.ticket.release(); releaseCoverTicket(metadata); borrowers--; cleanup();
+      } };
+    },
+    retire() { retired = true; cleanup(); },
+  };
+  function cleanup() {
+    if (!retired || borrowers) return;
+    url = ''; coverSources.delete(source); releaseCoverTicket(ticket); reportCoverOwner();
+  }
+  try {
+    url = retainedUrl || `data:${type};base64,${cover.data}`;
+    const committed = ticket.commit({ ownedCpuBytes: url.length * 2 + id.length * 2 + 256 });
+    if (!committed.ok) throw new Error(committed.reason);
+    coverSources.add(source);
+    return source;
+  } catch (error) { url = ''; releaseCoverTicket(ticket); throw error; }
+}
+
+function borrowCoverSource(url, resources) {
+  // This is an index of the original owner's live representations, not a URL cache.
+  for (const source of coverSources) if (source.url === url) return source.borrow(resources);
+  return null;
+}
+
+function retainCoverSource(url, resources) {
+  if (!url || !/^data:/i.test(url)) return null;
+  const borrowed = borrowCoverSource(url, resources);
+  if (borrowed) return borrowed;
+  // A synchronous URL may outlive its cache entry before a later owner adopts
+  // it. This handoff retains the existing string, without making another cache.
+  const source = createCoverSource('', null, url);
+  try { return source.borrow(resources); } finally { source.retire(); }
 }
 
 function notifyCover(id, dataUrl) {
-  repaintCovers(id, dataUrl);
+  try { repaintCovers(id, dataUrl); } catch (err) { console.warn('[hertz] 封面回填失败', err); }
   coverListeners.forEach((listener) => {
     try { listener(id, dataUrl); } catch (err) { console.warn('[hertz] 封面重绘失败', err); }
   });
@@ -615,27 +707,85 @@ function notifyCover(id, dataUrl) {
 
 function ensureCover(id) {
   if (!id) return Promise.resolve(null);
-  if (coverCache.has(id)) return Promise.resolve(coverCache.get(id));
-  if (coverPending.has(id)) return coverPending.get(id);
-  const task = dbxRequest(`/v1/tracks/${encodeURIComponent(id)}/cover`)
-    .then((cover) => {
-      if (!cover || !cover.data) return null;
-      const dataUrl = `data:${cover.content_type || 'image/jpeg'};base64,${cover.data}`;
-      coverRemember(id, dataUrl);
-      notifyCover(id, dataUrl);
-      return dataUrl;
-    })
-    // 取不到就保持无封面，不该让整行渲染失败。
-    .catch(() => null)
-    .finally(() => coverPending.delete(id));
-  coverPending.set(id, task);
-  return task;
+  return requestCover(id, `/v1/tracks/${encodeURIComponent(id)}/cover`);
+}
+
+function requestCover(key, path) {
+  const cached = coverCache.get(key);
+  if (cached) return Promise.resolve(cached.url);
+  if (coverPending.has(key)) return coverPending.get(key).promise;
+  if (coverOwnerClosed || coverRequests.size >= COVER_CACHE_MAX) {
+    if (!coverOwnerClosed) notifyCover(key, null);
+    return Promise.resolve(null);
+  }
+  let resources, requestTicket;
+  try {
+    resources = coverResources();
+    requestTicket = resources.require({ ownedCpuBytes: 1024 + (key.length + path.length) * 2 },
+      'bounded cover request identity, callbacks and single watchdog', 0, 'bounded-estimate');
+    requestTicket.commit();
+  } catch (error) { reportCoverOwner(error.message); notifyCover(key, null); return Promise.resolve(null); }
+  const controller = new AbortController();
+  let resolveResult;
+  const request = { promise: new Promise(resolve => { resolveResult = resolve; }), started: false,
+    cancel() { controller.abort(); if (responseTicket) responseTicket.cancel(); finish(null); if (!request.started) cleanup(); } };
+  let responseTicket = null, unwatch = null, timer = null, finished = false, cleaned = false;
+  const current = () => !coverOwnerClosed && !controller.signal.aborted && coverPending.get(key) === request;
+  function finish(url) {
+    if (finished) return;
+    finished = true; clearTimeout(timer); timer = null;
+    if (unwatch) { unwatch(); unwatch = null; }
+    if (coverPending.get(key) === request) notifyCover(key, url);
+    resolveResult(url);
+  }
+  function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
+    if (coverPending.get(key) === request) coverPending.delete(key);
+    coverRequests.delete(request); releaseCoverTicket(responseTicket); releaseCoverTicket(requestTicket);
+    responseTicket = requestTicket = null; reportCoverOwner();
+  }
+  function start() {
+    if (!current() || request.started) return;
+    try {
+      const responsePlan = { ownedCpuBytes: COVER_DBX_JSON_BYTES * 4 + 4096 };
+      if (!resources.preflight(responsePlan, []).ok) {
+        for (const [id, source] of coverCache) {
+          if (source.borrowers) continue;
+          forgetCover(id);
+          if (resources.preflight(responsePlan, []).ok) break;
+        }
+      }
+      responseTicket = resources.require(responsePlan,
+        'DBX SDK 8 MiB JSON frame: UTF16 wire and parsed base64 response coexistence', 0, 'bounded-estimate');
+    } catch (error) {
+      if (error.message !== 'aggregate-budget') { finish(null); cleanup(); }
+      // Original request owner waits only for a release notification, never a frame/retry loop.
+      return;
+    }
+    request.started = true;
+    if (unwatch) { unwatch(); unwatch = null; }
+    dbxRequest(path, { signal: controller.signal, waitForSettlement: true, retry: false, timeoutMs: COVER_TIMEOUT_MS })
+      .then(cover => {
+        if (!current() || !cover || !cover.data) return null;
+        responseTicket.commit();
+        const source = createCoverSource(key, cover);
+        coverRemember(key, source);
+        return source.url;
+      }).then(url => finish(current() ? url : null), error => { reportCoverOwner(error.message); finish(null); })
+      .finally(cleanup);
+  }
+  coverRequests.add(request); coverPending.set(key, request);
+  unwatch = resources.onAvailable(start);
+  timer = setTimeout(() => request.cancel(), COVER_TIMEOUT_MS);
+  start(); reportCoverOwner();
+  return request.promise;
 }
 
 function dbxCoverUrl(id) {
   if (!id) return null;
   const hit = coverCache.get(id);
-  if (hit) { coverRemember(id, hit); return hit; }  // 命中即刷新 LRU 位置
+  if (hit) { coverRemember(id, hit); return hit.url; }  // 命中即刷新 LRU 位置
   ensureCover(id);
   return null;
 }
@@ -655,21 +805,7 @@ function remoteCoverKey(url) {
 
 function ensureRemoteCover(url) {
   const key = remoteCoverKey(url);
-  if (coverCache.has(key)) return Promise.resolve(coverCache.get(key));
-  if (coverPending.has(key)) return coverPending.get(key);
-  const task = dbxRequest(`/v1/online/cover?url=${encodeURIComponent(url)}`)
-    .then((cover) => {
-      if (!cover || !cover.data) return null;
-      const dataUrl = `data:${cover.content_type || 'image/jpeg'};base64,${cover.data}`;
-      coverRemember(key, dataUrl);
-      notifyCover(key, dataUrl);
-      return dataUrl;
-    })
-    // 取不到就保持占位，不该让整行渲染失败。
-    .catch(() => null)
-    .finally(() => coverPending.delete(key));
-  coverPending.set(key, task);
-  return task;
+  return requestCover(key, `/v1/online/cover?url=${encodeURIComponent(url)}`);
 }
 
 /// 同步契约，与 dbxCoverUrl 同款：命中缓存给 data URL；未命中返回 null 并触发取
@@ -678,7 +814,7 @@ function remoteCover(url) {
   if (!url) return null;
   if (transport.kind !== 'dbx' || !isRemoteCoverUrl(url)) return url;
   const hit = coverCache.get(remoteCoverKey(url));
-  if (hit) return hit;
+  if (hit) return hit.url;
   ensureRemoteCover(url);
   return null;
 }
@@ -690,6 +826,14 @@ async function resolveCover(url) {
   if (transport.kind !== 'dbx' || !isRemoteCoverUrl(url)) return url;
   return (await ensureRemoteCover(url)) || null;
 }
+
+// Controlled raster consumers borrow the retained source across decode/upload.
+// The ordinary synchronous URL API remains unchanged for DOM presentation.
+resolveCover.borrow = async function (url, resources, signal) {
+  const resolved = await resolveCover(url);
+  if (signal && signal.aborted) return { url: resolved, accounted: false };
+  return retainCoverSource(resolved, resources) || { url: resolved, accounted: false };
+};
 
 /// 回填登记。独立形态下立即用原 URL 调一次 apply，调用点不用分支。
 function remoteCoverSlot(url, apply) {
@@ -705,39 +849,202 @@ function remoteCoverSlot(url, apply) {
 // 一个元素只接受最近一次封面选择。代理返回和图片解码都可能乱序，
 // 用元素本身持有的意图校验；只等待本次解析，不持有永久回填订阅。
 const coverAssignments = new WeakMap();
+const coverDisplayedSources = new Set();
+const coverMountedAssignments = new Set();
+const coverPreparations = new Set();
+const coverPreparationQueue = new Set();
+const coverResolutionWaiters = new Set();
+const COVER_PREPARE_MAX = 32;
+const COVER_PREPARE_WAIT_MAX = 200;
+let coverAssignmentObserver = null;
+let drainingCoverPreparations = false;
 
-function assignCover(el, url, apply) {
-  if (!el) return;
-  const assignment = { revision: 0 };
-  coverAssignments.set(el, assignment);
-  const commit = (resolved) => {
-    const revision = ++assignment.revision;
-    const current = () => coverAssignments.get(el) === assignment && assignment.revision === revision;
-    if (!current()) return;
-    if (!resolved || typeof Image === 'undefined') { apply(resolved || ''); return; }
-    const image = new Image();
-    const done = () => { if (current()) apply(resolved); };
-    const failed = () => { if (current()) apply(''); };
-    if (typeof image.decode === 'function') {
-      image.src = resolved;
-      image.decode().then(done, failed);
-    } else {
-      image.onload = done;
-      image.onerror = failed;
-      image.src = resolved;
+function retireCoverAssignment(assignment) {
+  if (assignment.retired) return;
+  assignment.retired = true;
+  const target = assignment.ref.deref();
+  if (target && coverAssignments.get(target) === assignment) coverAssignments.delete(target);
+  if (assignment.cancel) assignment.cancel(); assignment.cancel = null;
+  // Release DOM-held URLs before refunding their source, including detached
+  // elements that a virtualized list may retain for later reuse.
+  if (target && assignment.clear) assignment.clear(target);
+  if (assignment.display) assignment.display.release(); assignment.display = null;
+  if (assignment.candidate) assignment.candidate.release(); assignment.candidate = null;
+  assignment.apply = assignment.clear = null; assignment.requested = null;
+  coverDisplayedSources.delete(assignment); coverMountedAssignments.delete(assignment);
+}
+
+function watchCoverAssignment(assignment) {
+  coverMountedAssignments.add(assignment);
+  if (!coverAssignmentObserver && typeof MutationObserver !== 'undefined' && document.documentElement) {
+    coverAssignmentObserver = new MutationObserver(records => {
+      for (const use of coverMountedAssignments) {
+        const target = use.ref.deref();
+        if (!use.connected && target && records) use.connected = records.some(record =>
+          Array.from(record.addedNodes || []).some(node => node === target || (node.contains && node.contains(target))));
+        if (target && target.isConnected) use.connected = true;
+        else if (!target || use.connected) retireCoverAssignment(use);
+      }
+    });
+    coverAssignmentObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+}
+
+function drainCoverPreparations() {
+  if (coverOwnerClosed || drainingCoverPreparations) return;
+  drainingCoverPreparations = true;
+  try {
+    for (const work of coverPreparationQueue) {
+      if (coverPreparations.size >= COVER_PREPARE_MAX) break;
+      // The controlled data decoder uses the original shared page lease budget.
+      // Keep this owner's data handoffs serial so a list burst cannot fail merely
+      // because earlier rows occupy all decode slots in the same microtask.
+      if (work.raster && Array.from(coverPreparations).some(active => active.raster)) continue;
+      coverPreparationQueue.delete(work); work.start();
     }
+  } finally { drainingCoverPreparations = false; }
+}
+
+function prepareCoverImage(url, timeoutMs = COVER_TIMEOUT_MS) {
+  if (!url || coverOwnerClosed || coverPreparationQueue.size >= COVER_PREPARE_WAIT_MAX)
+    return { promise: Promise.resolve(false), cancel() {} };
+  const controller = new AbortController();
+  let ticket = null, sourceBorrow = null, image = null, timer = null, completed = false, settled = false, started = false, resolveResult;
+  const work = { raster: /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(url),
+    promise: new Promise(resolve => { resolveResult = resolve; }), start,
+    cancel() { controller.abort(); finish(false); if (!started || image) cleanup(); } };
+  function finish(ok) {
+    if (completed) return;
+    completed = true; clearTimeout(timer); timer = null; resolveResult(ok);
+  }
+  function cleanup() {
+    if (settled) return;
+    settled = true;
+    if (image) { image.onload = image.onerror = null; image.removeAttribute('src'); image = null; }
+    if (sourceBorrow) sourceBorrow.release(); sourceBorrow = null;
+    url = null; releaseCoverTicket(ticket); ticket = null;
+    coverPreparations.delete(work); coverPreparationQueue.delete(work); drainCoverPreparations();
+  }
+  function start() {
+    if (completed || settled) return;
+    started = true; coverPreparations.add(work);
+    try {
+    if (work.raster) {
+      if (!window.StageImageSource) throw new Error('estimate-unavailable');
+      // Abort resolves the caller promptly, but the decoder's tickets and this
+      // operation stay held until decode actually settles and releases its source.
+      StageImageSource.decode(url, { resources: coverResources(), signal: controller.signal, resolve: resolveCover })
+        .then(source => {
+          try { finish(!controller.signal.aborted && source.image.naturalWidth > 0); }
+          finally { source.release(); }
+        }, error => { reportCoverOwner(error.message); finish(false); }).finally(cleanup);
+    } else {
+      // Foreign <img>/CSS presentation must not acquire a fetch/CORS requirement.
+      // This probe uses only the browser's loading events, never an explicit raster
+      // decode/canvas/upload. Its native cache/surface bytes remain observations.
+      image = document.createElement('img');
+      image.onload = () => { finish(image.naturalWidth > 0); cleanup(); };
+      image.onerror = () => { finish(false); cleanup(); };
+      image.src = url;
+    }
+    } catch (error) { reportCoverOwner(error.message); finish(false); cleanup(); }
+  }
+  try {
+    ticket = coverResources().require({ ownedCpuBytes: 512 },
+      'bounded cover preparation and waiting callbacks with single watchdog; native DOM surfaces excluded', 0, 'bounded-estimate');
+    ticket.commit();
+    sourceBorrow = retainCoverSource(url); if (sourceBorrow) url = sourceBorrow.url;
+    const deadline = Math.max(1, Math.min(COVER_TIMEOUT_MS, Number.isFinite(timeoutMs) ? timeoutMs : COVER_TIMEOUT_MS));
+    timer = setTimeout(() => work.cancel(), deadline);
+    coverPreparationQueue.add(work); drainCoverPreparations();
+  } catch (error) { reportCoverOwner(error.message); finish(false); cleanup(); }
+  return work;
+}
+
+function assignCover(el, url, apply, options = {}) {
+  if (!el) return;
+  const previous = coverAssignments.get(el);
+  if (previous && previous.cancel) previous.cancel();
+  const assignment = { display: previous && previous.display, candidate: null, cancel: null,
+    ref: new WeakRef(el), connected: el.isConnected === true || !!(previous && previous.connected), retired: false,
+    apply, clear: options.clear || null,
+    requested: options.requested && !/^data:/i.test(options.requested) ? options.requested : null };
+  if (previous) {
+    previous.retired = true; previous.display = null; previous.apply = previous.clear = null; previous.requested = null;
+    coverDisplayedSources.delete(previous); coverMountedAssignments.delete(previous);
+  }
+  coverAssignments.set(el, assignment);
+  if (assignment.display) coverDisplayedSources.add(assignment);
+  watchCoverAssignment(assignment);
+  const current = () => {
+    if (assignment.retired || coverAssignments.get(el) !== assignment || coverOwnerClosed) return false;
+    if (el.isConnected) assignment.connected = true;
+    else if (assignment.connected) { retireCoverAssignment(assignment); return false; }
+    return true;
   };
-  if (!url) { commit(''); return; }
+  const present = (resolved) => {
+    if (!current()) return;
+    assignment.apply(resolved || '');
+    assignment.apply = null;
+    if (assignment.display) assignment.display.release();
+    assignment.display = resolved ? assignment.candidate : null;
+    if (!resolved && assignment.candidate) assignment.candidate.release();
+    assignment.candidate = null;
+    assignment.requested = resolved ? options.requested || resolved : null;
+    coverDisplayedSources.delete(assignment); if (assignment.display) coverDisplayedSources.add(assignment);
+    else coverMountedAssignments.delete(assignment);
+  };
+  const commit = (resolved) => {
+    if (!current()) return;
+    if (!resolved) { present(''); return; }
+    try { assignment.candidate = retainCoverSource(resolved); if (assignment.candidate) resolved = assignment.candidate.url; }
+    catch (error) { reportCoverOwner(error.message); present(''); return; }
+    if (options.nativePresentation) { present(resolved); return; }
+    const work = prepareCoverImage(resolved);
+    assignment.cancel = () => {
+      work.cancel();
+      if (assignment.candidate) assignment.candidate.release();
+      assignment.candidate = null;
+    };
+    work.promise.then(ok => {
+      if (current()) present(ok ? resolved : '');
+      else if (assignment.candidate) { assignment.candidate.release(); assignment.candidate = null; }
+      assignment.cancel = null;
+    });
+  };
+  if (!current()) return;
+  if (!url) { commit(''); return assignment; }
   const resolved = remoteCover(url);
   if (resolved !== null) commit(resolved);
   // The promise completes on both proxy success and failure. Success-only
   // subscriptions would retain a stale cover and the element on a failed fetch.
-  else resolveCover(url).then(commit, () => commit(''));
+  else {
+    let ticket;
+    try {
+      if (coverResolutionWaiters.size >= COVER_CACHE_MAX) throw new Error('aggregate-budget');
+      ticket = coverResources().require({ ownedCpuBytes: 512 }, 'bounded one-shot cover assignment resolution callback', 0, 'bounded-estimate');
+      ticket.commit();
+    } catch (error) { reportCoverOwner(error.message); present(''); return; }
+    const waiter = { commit, canceled: false };
+    coverResolutionWaiters.add(waiter);
+    assignment.cancel = () => { waiter.canceled = true; waiter.commit = null; };
+    // A canceled promise still owns its callback until the shared response
+    // settles; its stripped callback cannot retain the element or start decode.
+    resolveCover(url).then(value => { if (!waiter.canceled) waiter.commit(value); },
+      () => { if (!waiter.canceled) waiter.commit(''); }).finally(() => {
+      waiter.commit = null; coverResolutionWaiters.delete(waiter); releaseCoverTicket(ticket);
+    });
+  }
+  return assignment;
 }
 
 /// 新图解码完成后再替换，代理返回不能覆盖元素的新选择。
+function clearCoverBg(target) { target.style.backgroundImage = ''; }
+function clearCoverImg(target) { target.removeAttribute('src'); }
+
 function applyCoverBg(el, url) {
-  assignCover(el, url, (resolved) => { el.style.backgroundImage = resolved ? `url("${resolved}")` : ''; });
+  assignCover(el, url, (resolved) => { el.style.backgroundImage = resolved ? `url("${resolved}")` : ''; },
+    { clear: clearCoverBg });
 }
 
 /// <img> 位：与 applyCoverBg 同一套解析，只是落在 src 上。
@@ -745,7 +1052,7 @@ function applyCoverImg(img, url) {
   assignCover(img, url, (resolved) => {
     if (resolved) img.src = resolved;
     else img.removeAttribute('src');
-  });
+  }, { clear: clearCoverImg });
 }
 
 // 其它模块（daily / 歌单两层 / 登录头像）拿不到 app.js 的闭包，经这个全局取用；
@@ -757,7 +1064,30 @@ window.HertzCovers = {
   slot: remoteCoverSlot,
   applyBg: applyCoverBg,
   applyImg: applyCoverImg,
+  borrow: retainCoverSource,
+  release(el) {
+    const assignment = el && coverAssignments.get(el);
+    if (assignment) retireCoverAssignment(assignment);
+  },
 };
+
+if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', event => {
+  if (event.persisted) return;
+  coverOwnerClosed = true;
+  for (const request of coverRequests) request.cancel();
+  for (const work of coverPreparations) work.cancel();
+  for (const work of coverPreparationQueue) work.cancel();
+  for (const waiter of coverResolutionWaiters) { waiter.canceled = true; waiter.commit = null; }
+  for (const assignment of coverMountedAssignments) retireCoverAssignment(assignment);
+  if (coverAssignmentObserver) coverAssignmentObserver.disconnect();
+  coverAssignmentObserver = null;
+  for (const id of coverCache.keys()) forgetCover(id);
+  coverSlots.clear(); coverSlotCount = 0;
+  releaseCoverTicket(coverSlotTicket); coverSlotTicket = null;
+  if (lastNowCoverBorrow) lastNowCoverBorrow.release(); lastNowCoverBorrow = null; lastNowCover = null;
+  if (mediaSessionCoverBorrow) mediaSessionCoverBorrow.release(); mediaSessionCoverBorrow = null;
+  reportCoverOwner();
+});
 
 // 封面异步落地后的回填。
 //
@@ -769,14 +1099,24 @@ window.HertzCovers = {
 // 独立形态下 coverUrl 是同步的真 URL，首帧就画对了，登记进来的 setter 立刻命中
 // 缓存、之后也不会再触发，所以这套机制对 HTTP 宿主是无操作。
 const coverSlots = new Map();  // id -> Set<(url) => void>
+let coverSlotCount = 0;
+let coverSlotTicket = null;
 
 function coverSlot(id, apply) {
   if (!id || typeof apply !== 'function') return;
+  const cached = coverCache.get(id);
+  if (cached) { apply(cached.url); return; }
+  if (transport.kind !== 'dbx' || coverOwnerClosed || coverSlotCount >= COVER_CACHE_MAX) return;
+  if (!coverSlotTicket) {
+    try {
+      coverSlotTicket = coverResources().require({ ownedCpuBytes: COVER_CACHE_MAX * 512 },
+        'bounded one-shot cover callback slots, at most 200 retained closures', 0, 'bounded-estimate');
+      coverSlotTicket.commit();
+    } catch (error) { reportCoverOwner(error.message); return; }
+  }
   let setters = coverSlots.get(id);
   if (!setters) { setters = new Set(); coverSlots.set(id, setters); }
-  setters.add(apply);
-  const cached = coverCache.get(id);
-  if (cached) apply(cached);
+  if (!setters.has(apply)) { setters.add(apply); coverSlotCount++; }
 }
 
 function repaintCovers(id, dataUrl) {
@@ -784,11 +1124,16 @@ function repaintCovers(id, dataUrl) {
     document.querySelectorAll(`[data-id="${CSS.escape(id)}"]`).forEach((host) => {
       if (host.querySelector('.t-art')) paintArt(host, dataUrl);
     });
+    document.querySelectorAll(`[data-cover-id="${CSS.escape(id)}"]`).forEach((art) => applyCoverBg(art, dataUrl));
   }
   const setters = coverSlots.get(id);
-  if (setters) setters.forEach((apply) => {
-    try { apply(dataUrl); } catch (err) { console.warn('[hertz] 封面回填失败', err); }
-  });
+  if (setters) {
+    coverSlots.delete(id); coverSlotCount -= setters.size;
+    if (!coverSlotCount) { releaseCoverTicket(coverSlotTicket); coverSlotTicket = null; }
+    setters.forEach((apply) => {
+      try { apply(dataUrl); } catch (err) { console.warn('[hertz] 封面回填失败', err); }
+    });
+  }
 }
 
 const DbxTransport = {
@@ -813,8 +1158,12 @@ const DbxTransport = {
   ensureCover,
   /// 换封面之后必须先把缓存里的旧图丢掉，否则重绘出来的还是旧的。
   invalidateCover(id) {
-    coverCache.delete(id);
+    forgetCover(id);
+    const request = coverPending.get(id);
+    // Remove only the latest authority; a canceled bridge call remains in the
+    // request set and ledger until its original promise actually settles.
     coverPending.delete(id);
+    if (request) request.cancel();
     return Promise.resolve();
   },
   onCoverReady(listener) {
@@ -2062,14 +2411,20 @@ function clearSelection() {
 // alt 留空是刻意的——封面在这一行里是装饰，标题与艺术家两字已经完整说明了
 // 这是什么，读屏软件再播报一遍图片只会增加噪音。
 //
-// 用 dataset.src 而不是「画过一次就不再画」作幂等标记：曲库行是按 id 复用
-// 的，重新扫描后同一行可能从无封面变成有封面，只认「画过」就永远停在占位图。
+// 幂等标记跟随元素当前有源租约的 assignment；重扫后可以从占位换成新封面。
+function clearRowCover(target) {
+  target.querySelectorAll('img').forEach(img => { img.onload = img.onerror = null; img.removeAttribute('src'); });
+  target.replaceChildren(); delete target.dataset.src; target.classList.remove('is-loaded');
+}
+
 function paintArt(row, url) {
   const art = row.querySelector('.t-art');
-  if (!art || art.dataset.src === String(url)) return;
-  art.dataset.src = String(url);
-  art.replaceChildren();
-  art.classList.remove('is-loaded', 'is-missing');
+  if (!art) return;
+  const previous = coverAssignments.get(art);
+  if (previous && !previous.retired && previous.requested === String(url)) return;
+  // The request identity stays with its retained source. Do not keep a second
+  // unowned data URL in dataset after the cache or the row is retired.
+  delete art.dataset.src;
   // 占位按曲目 id 稳定取一个色相（--ph）：同一行每次重排都是同一个颜色，
   // 不会跳色；有色的空占位读作「这个音源本来就没有封面」，而不是「图挂了」。
   const markMissing = () => {
@@ -2080,27 +2435,20 @@ function paintArt(row, url) {
     for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) % 360;
     art.style.setProperty('--ph', String(h));
   };
-  if (!url) { markMissing(); return; }
-  const resolved = remoteCover(url);
-  if (resolved === null) {
-    // 插件形态 + 远程地址且缓存未命中：先占位，代理落地后按 data URL 重画这一格。
-    // dataset.src 记的是逻辑 URL，重画传的是 data URL，两者不同，所以幂等标记不会
-    // 挡掉这次重画；同一行被复用时逻辑 URL 没变也不会重复发请求（缓存/在途去重）。
-    markMissing();
-    remoteCoverSlot(url, (u) => paintArt(row, u));
-    return;
-  }
-  const img = document.createElement('img');
-  img.className = 't-art-img';
-  img.alt = '';
-  img.loading = 'lazy';
-  img.decoding = 'async';
-  // 404 / 防盗链 / 断网：把图片本体摘掉，露出 .t-art 自己的占位图，
-  // 而不是留一个浏览器默认的回形针图标或一块空白。
-  img.onerror = () => { markMissing(); img.remove(); };
-  img.onload = () => art.classList.add('is-loaded');
-  art.appendChild(img);
-  img.src = resolved;
+  assignCover(art, url, resolved => {
+    clearRowCover(art); art.classList.remove('is-loaded', 'is-missing');
+    if (!resolved) { markMissing(); return; }
+    const img = document.createElement('img');
+    img.className = 't-art-img'; img.alt = ''; img.loading = 'lazy'; img.decoding = 'async';
+    const imageAssignment = coverAssignments.get(art);
+    const currentImage = () => coverAssignments.get(art) === imageAssignment
+      && !imageAssignment.retired && img.parentNode === art;
+    // Native lazy presentation keeps the row's source lease, while native
+    // image/cache surfaces remain browser observations rather than fake pixels.
+    img.onerror = () => { if (currentImage()) { HertzCovers.release(art); markMissing(); } };
+    img.onload = () => { if (currentImage()) art.classList.add('is-loaded'); };
+    art.appendChild(img); img.src = resolved;
+  }, { nativePresentation: true, clear: clearRowCover, requested: String(url) });
 }
 
 // ---------------------------------------------------------------------------
@@ -4638,10 +4986,10 @@ function renderDetailRows(id) {
     if (track.has_cover) {
       const art = row.querySelector('.pd-art');
       art.classList.add('pd-has-img');
-      // 背景图不是 .t-art 结构，按 [data-id] 那套自动回填找不到它，所以显式登记。
-      const paint = (url) => { art.style.backgroundImage = url ? `url("${url}")` : ''; };
-      paint(transport.coverUrl(track.id));
-      coverSlot(track.id, paint);
+      // The element owns its current source; data identity keeps a mounted row
+      // refreshable after cover edits without retaining permanent callbacks.
+      art.dataset.coverId = track.id;
+      applyCoverBg(art, transport.coverUrl(track.id));
     } else if (online && track.cover) {
       // 在线快照行：封面是入单时存的 URL，用与在线列表同一套缩略图规则。
       const art = row.querySelector('.pd-art');
@@ -6257,17 +6605,7 @@ function initTopMoreMenu() {
 // 预加载封面：失败（404 / 防盗链 / 超时）就当作没有封面，交给占位图兜底，
 // 绝不让一张图片把「正在播放」变成空白。
 function probeImage(url, timeoutMs = 8000) {
-  return new Promise((resolve) => {
-    if (!url) { resolve(false); return; }
-    let done = false;
-    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
-    const img = new Image();
-    // 跨域图片不做 canvas 取色也要能显示；不设 crossOrigin 就不会触发 CORS 失败
-    img.onload = () => finish(img.naturalWidth > 0);
-    img.onerror = () => finish(false);
-    img.src = url;
-    setTimeout(() => finish(false), timeoutMs); // 卡住的请求不能无限等
-  });
+  return prepareCoverImage(url, timeoutMs).promise;
 }
 
 // ---------------------------------------------------------------------------
@@ -6281,31 +6619,45 @@ function clearBrowserMediaSession() {
   for (const name of MEDIA_SESSION_ACTIONS) {
     try { navigator.mediaSession.setActionHandler(name, null); } catch { /* optional action */ }
   }
-  try { navigator.mediaSession.metadata = null; } catch { /* optional */ }
+  try {
+    navigator.mediaSession.metadata = null;
+    if (mediaSessionCoverBorrow) mediaSessionCoverBorrow.release(); mediaSessionCoverBorrow = null;
+  } catch { /* optional */ }
   try { navigator.mediaSession.playbackState = 'none'; } catch { /* optional */ }
   try { navigator.mediaSession.setPositionState(); } catch { /* optional */ }
   mediaSessionStateKey = '';
 }
 
+let mediaSessionCoverBorrow = null;
 function updateMediaSessionMetadata(track, artUrl) {
   if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
     && window.HertzSystemMedia.ownsSession()) return;
   if (window.HertzRoom && HertzRoom.active()) return;
   if (!('mediaSession' in navigator)) return;
+  let nextBorrow = null;
   try {
+    nextBorrow = retainCoverSource(artUrl);
+    if (nextBorrow) artUrl = nextBorrow.url;
     navigator.mediaSession.metadata = new window.MediaMetadata({
       title: track.title,
       artist: track.artist || '未知艺术家',
       album: track.album || '',
       artwork: artUrl ? [{ src: new URL(artUrl, location.href).href }] : [],
     });
+    if (mediaSessionCoverBorrow) mediaSessionCoverBorrow.release();
+    mediaSessionCoverBorrow = nextBorrow; nextBorrow = null;
   } catch { /* 某些浏览器在缺字段时会抛，忽略即可 */ }
+  finally { if (nextBorrow) nextBorrow.release(); }
 }
 
 function syncMediaSession(force = false) {
   if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
     && window.HertzSystemMedia.ownsSession()) return;
-  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.syncMediaSession(force);
+  if (window.HertzRoom && HertzRoom.active()) {
+    const result = HertzRoom.syncMediaSession(force);
+    if (mediaSessionCoverBorrow) mediaSessionCoverBorrow.release(); mediaSessionCoverBorrow = null;
+    return result;
+  }
   if (!('mediaSession' in navigator)) return;
   const duration = playbackDuration(state.snapshot);
   const playbackState = !state.snapshot.track_id || state.stopped
@@ -8271,6 +8623,7 @@ const CAPSULE_DRAG_PX = 4;
 const CAPSULE_SNAP_PX = 28;
 const CAPSULE_MARGIN = 20;
 let lastNowCover = null;
+let lastNowCoverBorrow = null;
 
 /// 胶囊定位。CSS 里默认锚在 right/bottom，一旦拖过就换成内联 left/top——两种
 /// 锚不能同时生效，换锚时必须把另一边显式置 auto。坐标 clamp 进当前视口。
@@ -8579,6 +8932,10 @@ function paintCapsuleNotice() {
 /// 胶囊内容同步。封面与正在播放位走同一套解析：插件形态下远程地址要先换成
 /// data URL（沙箱 CSP 画不出 https 图），未命中先空着、代理落地后回填这一块。
 function syncCapsule(track, coverUrl) {
+  let nextBorrow = null;
+  try { nextBorrow = retainCoverSource(coverUrl); } catch (error) { reportCoverOwner(error.message); coverUrl = null; }
+  if (nextBorrow) coverUrl = nextBorrow.url;
+  if (lastNowCoverBorrow) lastNowCoverBorrow.release(); lastNowCoverBorrow = nextBorrow;
   lastNowCover = coverUrl || null;
   if (!track) {
     ui.capsuleTitle.textContent = '—';
@@ -8694,7 +9051,9 @@ function syncNpTrack(track, coverUrl) {
   };
   np.name.title = track.title || '';
   np.artist.title = np.artist.textContent;
-  assignCover(np.art, coverUrl, apply);
+  assignCover(np.art, coverUrl, apply, { clear: target => {
+    target.style.backgroundImage = 'none'; target.classList.remove('has-cover');
+  } });
 }
 
 function initNowPlayingModal() {

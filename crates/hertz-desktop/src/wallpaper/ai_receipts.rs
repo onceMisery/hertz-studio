@@ -134,6 +134,7 @@ impl<'a> AiReceipts<'a> {
             properties: vec![],
             composition: None,
             resources: vec![],
+            provenance: None,
         };
         // Reuse the exact work-document validation before permitting preview.
         document.effective_builtin()?;

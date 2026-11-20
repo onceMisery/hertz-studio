@@ -1,3 +1,4 @@
+import { constructedGeometry, declaredArrayPayload, sourcePlan } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 import { basicInstance, root, own, level, qualityDensity, seed } from './factories.js';
 import { createSpatialResources } from './resources.js';
@@ -32,9 +33,16 @@ void main(){
 const shots = ['editorial-column', 'type-impact', 'fragment-collage', 'tracking-ribbon', 'mask-reveal', 'poster-blocks', 'quiet-tableau'];
 const compositions = ['split-duo', 'quad-grid', 'diagonal-cut', 'triptych', 'banded', 'poster-frame', 'fan-burst', 'shutters', 'offset-collage'];
 
+export function spatialLyricsResourcePlan(style) {
+  return sourcePlan(14).array(7 * 6 + 24 * 19)
+    .geometry('PlaneGeometry', [1, 1, style === 'cadenza' ? 80 : 1, 1])
+    .geometry('BoxGeometry', [1, 1, 1], 1, style !== 'tempera').result();
+}
+
 export function createSpatialLyrics(ctx, style = 'corridor') {
   const T = ctx.THREE, group = root(ctx), resources = ctx.services.spatialResources || createSpatialResources(T);
-  const local = !ctx.services.spatialResources, geometry = own(ctx, new T.PlaneGeometry(1, 1, style === 'cadenza' ? 80 : 1, 1));
+  declaredArrayPayload(ctx.scope,7*6+24*19,'Spatial lyric fill uniforms and decor instance backing');
+  const local = !ctx.services.spatialResources, geometry = own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [1, 1, style === 'cadenza' ? 80 : 1, 1]));
   const highlight = style === 'tempera' ? 0xffce91 : style === 'sonnet' ? 0xffdeac : style === 'cadenza' ? 0x8eebdd : 0x91dfff;
   const rows = Array.from({ length: 7 }, () => {
     const uniforms = { uText: { value: null }, uRows: { value: Array.from({ length: 6 }, () => new T.Vector4(0, 0, -1, -1)) },
@@ -51,7 +59,7 @@ export function createSpatialLyrics(ctx, style = 'corridor') {
     return { mesh, key: '', entry: null, line: null, rel: 0, fresh: true,
       targetPosition: new T.Vector3(), targetScale: new T.Vector3(), targetRotation: new T.Euler(), targetQuaternion: new T.Quaternion() };
   });
-  const decor = own(ctx, new T.InstancedMesh(own(ctx, new T.BoxGeometry(1, 1, 1)),
+  const decor = own(ctx, new T.InstancedMesh(own(ctx, constructedGeometry(T, ctx.scope, 'BoxGeometry', [1, 1, 1])),
     own(ctx, new T.MeshBasicMaterial({ color: highlight, wireframe: style !== 'tempera', transparent: true, opacity: style === 'tempera' ? .22 : .17 })), 24));
   group.add(decor); const object = new T.Object3D(), color = new T.Color();
   let disposed = false, aspect = ctx.camera.aspect || 16 / 9, previousIndex = null;

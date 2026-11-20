@@ -42,7 +42,23 @@ async function main() {
     await page.goto(live ? uiUrl(base) : base);
     await page.waitForFunction(() => window.Workshop && window.CreativeShareCode);
     if (live) await page.waitForFunction(() => document.getElementById('conn').textContent === '服务已连接');
-    else await page.evaluate(() => { Stage.init(); CreativeStage.init(); Stage3D.init(); Workshop.init(); });
+    else await page.evaluate(() => { HertzStartup.disable(); Stage.init(); CreativeStage.init(); Stage3D.init(); Workshop.init(); PlayerTransitions.init(); });
+    await page.evaluate(() => {
+      Workshop.open(); Workshop.setTab('scene');
+      CreativeStage.setPreset({scene:'towers',director:false,stage:{seed:.63},sc:{height:9,span:31}});
+    });
+    fs.mkdirSync(output, { recursive: true });
+    const familyBefore=await page.evaluate(()=>CreativeStage.preset());
+    for(const [scene,label,width] of [['towers-flat','二维平面',390],['towers','三维塔林',1440]]){
+      await page.setViewportSize({width,height:1000});
+      const mode=page.getByRole('button',{name:label,exact:true});await mode.scrollIntoViewIfNeeded();await mode.focus();await mode.press('Space');
+      await page.waitForFunction(scene=>CreativeStage.preset().scene===scene,scene);
+      const state=await page.evaluate(()=>({preset:CreativeStage.preset(),focused:document.activeElement?.dataset.stageMode,
+        pressed:document.activeElement?.getAttribute('aria-pressed'),overflow:document.documentElement.scrollWidth>innerWidth}));
+      assert.equal(state.focused,scene);assert.equal(state.pressed,'true');assert.equal(state.overflow,false);
+      assert.deepEqual(state.preset.sc,familyBefore.sc);assert.equal(state.preset.stage.seed,.63);
+      await page.screenshot({path:path.join(output,scene+'-'+width+'.png')});
+    }
     await page.evaluate(() => {
       Workshop.open(); Workshop.setTab('io');
       const preset = CreativeStage.preset(); preset.name = '晚风 · 分享验收 🎵';
@@ -68,9 +84,9 @@ async function main() {
     assert.deepEqual(await page.evaluate(() => CreativeStage.shareSnapshot()), expected, 'bad code does not mutate the preset');
     // Delay the real decoder at its async boundary; later user actions must win.
     await page.evaluate(() => {
-      const decode = CreativeShareCode.decode;
+      const decode = CreativeShareCode.decodeLease;
       window.__realShareDecode = decode;
-      CreativeShareCode.decode = text => new Promise((resolve, reject) => {
+      CreativeShareCode.decodeLease = text => new Promise((resolve, reject) => {
         window.__finishShareDecode = () => decode(text).then(resolve, reject);
       });
     });
@@ -91,7 +107,7 @@ async function main() {
       }
       if (action === 'input') assert.equal(await page.locator('#ws-share-code').inputValue(), '新的输入');
     }
-    await page.evaluate(() => { CreativeShareCode.decode = window.__realShareDecode; });
+    await page.evaluate(() => { CreativeShareCode.decodeLease = window.__realShareDecode; });
     await page.locator('#ws-share-compatible').uncheck();
     await page.locator('#ws-share-copy').click();
     await page.waitForFunction(() => document.getElementById('ws-share-code').value.startsWith('HSCP1.G.'));

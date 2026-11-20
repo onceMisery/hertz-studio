@@ -90,26 +90,34 @@
     options = options || {};
     var port = options.resources, signal = options.signal, generation = options.generation || 0;
     if (!port || port.contractVersion !== 1) throw new Error('resource-policy-required');
-    var sourceTicket = null, decoderTicket = null, source = '', objectUrl = '', image = null, transferred = false;
+    var sourceTicket = null, decoderTicket = null, sourceBorrow = null, source = '', objectUrl = '', image = null, transferred = false;
+    var cancelReady = null;
     var parts = null, bytes = null, reader = null;
     function current() { if (signal && signal.aborted) throw aborted(); }
     function releaseTicket(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
     function cancel() {
       if (sourceTicket) sourceTicket.cancel(); if (decoderTicket) decoderTicket.cancel();
       if (image) image.removeAttribute('src');
+      if (cancelReady) cancelReady(aborted());
     }
     function release() {
       if (image) { image.onload = image.onerror = null; image.removeAttribute('src'); }
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       image = null; source = objectUrl = ''; parts = bytes = null;
       releaseTicket(decoderTicket); releaseTicket(sourceTicket); decoderTicket = sourceTicket = null;
+      if (sourceBorrow && sourceBorrow.release) sourceBorrow.release(); sourceBorrow = null;
     }
     if (signal) signal.addEventListener('abort', cancel);
     try {
-      current(); source = options.resolve ? await options.resolve(url) : url; current();
+      current();
+      if (options.resolve && typeof options.resolve.borrow === 'function') {
+        sourceBorrow = await options.resolve.borrow(url, port, signal); source = sourceBorrow && sourceBorrow.url;
+      } else source = options.resolve ? await options.resolve(url) : url;
+      current();
       if (typeof source !== 'string' || !source) throw new Error('estimate-unavailable');
       if (/^data:/i.test(source)) {
-        sourceTicket = port.require({ ownedCpuBytes: source.length * 2 }, 'retained UTF16 encoded raster source handoff', generation);
+        if (!sourceBorrow || !sourceBorrow.accounted)
+          sourceTicket = port.require({ ownedCpuBytes: source.length * 2 }, 'retained UTF16 encoded raster source handoff', generation);
         var comma = source.indexOf(','), prefix = source.slice(0, comma);
         if (comma < 0 || !/^data:image\/(png|jpe?g|gif|webp);base64$/i.test(prefix)) throw new Error('estimate-unavailable');
         var base64Length = source.length - comma - 1;
@@ -128,7 +136,7 @@
           }
           return (group >>> (16 - (at % 3) * 8)) & 255;
         } });
-        sourceTicket.commit();
+        if (sourceTicket) sourceTicket.commit();
       } else {
         var response = await fetch(source, { signal: signal, credentials: 'same-origin' }); current();
         if (!response.ok || !response.body) throw new Error('封面来源读取失败');
@@ -162,6 +170,7 @@
       image = new Image(); image.crossOrigin = 'anonymous';
       var ready;
       if (!image.decode) ready = new Promise(function (resolve, reject) {
+        cancelReady = reject;
         image.onload = resolve; image.onerror = function () { reject(new Error('封面解码失败')); };
       });
       image.src = source;
@@ -172,6 +181,7 @@
       transferred = true; var released = false;
       return Object.freeze({ image: image, plan: plan, release: function () { if (released) return; released = true; release(); } });
     } finally {
+      cancelReady = null;
       if (signal) signal.removeEventListener('abort', cancel);
       try {
         if (reader) { try { await reader.cancel(); } catch (_) {} reader.releaseLock(); }

@@ -15,7 +15,7 @@ pub(super) struct ApplyTransaction {
     plan: display::DisplayPlan,
     queue: VecDeque<display::DisplayTarget>,
     prepared: BTreeMap<String, selection_plan::ResolvedPlan>,
-    layouts: Vec<(crate::wallpaper::config::Selection, usize)>,
+    layouts: Vec<crate::wallpaper::selection_plan::MirrorIntent>,
     properties: Vec<crate::wallpaper::public_properties::PropertySelection>,
     layout_task: Option<u64>,
     active: Option<(u64, display::DisplayTarget)>,
@@ -56,8 +56,11 @@ impl ApplyTransaction {
                 .find(|g| g.id == authority.binding.group_id)
             {
                 if group.mode == crate::wallpaper::config::LayoutMode::Mirror {
-                    self.layouts
-                        .push((group.selection.clone(), group.displays.len()));
+                    self.layouts.push((
+                        group.selection.clone(),
+                        group.displays.len(),
+                        group.properties.clone(),
+                    ));
                 }
                 self.properties
                     .push(crate::wallpaper::public_properties::PropertySelection {
@@ -113,7 +116,7 @@ fn checked_plan(configuration: &config::WallpaperConfig) -> JobResult<display::D
 fn mirror_layouts_to_validate(
     saved: &config::WallpaperConfig,
     draft: &config::WallpaperConfig,
-) -> Vec<(crate::wallpaper::config::Selection, usize)> {
+) -> Vec<crate::wallpaper::selection_plan::MirrorIntent> {
     use crate::wallpaper::config::LayoutMode;
     draft
         .groups
@@ -125,11 +128,18 @@ fn mirror_layouts_to_validate(
                         old.id == group.id
                             && old.mode == group.mode
                             && old.displays == group.displays
+                            && old.properties == group.properties
                             && serde_json::to_value(&old.selection).ok()
                                 == serde_json::to_value(&group.selection).ok()
                     }))
         })
-        .map(|group| (group.selection.clone(), group.displays.len()))
+        .map(|group| {
+            (
+                group.selection.clone(),
+                group.displays.len(),
+                group.properties.clone(),
+            )
+        })
         .collect()
 }
 
@@ -445,7 +455,10 @@ impl App {
                     runtime.surface.as_ref().is_some_and(|surface| {
                         surface.media_frame_kind() == crate::wallpaper::session::FrameKind::Video
                             && !surface.static_poster
-                    }) && (transaction.community.as_ref().is_some_and(|a|a.playlist.is_some()&&a.binding.group_id==runtime.configuration.main().id)||!transaction
+                    }) && (transaction.community.as_ref().is_some_and(|a| {
+                        a.playlist.is_some()
+                            && a.binding.group_id == runtime.configuration.main().id
+                    }) || !transaction
                         .plan
                         .targets
                         .iter()
@@ -614,7 +627,11 @@ impl App {
             self.wallpaper_apply = Some(transaction);
             return;
         }
-        if let Some(authority) = transaction.community.clone().filter(|_| !transaction.community_rechecked) {
+        if let Some(authority) = transaction
+            .community
+            .clone()
+            .filter(|_| !transaction.community_rechecked)
+        {
             if let Err(e) = self.request_community_recheck(authority) {
                 self.finish_wallpaper_apply(transaction, Err(e));
                 return;
@@ -672,7 +689,10 @@ impl App {
                     self.feature_stops.wallpaper = false;
                     self.feature_stops.wallpaper_save_failed = false;
                 }
-                if transaction.ai.is_none() && transaction.community.is_none() && transaction.draft.lyrics.enabled {
+                if transaction.ai.is_none()
+                    && transaction.community.is_none()
+                    && transaction.draft.lyrics.enabled
+                {
                     self.resume_lyrics();
                 }
                 // Registry mutation occurs outside target scopes, after the one
@@ -683,7 +703,11 @@ impl App {
                 if !transaction.preserve_failed_playback {
                     self.retry_failed_mirrors_after_apply();
                 }
-                if let Some(list) = transaction.community.as_ref().and_then(|a| a.playlist.as_ref()) {
+                if let Some(list) = transaction
+                    .community
+                    .as_ref()
+                    .and_then(|a| a.playlist.as_ref())
+                {
                     self.playlist_changed(&list.playlist_id);
                 }
                 for (key, resolved) in std::mem::take(&mut transaction.prepared) {
@@ -701,7 +725,10 @@ impl App {
                     .as_ref()
                     .map(|_| std::mem::take(&mut self.settings_drafts));
                 let preserved_drafts = preserved_drafts.or_else(|| {
-                    transaction.community.as_ref().map(|_| std::mem::take(&mut self.settings_drafts))
+                    transaction
+                        .community
+                        .as_ref()
+                        .map(|_| std::mem::take(&mut self.settings_drafts))
                 });
                 let run_error = self
                     .apply_saved_wallpaper_settings(transaction.draft.wallpaper.clone(), target)
@@ -843,7 +870,10 @@ impl App {
                     && c.payload_digest == transaction.request.digest()
             });
             let failure = transaction.community_run_error.clone().or_else(|| {
-                result.as_ref().err().map(|e| format!("{}: {}", e.code, e.message))
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("{}: {}", e.code, e.message))
             });
             if !transaction.config_attempted {
                 self.abort_community_receipt(
@@ -923,6 +953,17 @@ mod tests {
             mirror_layouts_to_validate(&saved_mirror, &draft).is_empty(),
             "disabling unchanged damaged content must remain possible"
         );
+        draft.groups[0]
+            .properties
+            .insert("range".into(), serde_json::json!(1500));
+        let changed = mirror_layouts_to_validate(&saved_mirror, &draft);
+        assert_eq!(
+            changed.len(),
+            1,
+            "offline disabled property changes still need mirror admission"
+        );
+        assert_eq!(changed[0].2["range"], serde_json::json!(1500));
+        draft.groups[0].properties.clear();
         draft.enabled = true;
         assert_eq!(
             mirror_layouts_to_validate(&saved_mirror, &draft).len(),

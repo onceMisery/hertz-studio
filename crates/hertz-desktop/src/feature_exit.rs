@@ -87,6 +87,8 @@ impl App {
             }
             Feature::Wallpaper => {
                 self.feature_stops.wallpaper = true;
+                self.wallpaper_ai.generation.end_presentation_session();
+                self.ai_generation_paused = false;
                 self.wallpaper_forced = false;
                 self.close_preview();
                 self.wallpaper_audio_dispatch.invalidate();

@@ -30,6 +30,10 @@ pub(crate) enum Command {
         work_key: String,
         package_hash: String,
     },
+    WorkDraftFork {
+        work_key: String,
+        package_hash: String,
+    },
     WorkDraftList {
         limit: u32,
         cursor: Option<String>,
@@ -122,6 +126,7 @@ pub(crate) enum Command {
     LayoutInspect {
         selection: super::config::Selection,
         members: usize,
+        properties: serde_json::Map<String, Value>,
     },
     PropertiesInspect {
         selection: super::config::Selection,
@@ -261,6 +266,8 @@ impl Request {
         struct LayoutInspect {
             selection: super::config::Selection,
             members: usize,
+            #[serde(default)]
+            properties: serde_json::Map<String, Value>,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -480,10 +487,16 @@ impl Request {
                     value.package_hash,
                 ) {
                     ("settings", None, None, None) => Command::DraftCreate,
-                    ("work", Some(document), None, None) => Command::WorkDraftCreate {
-                        document: Box::new(document),
-                    },
+                    ("work", Some(document), None, None) if document.provenance.is_none() => {
+                        Command::WorkDraftCreate {
+                            document: Box::new(document),
+                        }
+                    }
                     ("work", None, Some(work_key), Some(hash)) => Command::WorkDraftOpen {
+                        work_key: id(work_key)?,
+                        package_hash: package_hash(hash)?,
+                    },
+                    ("fork", None, Some(work_key), Some(hash)) => Command::WorkDraftFork {
                         work_key: id(work_key)?,
                         package_hash: package_hash(hash)?,
                     },
@@ -733,6 +746,10 @@ impl Request {
             }
             "wallpaper.layout.inspect" => {
                 let mut value: LayoutInspect = decode(&self.payload)?;
+                super::selection_plan::validate_layout_properties(
+                    &value.selection,
+                    &value.properties,
+                )?;
                 if !(1..=4).contains(&value.members) {
                     return Err(JobError::invalid_input("布局检查需要 1–4 个显示器"));
                 }
@@ -769,6 +786,7 @@ impl Request {
                 Command::LayoutInspect {
                     selection: value.selection,
                     members: value.members,
+                    properties: value.properties,
                 }
             }
             "wallpaper.properties.inspect" => {
@@ -1081,6 +1099,40 @@ mod tests {
             }))
         };
         let package = json!({"kind":"package","workKey":"work-1","packageHash":"A".repeat(64)});
+        let properties = json!({"range":1500,"enabled":false,"label":"night"});
+        let with_properties =
+            request(json!({"selection":package.clone(),"members":2,"properties":properties}))
+                .unwrap();
+        match with_properties.typed().unwrap() {
+            Command::LayoutInspect {
+                properties: actual, ..
+            } => assert_eq!(serde_json::to_value(actual).unwrap(), properties),
+            _ => panic!("expected typed layout properties"),
+        }
+        assert_ne!(
+            with_properties.digest(),
+            request(json!({"selection":package.clone(),"members":2,"properties":{"range":1000}}))
+                .unwrap()
+                .digest()
+        );
+        for invalid in [
+            json!({"value":null}),
+            json!({"value":[]}),
+            json!({"value":{}}),
+            json!({"bad id":1}),
+            json!({"label":"x".repeat(4097)}),
+            Value::Object(
+                (0..65)
+                    .map(|index| (format!("p{index}"), json!(1)))
+                    .collect(),
+            ),
+        ] {
+            assert!(
+                request(json!({"selection":package.clone(),"members":2,"properties":invalid}))
+                    .is_err()
+            );
+        }
+        assert!(request(json!({"selection":{"kind":"builtin","sceneId":"coast","stateVersion":1,"params":{}},"members":2,"properties":{"range":1500}})).is_err());
         for members in 1..=4 {
             match request(json!({"selection":package.clone(),"members":members}))
                 .unwrap()
@@ -1090,9 +1142,11 @@ mod tests {
                 Command::LayoutInspect {
                     selection: super::super::config::Selection::Package { package_hash, .. },
                     members: actual,
+                    properties,
                 } => {
                     assert_eq!(actual, members);
                     assert_eq!(package_hash, "a".repeat(64));
+                    assert!(properties.is_empty());
                 }
                 _ => panic!("expected a typed inspection"),
             }
@@ -1110,7 +1164,7 @@ mod tests {
         for payload in [
             json!({"selection":package.clone()}),
             json!({"members":2}),
-            json!({"selection":package.clone(),"members":2,"properties":{}}),
+            json!({"selection":package.clone(),"members":2,"properties":null}),
             json!({"selection":package.clone(),"members":2,"path":"C:/media.png"}),
         ] {
             assert!(request(payload).is_err());
