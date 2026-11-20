@@ -20,7 +20,7 @@ use crate::{
     config::Config,
     keys::Keys,
     platform::{self, Locks},
-    protocol::{self, Approval, Document, Error, Request, Response, Result, MAX_OPERATIONS},
+    protocol::{self, Approval, Error, Request, Response, Result, MAX_OPERATIONS},
 };
 use records::{ApprovalRow, Intent};
 

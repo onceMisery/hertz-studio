@@ -97,10 +97,6 @@ impl Keys {
         })
     }
 
-    pub fn public(&self) -> &PublicKeys {
-        &self.public
-    }
-
     pub fn authorization(&self) -> &VerifiedAuthorizationChain {
         &self.authorization
     }
