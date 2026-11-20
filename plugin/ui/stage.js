@@ -55,6 +55,7 @@
     document.dispatchEvent(new CustomEvent('stage:track-changed'));
   }
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
+  var lastCoverBorrow = null;
   var coverFollow = false;
   var paletteEpoch = 0;
   var lastPalette = null;
@@ -1295,6 +1296,9 @@
   // 子模块各自的 GL/DOM 资源由自己的 destroy 释放。
   function destroy() {
     stageDestroyed = true;
+    if (lastCoverBorrow) lastCoverBorrow.release(); lastCoverBorrow = null; lastCover = null;
+    if (window.HertzCovers && HertzCovers.release) HertzCovers.release(el.disc);
+    if (el.disc) el.disc.style.backgroundImage = '';
     if (window.StagePersistence && StagePersistence.destroy) StagePersistence.destroy();
     if (resourceLedger) resourceLedger.close();
     notifyFrameState(true);
@@ -1335,35 +1339,47 @@
   }
 
   function runGates(dt, borrowedFrame) {
+    var wantsFrame = false;
     for (var i = 0; i < gates.length; i += 1) {
       var g = gates[i];
-      var target = g.fpsFn();
-      if (!(target > 0)) { g.skip = 0; g.wait = 0; continue; }
-      var n = gateDivisor(target);
-      // wait 累的是真实毫秒（tickFn 里的 lerp 靠它，按帧数换算会在掉帧时走样）；
-      // 到不到点看**帧数**，不看时间：一个周期内每个间隔都是整帧，
-      // 所以跑出来的帧率恰好是刷新率的整数分之一，不会忽快忽慢。
-      g.wait += dt;
-      g.skip += 1;
-      if (g.skip < n) continue;
-      var spent = g.wait;
-      g.skip = 0;
-      g.wait = 0;
-      // 在既有帧门边界测实际执行次数与耗时；不增加循环，也不把等待时间当渲染成本。
-      var perfStart = typeof HertzPerf !== 'undefined' && HertzPerf.state.enabled ? HertzPerf.now() : null;
+      var perfStart = null;
       try {
+        var target = g.fpsFn();
+        if (!(target > 0)) { g.skip = 0; g.wait = 0; continue; }
+        wantsFrame = true;
+        var n = gateDivisor(target);
+        // wait 累的是真实毫秒（tickFn 里的 lerp 靠它，按帧数换算会在掉帧时走样）；
+        // 到不到点看**帧数**，不看时间：一个周期内每个间隔都是整帧，
+        // 所以跑出来的帧率恰好是刷新率的整数分之一，不会忽快忽慢。
+        g.wait += dt;
+        g.skip += 1;
+        if (g.skip < n) continue;
+        var spent = g.wait;
+        g.skip = 0;
+        g.wait = 0;
+        // 在既有帧门边界测实际执行次数与耗时；不增加循环，也不把等待时间当渲染成本。
+        perfStart = typeof HertzPerf !== 'undefined' && HertzPerf.state.enabled ? HertzPerf.now() : null;
         g.tickFn(spent, borrowedFrame);
+        g.failed = false;
+      } catch (failure) {
+        // A consumer cannot stop later gates or the shared scheduler. Report
+        // once per failure episode; a successful tick permits a new report.
+        g.skip = 0; g.wait = 0;
+        if (!g.failed) console.error('[Stage.gate] ' + g.name, failure);
+        g.failed = true;
       } finally {
         if (perfStart !== null && typeof HertzPerf !== 'undefined') HertzPerf.markSince('gate.' + g.name, perfStart);
       }
     }
+    return wantsFrame;
   }
 
   // 只要还有一个门想要帧，循环就得继续转。反过来说，每个子系统都必须在自己
   // 闲下来的时候把目标帧率报成 0 —— 这是整个循环唯一的停机依据。
   function anyGateWants() {
     for (var i = 0; i < gates.length; i += 1) {
-      if (gates[i].fpsFn() > 0) return true;
+      try { if (gates[i].fpsFn() > 0) return true; }
+      catch (_) { /* runGates reports consumer errors without stopping peers. */ }
     }
     return false;
   }
@@ -1383,8 +1399,9 @@
     var borrowedFrame = fillFrameRecord(stageFrame, t);
     borrowedFrame.frameId++;
     frameBatch = true;
+    var gatesWantFrame = false;
     try {
-      runGates(frameDt, borrowedFrame);
+      gatesWantFrame = runGates(frameDt, borrowedFrame);
     } finally {
       frameBatch = false;
       if (frameStatePending) notifyFrameState();
@@ -1393,7 +1410,9 @@
     // tickLyrics 会把 lastDt 改成歌词门累计间隔；刷新率只采主循环自己的间隔。
     sampleDisplayHz(frameDt);
     sampleFrameRate();
-    if (!hidden && (playing || anyGateWants())) schedule(false);
+    // The next frame observes changes made by ticks. A gate becoming idle may
+    // cost one empty frame, without evaluating every fpsFn twice per frame.
+    if (!hidden && (playing || gatesWantFrame)) schedule(false);
     else lastFrameAt = 0;
   }
 
@@ -1861,6 +1880,11 @@
       track = t || null;
       if (trackChanged) changedMedia();
       if (!durMs && t) durMs = t.duration_ms || 0;
+      var nextCoverBorrow = null;
+      try { if (window.HertzCovers && HertzCovers.borrow) nextCoverBorrow = HertzCovers.borrow(coverUrl); }
+      catch (_) { coverUrl = null; }
+      if (nextCoverBorrow) coverUrl = nextCoverBorrow.url;
+      if (lastCoverBorrow) lastCoverBorrow.release(); lastCoverBorrow = nextCoverBorrow;
       lastCover = coverUrl || null;
       if (el.disc) {
         applyBg(el.disc, coverUrl);

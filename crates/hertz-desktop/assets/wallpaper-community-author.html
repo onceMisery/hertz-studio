@@ -1,0 +1,66 @@
+<section class="community-section community-author-controls">
+  <details id="community-author-workspace">
+    <summary>我的创作</summary>
+    <p id="community-author-help" class="hint">从作品库选择已保存的本地版本。上传后送交社区审核，可在这里查看进度。</p>
+    <div class="community-actions"><button id="community-author-local" type="button" data-community-read>读取本地版本</button><button id="community-author-mine" type="button" data-community-read>刷新我的作品</button></div>
+    <form id="community-author-prepare-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-author-package-label">
+      <label id="community-author-package-label" for="community-author-package">本地作品版本（必选）</label>
+      <select id="community-author-package" name="package" required aria-describedby="community-author-help" aria-invalid="false" data-error="community-author-package-error"><option value="">请先读取本地版本</option></select>
+      <p id="community-author-package-error" class="community-field-error" hidden>请选择一个已保存的本地作品版本。</p>
+      <div class="community-actions"><button type="submit" data-community-read>核对发布版本</button><button id="community-author-local-more" type="button" data-community-read hidden>加载更多本地作品</button></div>
+    </form>
+    <div id="community-author-review" class="community-confirmation" hidden>
+      <h4 id="community-author-review-heading" tabindex="-1">核对这次上传</h4>
+      <dl id="community-author-facts" class="community-facts"></dl>
+      <p class="hint">认领和上传使用当前社区账号。已认领的作品可以直接上传新版本，本次核对有效期为五分钟。</p>
+      <form id="community-author-publish-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-author-review-heading">
+        <div class="community-choice"><input id="community-author-consent" name="consent" type="checkbox" required aria-invalid="false"><label for="community-author-consent">我已核对版本、来源和许可，并有权提交这些内容</label></div>
+        <div class="community-actions"><button id="community-author-create" type="submit" data-author-action="create" data-community-mutation>认领此作品</button><button id="community-author-upload" type="submit" data-author-action="upload" class="primary" data-community-mutation>上传此版本</button><button id="community-author-dismiss" type="button">取消核对</button></div>
+      </form>
+    </div>
+    <div id="community-author-transfer" class="community-confirmation" hidden>
+      <h4 id="community-author-transfer-heading" tabindex="-1">上传与送审</h4>
+      <p id="community-author-transfer-state" class="hint"></p>
+      <dl id="community-author-transfer-facts" class="community-facts"></dl>
+      <form id="community-author-submit-form" class="community-form" method="post" action="#panel-community" aria-labelledby="community-author-transfer-heading">
+        <div class="community-choice"><input id="community-author-submit-consent" name="consent" type="checkbox" required aria-invalid="false"><label for="community-author-submit-consent">将上面的确切版本送交社区审核</label></div>
+        <button id="community-author-submit" type="submit" class="primary" data-community-mutation>提交审核</button>
+      </form>
+      <div class="community-actions"><button id="community-author-query" type="button" data-community-read>查询上传状态</button></div>
+    </div>
+    <button id="community-author-cancel" type="button" hidden>停止本次传输</button>
+    <h4>我的作品版本</h4>
+    <p id="community-author-empty" class="hint">登录此社区后，点击“刷新我的作品”。</p>
+    <ul id="community-author-candidates" class="community-list"></ul>
+    <button id="community-author-more" type="button" data-community-read hidden>加载更多版本</button>
+  </details>
+</section>
+<section id="community-report-review" class="community-section community-confirmation community-author-controls" hidden>
+  <h3 id="community-report-heading" tabindex="-1">举报这个版本</h3>
+  <dl id="community-report-facts" class="community-facts"></dl>
+  <form id="community-report-form" class="community-form community-policy" method="post" action="#panel-community" aria-labelledby="community-report-heading">
+    <fieldset><legend>举报原因（必选）</legend>
+      <div class="community-choice"><input id="community-report-security" name="reason" type="radio" value="security" required><label for="community-report-security">安全问题</label></div>
+      <div class="community-choice"><input id="community-report-copyright" name="reason" type="radio" value="copyright" required><label for="community-report-copyright">版权问题</label></div>
+      <div class="community-choice"><input id="community-report-other" name="reason" type="radio" value="other" required><label for="community-report-other">其它问题</label></div>
+    </fieldset>
+    <label for="community-report-description">具体说明（必填）</label>
+    <p id="community-report-description-help" class="hint">请说明问题及可核查的线索，最多 4,000 字。</p>
+    <textarea id="community-report-description" name="description" required maxlength="4000" rows="4" aria-describedby="community-report-description-help" aria-invalid="false" data-error="community-report-description-error"></textarea>
+    <p id="community-report-description-error" class="community-field-error" hidden>请填写具体问题和可核查的线索。</p>
+    <div class="community-choice"><input id="community-report-consent" name="consent" type="checkbox" required aria-invalid="false"><label for="community-report-consent">举报上面已核对的确切版本</label></div>
+    <div class="community-actions"><button id="community-report-submit" type="submit" class="primary" data-community-mutation>提交举报</button><button id="community-report-dismiss" type="button">取消</button></div>
+  </form>
+</section>
+<section class="community-section community-author-controls">
+  <details><summary>举报处理结果</summary>
+    <form id="community-report-query-form" class="community-form" method="get" action="#panel-community" aria-labelledby="community-report-id-label">
+      <label id="community-report-id-label" for="community-report-id">举报编号（必填）</label>
+      <input id="community-report-id" name="reportId" type="text" required maxlength="36" pattern="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" autocorrect="off" autocapitalize="none" spellcheck="false" aria-invalid="false" aria-describedby="community-report-query-help" data-error="community-report-id-error">
+      <p id="community-report-id-error" class="community-field-error" hidden>请输入完整的举报 UUID 编号。</p>
+      <p id="community-report-query-help" class="hint">提交成功后会显示编号。查询使用当前社区账号。</p>
+      <button type="submit" data-community-read>查询处理结果</button>
+    </form>
+    <p id="community-report-result" class="hint" role="status"></p>
+  </details>
+</section>

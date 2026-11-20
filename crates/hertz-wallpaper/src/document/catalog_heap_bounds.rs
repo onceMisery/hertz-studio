@@ -8,7 +8,9 @@
 //! audited build evidence. Equal sizes do not detect arbitrary source changes;
 //! changing those sources requires another review of these equations.
 //!
-//! Fixed JSON has 14523 bytes, no escapes. ContractFile -> Contract only moves.
+//! Fixed JSON has 14686 bytes, no escapes. ContractFile -> Contract only moves.
+//! Seven timeModel fields decode borrowed strings to a 1-byte enum occupying
+//! NodeSchema's existing padding (104 bytes). Typed retention is unchanged.
 //! Owned Strings request 3451 bytes; 210 String Vecs retain 524 slots.
 //! nodes/effects each reserve 8; six Value arrays reserve 4; seven AssetKind
 //! Vecs reserve 8 byte slots each. Thirteen nonempty Field maps have eighteen
@@ -17,7 +19,9 @@
 //! R=8*Node+8*Effect+524*String+24*Value+56+18*LField+5*IField
 //!   +6*LAsset+5*LQuality+5*LCost+3451=92067.
 //! The duplicate scanner's actual recursive live frontier has
-//! S=max(6*LSet+ISet+207,7*LSet+210)=2263, and exits before typed parsing.
+//! S=max(6*LSet+ISet+216,7*LSet+219)=2272, and exits before typed parsing.
+//! Each active node scanner adds the 9-byte timeModel key; six keys still fit
+//! its original leaf. Enum values request no owned String or container.
 //! All empty-start Vec growth uses doubling/min capacity 8/4/1; the largest
 //! single old backing G=max(4*Node,4*Effect,64*String)=1536. Every other live
 //! request is bounded by R; old+new realloc therefore fits R+G. Raw top key
@@ -41,8 +45,8 @@ use super::{AssetField, Definitions, EffectCost, EffectSchema, Field, NodeSchema
 use crate::AssetKind;
 
 const CATALOG_SHA: [u8; 32] = [
-    0x85, 0x42, 0x04, 0x49, 0x50, 0xfe, 0x83, 0x19, 0xfd, 0xe6, 0x8d, 0xe8, 0xe3, 0xd8, 0xa9, 0xc6,
-    0x46, 0x38, 0x9e, 0x95, 0x30, 0xbf, 0x92, 0x75, 0xb6, 0x78, 0x1c, 0x93, 0xd4, 0x02, 0xec, 0xda,
+    0x94, 0xe9, 0x26, 0x9f, 0xa0, 0x71, 0xe7, 0xe9, 0x11, 0x03, 0x13, 0x56, 0x20, 0x32, 0xcb, 0xc1,
+    0x48, 0x53, 0x31, 0x86, 0x81, 0xad, 0x1d, 0xc8, 0x3a, 0xc5, 0x72, 0x59, 0x3d, 0xd2, 0x09, 0x68,
 ];
 
 // These compile-time identities bind the original allocation semantics and
@@ -51,8 +55,8 @@ const CATALOG_SOURCE: &[u8] = include_bytes!("catalog.rs");
 const JSON_SOURCE: &[u8] = include_bytes!("../json.rs");
 const LOCK_SOURCE: &[u8] = include_bytes!("../../../../Cargo.lock");
 const CATALOG_SOURCE_SHA: [u8; 32] = [
-    0xd9, 0x4c, 0x39, 0xdd, 0x8c, 0x74, 0xd1, 0xa8, 0xe2, 0xc8, 0x9d, 0xc2, 0xb4, 0x6e, 0xbc, 0x38,
-    0xab, 0x57, 0xab, 0xa7, 0x97, 0x80, 0x27, 0x55, 0xe0, 0xc0, 0x24, 0x5e, 0x3c, 0x72, 0x63, 0x73,
+    0x18, 0x54, 0x7b, 0xf4, 0x51, 0x0b, 0x52, 0x7c, 0x7e, 0xf1, 0x45, 0x67, 0x33, 0x29, 0x64, 0xae,
+    0x13, 0x56, 0xf8, 0x42, 0x04, 0xc3, 0xc1, 0x43, 0x78, 0xfb, 0xfc, 0x53, 0xe7, 0x58, 0x29, 0x05,
 ];
 const JSON_SOURCE_SHA: [u8; 32] = [
     0xe9, 0x86, 0xcb, 0xed, 0x60, 0x91, 0x9d, 0x48, 0xa7, 0x0c, 0x48, 0x5c, 0x80, 0xfb, 0x0f, 0x19,
@@ -102,7 +106,7 @@ impl CompositionCatalogHeapBounds {
         layout: bool,
     ) -> Option<Self> {
         if !layout
-            || bytes.len() != 14_523
+            || bytes.len() != 14_686
             || !matches_sha(bytes, &CATALOG_SHA)
             || !matches_text_sha(catalog, &CATALOG_SOURCE_SHA)
             || !matches_text_sha(json, &JSON_SOURCE_SHA)
@@ -126,9 +130,9 @@ impl CompositionCatalogHeapBounds {
         let scanner = sum(&[
             mul(6, size_of::<Leaf<String, ()>>() as u64)?,
             size_of::<Internal<String, ()>>() as u64,
-            207,
+            216,
         ])?
-        .max(sum(&[mul(7, size_of::<Leaf<String, ()>>() as u64)?, 210])?);
+        .max(sum(&[mul(7, size_of::<Leaf<String, ()>>() as u64)?, 219])?);
         let growth = mul(4, size_of::<NodeSchema>() as u64)?
             .max(mul(4, size_of::<EffectSchema>() as u64)?)
             .max(mul(64, size_of::<String>() as u64)?);
@@ -178,6 +182,7 @@ fn verified_layout() -> bool {
         && layout!(Map<String, Value>, 24, 8)
         && layout!(Field, 224, 8)
         && layout!(NodeSchema, 104, 8)
+        && layout!(super::TimeModel, 1, 1)
         && layout!(EffectSchema, 192, 8)
         && layout!(Definitions, 72, 8)
         && layout!(AssetField, 56, 8)
@@ -282,7 +287,7 @@ mod tests {
             true
         )
         .is_some());
-        let mut changed_bytes = [0u8; 14_523];
+        let mut changed_bytes = [0u8; 14_686];
         changed_bytes.copy_from_slice(super::super::COMPOSITION_CATALOG_BYTES);
         changed_bytes[0] ^= 1;
         assert_eq!(

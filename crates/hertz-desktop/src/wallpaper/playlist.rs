@@ -4,6 +4,12 @@ use super::{jobs::JobError, library::Library};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::time::{Duration, Instant};
+#[path = "playlist_edit.rs"]
+pub(crate) mod edit;
+#[cfg(test)]
+#[path = "playlist_edit_tests.rs"]
+mod edit_tests;
+
 type Result<T> = std::result::Result<T, JobError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +115,7 @@ impl<'a> Repository<'a> {
             Some(id) => id.to_string(),
             None => format!("playlist-{}", super::jobs::new_job_id()),
         };
-        if let Some(revision) = revision {
+        if let Some(revision) = revision.filter(|r| *r > 0) {
             let result = sqlx::query("UPDATE playlists SET revision=?,title=?,mode=?,interval_seconds=?,updated_at=? WHERE playlist_id=? AND revision=?")
                 .bind(next as i64).bind(&title).bind(mode_name(mode)).bind(interval).bind(super::library::now_secs()).bind(&id).bind(revision as i64).execute(&mut *tx).await.map_err(db)?;
             if result.rows_affected() != 1 {
@@ -123,16 +129,21 @@ impl<'a> Repository<'a> {
             if count >= 100 {
                 return Err(JobError::new("playlist_limit", "最多保存100个轮播列表"));
             }
-            sqlx::query("INSERT INTO playlists VALUES(?,?,?,?,?,?)")
-                .bind(&id)
-                .bind(1_i64)
-                .bind(&title)
-                .bind(mode_name(mode))
-                .bind(interval)
-                .bind(super::library::now_secs())
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
+            let inserted = sqlx::query(
+                "INSERT INTO playlists VALUES(?,?,?,?,?,?) ON CONFLICT(playlist_id) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(1_i64)
+            .bind(&title)
+            .bind(mode_name(mode))
+            .bind(interval)
+            .bind(super::library::now_secs())
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+            if inserted.rows_affected() != 1 {
+                return Err(conflict());
+            }
         }
         sqlx::query("DELETE FROM playlist_items WHERE playlist_id=?")
             .bind(&id)
@@ -201,14 +212,14 @@ fn validate(title: &str, interval: u32, items: &[FixedVersion]) -> Result<()> {
         || title.chars().any(char::is_control)
         || !(10..=86400).contains(&interval)
         || items.is_empty()
-        || items.len() > 32
+        || items.len() > edit::MAX_ITEMS
         || items.iter().any(|item| {
             !super::api::valid_id(&item.work_key)
                 || !hertz_wallpaper::valid_sha256_hex(&item.package_hash)
         })
     {
         return Err(JobError::invalid_input(
-            "列表需要有效标题、1–32个固定版本和10–86400秒间隔",
+            "列表需要有效标题、1–1000个固定版本和10–86400秒间隔",
         ));
     }
     Ok(())
@@ -293,7 +304,11 @@ impl Runner {
     pub(crate) fn initial_at(&mut self, reference: Option<&FixedVersion>) -> Option<Switch> {
         if self.current.is_none() && self.pending.is_none() && self.failed.is_none() {
             let index = match reference {
-                Some(reference) => self.playlist.items.iter().position(|item| item == reference)?,
+                Some(reference) => self
+                    .playlist
+                    .items
+                    .iter()
+                    .position(|item| item == reference)?,
                 None => 0,
             };
             Some(self.start(index))
@@ -389,14 +404,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn reference(work: &str, hash: u8) -> FixedVersion {
+    pub(super) fn reference(work: &str, hash: u8) -> FixedVersion {
         FixedVersion {
             work_key: work.into(),
             package_hash: format!("{hash:064x}"),
         }
     }
 
-    async fn install(library: &Library, item: &FixedVersion, version: u32) {
+    pub(super) async fn install(library: &Library, item: &FixedVersion, version: u32) {
         library
             .install(&InstallWork {
                 remote_work_id: format!("author-{}", item.work_key),
@@ -759,7 +774,7 @@ mod tests {
                 "invalid_input"
             );
         }
-        for items in [vec![], vec![item.clone(); 33]] {
+        for items in [vec![], vec![item.clone(); 1001]] {
             assert_eq!(
                 repository
                     .save(None, None, "错误数量".into(), Mode::Sequential, 10, items)
@@ -913,7 +928,7 @@ mod tests {
             assert!(Runner::new(playlist(Mode::Sequential, interval, 2), 0).is_err());
         }
         assert!(Runner::new(playlist(Mode::Sequential, 10, 0), 0).is_err());
-        assert!(Runner::new(playlist(Mode::Sequential, 10, 33), 0).is_err());
+        assert!(Runner::new(playlist(Mode::Sequential, 10, 1001), 0).is_err());
         for interval in [10, 86400] {
             let mut runner = running(Mode::Sequential, interval, 2);
             let now = Instant::now();

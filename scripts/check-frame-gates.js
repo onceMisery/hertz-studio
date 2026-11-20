@@ -244,6 +244,37 @@ function feedHz(hz, times) {
     eq(legacyCalls, 4, '原单参数消费者保持运行');
   }
 
+  section('共享循环：隔离 fps/tick 异常，每帧只取一次目标，停机后仍可唤醒');
+  {
+    const queue = [], reports = [], targets = [0, 0, 0];
+    let clock = 0, healthyTicks = 0, broken = true, active = true;
+    const ctx = { Math, isFinite, console: { error: (...args) => reports.push(args) },
+      rafId: 0, stageDestroyed: false, hidden: false, playing: false, window: {},
+      lastFrameAt: 0, lastDt: 0, stageFrame: { frameId: 0 }, frameBatch: false, frameStatePending: false,
+      now: () => clock, clamp: (n, lo, hi) => Math.max(lo, Math.min(hi, n)),
+      readDocumentHidden: () => false, fillFrameRecord: record => record, notifyFrameState() {}, sampleFrameRate() {},
+      requestAnimationFrame: callback => { queue.push(callback); return queue.length; },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(gateCore + '\n' + grabFn(stageSrc, 'function frame(') + '\n' + grabFn(stageSrc, 'function schedule('), ctx);
+    ctx.gates.push(
+      { name: 'bad-fps', skip: 0, wait: 0, fpsFn() { targets[0]++; if (broken) throw Error('fps'); return 0; }, tickFn() {} },
+      { name: 'bad-tick', skip: 0, wait: 0, fpsFn() { targets[1]++; return active ? 60 : 0; }, tickFn() { if (broken) throw Error('tick'); } },
+      { name: 'healthy', skip: 0, wait: 0, fpsFn() { targets[2]++; return active ? 60 : 0; }, tickFn() { healthyTicks++; } },
+    );
+    ctx.schedule(false);
+    for (let i = 0; i < 4; i++) { clock += 1000 / 60; queue.shift()(); }
+    eq(healthyTicks, 4, '两种异常均不阻断同帧后续门或下一帧');
+    ok(targets.every(count => count === 4), '每个门的 fpsFn 每个真实 frame 只计算一次');
+    eq(reports.length, 2, '连续失败每个门只报告一次');
+    broken = false; clock += 1000 / 60; queue.shift()();
+    eq(healthyTicks, 5, '失败恢复后正常运行');
+    active = false; clock += 1000 / 60; queue.shift()();
+    eq(queue.length, 0, '目标全部为零时停止调度');
+    active = true; ctx.schedule(false); clock += 1000 / 60; queue.shift()();
+    eq(healthyTicks, 6, '停机后显式事件仍可唤醒');
+  }
+
   section('档位表不许再说谎：写死的帧率必须同时整除 60 与 120');
   {
     const declared = [];

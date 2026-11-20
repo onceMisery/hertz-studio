@@ -164,7 +164,7 @@ fn compress_assets(directory: &std::path::Path) -> std::io::Result<()> {
             compress_assets(&path)?;
         } else if matches!(
             path.extension().and_then(|s| s.to_str()),
-            Some("js" | "css" | "html")
+            Some("js" | "json" | "wasm" | "css" | "html")
         ) {
             // GzipBuilder's zero mtime and omitted filename make output reproducible.
             let mut encoder = flate2::GzBuilder::new()

@@ -45,6 +45,8 @@ pub(crate) struct SceneContract {
     pub owns_lyrics: bool,
     #[serde(default)]
     pub params: Vec<SceneParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -278,7 +280,10 @@ mod tests {
         }
         let p = page(8, 2);
         assert_eq!(p["scenes"].as_array().unwrap().len(), 2);
-        assert!(p["nextOffset"].is_null());
+        assert_eq!(p["nextOffset"], 10);
+        let last = page(10, 2);
+        assert_eq!(last["scenes"].as_array().unwrap().len(), 1);
+        assert!(last["nextOffset"].is_null());
         assert!(page(10000, 2)["scenes"].as_array().unwrap().is_empty());
     }
 
@@ -290,6 +295,7 @@ mod tests {
             ids,
             vec![
                 "towers",
+                "towers-flat",
                 "orb",
                 "tunnel",
                 "nebula",

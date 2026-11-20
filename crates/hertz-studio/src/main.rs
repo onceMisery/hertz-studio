@@ -873,7 +873,7 @@ async fn asset(
     let payload = if gzip {
         body.gzip
     } else {
-        body.identity().as_bytes()
+        body.identity()
     };
     let mut response = (
         [
@@ -1184,7 +1184,7 @@ mod tests {
             assert_eq!(response.headers()["cache-control"], "no-cache");
             assert_eq!(response.headers()["vary"], "Accept-Encoding");
             assert_eq!(
-                response.text().await.unwrap(),
+                response.bytes().await.unwrap().as_ref(),
                 entry.body.identity(),
                 "{}",
                 entry.path
@@ -1208,7 +1208,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(!response.headers().contains_key("content-encoding"));
-                assert_eq!(response.text().await.unwrap(), entry.body.identity());
+                assert_eq!(response.bytes().await.unwrap().as_ref(), entry.body.identity());
             }
         }
         let rejected = client

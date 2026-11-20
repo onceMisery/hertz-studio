@@ -120,6 +120,7 @@ pub(crate) async fn resolve_selection_with_options(
             .as_ref()
             .map_or_else(|| vec![reference.clone()], |list| list.items.clone());
         let source = Arc::clone(&jobs);
+        let inspection_properties = request.properties.clone();
         let inspection_cancel = Arc::clone(&cancel);
         let runtime = tokio::runtime::Handle::current();
         let inspection = tokio::task::spawn_blocking(move || {
@@ -128,6 +129,7 @@ pub(crate) async fn resolve_selection_with_options(
                 &references,
                 members,
                 &inspection_cancel,
+                &inspection_properties,
             ))
         })
         .await
@@ -227,12 +229,16 @@ pub(crate) struct LayoutInspection {
 }
 
 impl LayoutInspection {
-    fn new(integrated: bool, video: bool, members: usize) -> Self {
-        let max_members = if video { 2 } else { 4 };
+    fn new(integrated: bool, decoders: u32, members: usize) -> Self {
+        let max_members = if decoders == 0 {
+            4
+        } else {
+            (2 / decoders).max(1) as usize
+        };
         let reason = if integrated {
             Some("内置场景使用集成渲染，仅支持单屏或横跨")
-        } else if members > max_members {
-            Some("视频镜像最多支持 2 个显示器")
+        } else if decoders > 2 || members > max_members {
+            Some("镜像的全部成员最多共用 2 个视频解码名额")
         } else {
             None
         };
@@ -256,6 +262,7 @@ impl LayoutInspection {
 pub(crate) struct LayoutSnapshot {
     selection: super::config::Selection,
     members: usize,
+    properties: serde_json::Map<String, serde_json::Value>,
     playlist_revision: Option<u64>,
     references: Vec<super::playlist::FixedVersion>,
 }
@@ -269,6 +276,34 @@ impl LayoutSnapshot {
 fn validate_members(members: usize) -> Result<()> {
     if !(1..=4).contains(&members) {
         return Err(JobError::invalid_input("布局检查需要 1–4 个显示器"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_layout_properties(
+    selection: &super::config::Selection,
+    properties: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    if properties.len() > hertz_wallpaper::properties::MAX_PROPERTIES
+        || properties.iter().any(|(id, value)| {
+            !hertz_wallpaper::valid_local_id(id)
+                || !(value.is_number() || value.is_boolean() || value.is_string())
+                || value.as_str().is_some_and(|value| {
+                    value.encode_utf16().count()
+                        > hertz_wallpaper::properties::MAX_TEXT_LENGTH as usize
+                })
+        })
+        || serde_json::to_vec(properties).map_or(true, |bytes| bytes.len() > 64 * 1024)
+        || (!properties.is_empty()
+            && !matches!(
+                selection,
+                super::config::Selection::Package { .. }
+                    | super::config::Selection::Playlist { .. }
+            ))
+    {
+        return Err(JobError::invalid_input(
+            "布局检查需要最多 64 项有效标量公开属性；覆盖仅用于作品或列表",
+        ));
     }
     Ok(())
 }
@@ -293,7 +328,7 @@ pub(crate) async fn inspect_layout(
     cancel: &AtomicBool,
 ) -> Result<LayoutInspection> {
     cancelled(cancel)?;
-    let snapshot = layout_snapshot(jobs, selection, members).await?;
+    let snapshot = layout_snapshot(jobs, selection, members, serde_json::Map::new()).await?;
     inspect_layout_snapshot(jobs, snapshot, cancel).await
 }
 
@@ -303,8 +338,10 @@ pub(crate) async fn layout_snapshot(
     jobs: &ImportJobs,
     selection: super::config::Selection,
     members: usize,
+    properties: serde_json::Map<String, serde_json::Value>,
 ) -> Result<LayoutSnapshot> {
     validate_members(members)?;
+    validate_layout_properties(&selection, &properties)?;
     let (playlist_revision, references) = match &selection {
         super::config::Selection::Builtin {
             scene_id,
@@ -335,6 +372,7 @@ pub(crate) async fn layout_snapshot(
     Ok(LayoutSnapshot {
         selection,
         members,
+        properties,
         playlist_revision,
         references,
     })
@@ -347,25 +385,50 @@ pub(crate) async fn inspect_layout_snapshot(
 ) -> Result<LayoutInspection> {
     cancelled(cancel)?;
     if snapshot.references.is_empty() {
-        Ok(LayoutInspection::new(true, false, snapshot.members))
+        Ok(LayoutInspection::new(true, 0, snapshot.members))
     } else {
-        inspect_references(jobs, &snapshot.references, snapshot.members, cancel).await
+        inspect_references(
+            jobs,
+            &snapshot.references,
+            snapshot.members,
+            cancel,
+            &snapshot.properties,
+        )
+        .await
     }
 }
 
 /// Native Apply preflight covers persisted mirror intent even when no display target is
 /// currently online. Unlike UI polling, this never consumes a cached eligibility result.
+pub(crate) type MirrorIntent = (
+    super::config::Selection,
+    usize,
+    serde_json::Map<String, serde_json::Value>,
+);
+
 pub(crate) async fn validate_mirror_layouts(
     jobs: &ImportJobs,
-    selections: Vec<(super::config::Selection, usize)>,
+    selections: Vec<MirrorIntent>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     cancelled(cancel)?;
     if selections.is_empty() || selections.len() > 4 {
         return Err(JobError::invalid_input("镜像布局核验需要 1–4 个有效显示组"));
     }
-    for (selection, members) in selections {
-        let inspection = inspect_layout(jobs, selection, members, cancel).await?;
+    for (selection, members, properties) in selections {
+        let snapshot = layout_snapshot(jobs, selection, members, properties).await?;
+        let inspection = if snapshot.references.is_empty() {
+            LayoutInspection::new(true, 0, members)
+        } else {
+            inspect_references(
+                jobs,
+                &snapshot.references,
+                members,
+                cancel,
+                &snapshot.properties,
+            )
+            .await?
+        };
         cancelled(cancel)?;
         if !inspection.mirror_eligible {
             return Err(JobError::new(
@@ -382,13 +445,14 @@ async fn inspect_references(
     references: &[super::playlist::FixedVersion],
     members: usize,
     cancel: &AtomicBool,
+    properties: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<LayoutInspection> {
     validate_members(members)?;
-    if references.is_empty() || references.len() > 32 {
-        return Err(JobError::invalid_input("布局检查需要 1–32 个固定版本"));
+    if references.is_empty() || references.len() > super::playlist::edit::MAX_ITEMS {
+        return Err(JobError::invalid_input("布局检查需要 1–1000 个固定版本"));
     }
     let mut integrated = false;
-    let mut video = false;
+    let mut decoders = 0;
     let mut verified = std::collections::HashSet::new();
     #[cfg(test)]
     let mut verified_versions = 0;
@@ -434,7 +498,16 @@ async fn inspect_references(
             .assets()
             .read_installed_manifest(&reference.package_hash)?;
         cancelled(cancel)?;
-        match package.manifest.content {
+        let content = if matches!(
+            package.manifest.content,
+            hertz_wallpaper::Content::Composition { .. }
+        ) {
+            package.manifest.content.clone()
+        } else {
+            hertz_wallpaper::properties::effective_content(&package.manifest, properties)
+                .map_err(super::public_properties::property_error)?
+        };
+        match content {
             hertz_wallpaper::Content::Image { asset } => {
                 check_content_asset(
                     &package.manifest.assets,
@@ -448,19 +521,25 @@ async fn inspect_references(
                     &asset,
                     hertz_wallpaper::AssetKind::Video,
                 )?;
-                video = true;
+                decoders = decoders.max(1);
             }
             hertz_wallpaper::Content::Builtin { .. } => integrated = true,
+            hertz_wallpaper::Content::Composition { .. } => {
+                let facts =
+                    super::composition_plan::inspect_layout(jobs.assets(), &package, properties)?;
+                integrated |= !facts.reconstructable;
+                decoders = decoders.max(facts.decoders);
+            }
             _ => {
                 return Err(JobError::new(
                     "unsupported_content",
-                    "布局检查仅支持内置场景、图片或视频作品",
+                    "布局检查仅支持内置场景、图片、视频或声明式组合作品",
                 ))
             }
         }
     }
     cancelled(cancel)?;
-    let inspection = LayoutInspection::new(integrated, video, members);
+    let inspection = LayoutInspection::new(integrated, decoders, members);
     #[cfg(test)]
     let inspection = LayoutInspection {
         verified_versions,
@@ -641,7 +720,9 @@ async fn resolve_media(
     cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedSelection> {
     request.validate()?;
-    jobs.library().trust().security_check(&request.package_hash)?;
+    jobs.library()
+        .trust()
+        .security_check(&request.package_hash)?;
     cancelled(&cancel)?;
     if !jobs
         .library()
@@ -674,7 +755,13 @@ async fn resolve_media(
             ));
         }
         let package = source.assets().read_installed_manifest(&hash)?;
-        source.library().trust().activation_check(&hash,matches!(package.manifest.content,hertz_wallpaper::Content::Web { .. }))?;
+        source.library().trust().activation_check(
+            &hash,
+            matches!(
+                package.manifest.content,
+                hertz_wallpaper::Content::Web { .. }
+            ),
+        )?;
         cancelled(&source_cancel)?;
         if matches!(
             package.manifest.content,
@@ -872,6 +959,7 @@ mod tests {
                 &crate::wallpaper::work_drafts::Document {
                     composition: None,
                     resources: vec![],
+                    provenance: None,
                     title: "内置场景固定版本".into(),
                     description: String::new(),
                     scene_id: "coast".into(),
@@ -919,7 +1007,7 @@ mod tests {
         let manifest = json!({
             "formatVersion":1,"workId":WORK_ID,"version":version,"title":"固定内容版本",
             "description":"","content":content,
-            "assets":[{"id":"background","kind":asset_kind,"source":"assets/content.bin","variants":[]}],
+            "assets":if kind == "composition" { json!([]) } else { json!([{"id":"background","kind":asset_kind,"source":"assets/content.bin","variants":[]}]) },
             "files":[{"path":"assets/content.bin","bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"mime":mime}],
             "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
             "license":{"code":"none","assets":"none","attribution":""}
@@ -1143,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mirror_rejects_later_builtin_video_overflow_and_future_content_before_preparing() {
+    async fn mirror_rejects_later_builtin_video_overflow_and_accepts_absolute_composition() {
         let root = tempfileish::temp_dir("layout-playlist");
         let decodes = Arc::new(AtomicUsize::new(0));
         let jobs = jobs(root.path(), &decodes).await;
@@ -1161,7 +1249,7 @@ mod tests {
             eligible.verified_versions, 1,
             "duplicate fixed versions are hashed once"
         );
-        let repeated_videos = playlist(&jobs, vec![video.clone(); 32]).await;
+        let repeated_videos = playlist(&jobs, vec![video.clone(); 1000]).await;
         let repeated = inspect(&jobs, selection(&repeated_videos), 2)
             .await
             .unwrap();
@@ -1221,20 +1309,12 @@ mod tests {
         assert_eq!(failure.error.code, "unsupported_layout");
         assert!(failure.poster.is_none());
 
-        let unsupported = playlist(&jobs, vec![image, future]).await;
-        assert_eq!(
-            inspect(&jobs, selection(&unsupported), 2)
+        let absolute = playlist(&jobs, vec![image, future]).await;
+        assert!(
+            inspect(&jobs, selection(&absolute), 4)
                 .await
-                .unwrap_err()
-                .code,
-            "unsupported_content"
-        );
-        assert_eq!(
-            mirror_failure(&jobs, selection(&unsupported), 2)
-                .await
-                .error
-                .code,
-            "unsupported_content"
+                .unwrap()
+                .mirror_eligible
         );
         assert_eq!(
             mirror_failure(&jobs, disguised_video.selection(), 3)
@@ -1361,7 +1441,11 @@ mod tests {
         let video = install(&jobs, "video", 2, "image").await;
         let builtin = install(&jobs, "builtin", 3, "image").await;
         let mixed = playlist(&jobs, vec![image.clone(), builtin]).await;
-        let validate = |selections| {
+        let validate = |selections: Vec<(Selection, usize)>| {
+            let selections = selections
+                .into_iter()
+                .map(|(selection, members)| (selection, members, serde_json::Map::new()))
+                .collect();
             let jobs = Arc::clone(&jobs);
             let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {

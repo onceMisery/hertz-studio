@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, JobError>;
+#[path = "generation_pause.rs"]
+mod pause;
 #[derive(Debug)]
 pub(crate) struct SubmissionOutcome {
     pub request_id: String,
@@ -61,6 +63,7 @@ struct State {
     job: Option<Value>,
     submission: Option<Value>,
     submission_asset_set: Option<String>,
+    pauses: pause::Pauses,
 }
 pub(crate) struct NativeGeneration {
     state: Mutex<State>,
@@ -69,6 +72,7 @@ pub(crate) struct NativeGeneration {
 }
 impl State {
     fn abandon_generation(&mut self) -> Option<SubmissionOutcome> {
+        self.pauses.interrupted(self.epoch);
         let request_id = self
             .submission
             .take()
@@ -134,6 +138,9 @@ impl NativeGeneration {
     }
     pub(crate) fn invalidate_quote(&self) {
         let mut state = lock(&self.state);
+        if let Some(request) = state.quote.as_ref().map(|q| q.request_id.clone()) {
+            state.pauses.failed_before_submission(&request);
+        }
         state.quote = None;
         state.quote_revision = state.quote_revision.wrapping_add(1);
     }
@@ -409,14 +416,25 @@ impl NativeGeneration {
         payload: Value,
         done: impl FnOnce(Result<Value>, Option<SubmissionOutcome>) + Send + 'static,
     ) -> Result<()> {
+        let pause_request = if command == "wallpaper.ai.generate.confirm" {
+            lock(&self.state)
+                .quote
+                .as_ref()
+                .filter(|q| q.owner == owner && payload["confirmationToken"] == q.token)
+                .map(|q| q.request_id.clone())
+        } else {
+            None
+        };
         if self.busy.swap(true, Ordering::AcqRel) {
             return Err(error("ai_busy", "上一操作尚未完成"));
         }
         let service = self.clone();
         let failed = self.clone();
+        let failed_request = pause_request.clone();
         if std::thread::Builder::new()
             .name("wallpaper-ai-request".into())
             .spawn(move || {
+                let pause_epoch = lock(&service.state).epoch;
                 let mut submission_pending = None;
                 let result = service.perform_with_submission(
                     profile,
@@ -425,6 +443,27 @@ impl NativeGeneration {
                     payload,
                     &mut submission_pending,
                 );
+                if result.is_err() {
+                    if matches!(
+                        command.as_str(),
+                        "wallpaper.ai.generate.confirm"
+                            | "wallpaper.ai.generate.recover"
+                            | "wallpaper.ai.generate.job"
+                            | "wallpaper.ai.generate.cancel"
+                    ) && result.as_ref().is_err_and(|error| {
+                        !matches!(
+                            error.code,
+                            "invalid_input" | "poll_too_soon" | "quote_expired"
+                        )
+                    }) {
+                        lock(&service.state).pauses.interrupted(pause_epoch);
+                    }
+                    if let Some(request) = pause_request {
+                        lock(&service.state)
+                            .pauses
+                            .failed_before_submission(&request);
+                    }
+                }
                 if result.as_ref().is_err_and(|e| {
                     matches!(
                         e.code,
@@ -448,6 +487,11 @@ impl NativeGeneration {
             .is_err()
         {
             failed.busy.store(false, Ordering::Release);
+            if let Some(request) = failed_request {
+                lock(&failed.state)
+                    .pauses
+                    .failed_before_submission(&request);
+            }
             return Err(error("worker_unavailable", "无法启动本机连接请求"));
         }
         Ok(())
@@ -469,6 +513,9 @@ impl NativeGeneration {
             interrupted: false,
             retired_service_instance: None,
         });
+        lock(&self.state)
+            .pauses
+            .submitted(epoch, body["requestId"].as_str().unwrap_or(""));
         let result = http(
             connection,
             "POST",
@@ -526,6 +573,11 @@ impl NativeGeneration {
             outcome.interrupted = interrupted;
             {
                 let mut state = lock(&self.state);
+                if !interrupted && !recovering {
+                    state.pauses.reject(epoch, request);
+                } else {
+                    state.pauses.interrupted(epoch);
+                }
                 if state.epoch == epoch && state.submission.as_ref() == Some(&body) {
                     state.submission = None;
                     state.submission_asset_set = None;
@@ -556,11 +608,13 @@ impl NativeGeneration {
                 super::ai_asset_sets::AiAssetSets(jobs.library()).bind_job(quote, request, job),
             )?;
         }
-        result.map(|mut response| {
-            // Provenance belongs to the frozen submit/recover body.
-            response["generationRequestId"] = request.into();
-            response
-        })
+        result
+            .map(|mut response| {
+                // Provenance belongs to the frozen submit/recover body.
+                response["generationRequestId"] = request.into();
+                response
+            })
+            .inspect_err(|_| lock(&self.state).pauses.interrupted(epoch))
     }
 
     fn perform(
@@ -580,6 +634,9 @@ impl NativeGeneration {
         payload: Value,
         submission_pending: &mut Option<SubmissionOutcome>,
     ) -> Result<Value> {
+        if command == "wallpaper.ai.pause.resume" {
+            return self.resume_pause(payload);
+        }
         if command == "wallpaper.ai.generate.recover" {
             *submission_pending = lock(&self.state).submission.as_ref().and_then(|body| {
                 body["requestId"].as_str().map(|id| SubmissionOutcome {
@@ -625,6 +682,7 @@ impl NativeGeneration {
             }));
             result["job"] = state.job.clone().unwrap_or(Value::Null);
             result["submissionPending"] = Value::Bool(state.submission.is_some());
+            result["generationPause"] = state.pauses.snapshot(Instant::now());
             return Ok(result);
         }
         let (epoch, connection) = {
@@ -785,12 +843,7 @@ impl NativeGeneration {
                 summary
             }
             "wallpaper.ai.generate.confirm" => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase", deny_unknown_fields)]
-                struct Confirm {
-                    confirmation_token: String,
-                }
-                let input: Confirm = serde_json::from_value(payload)
+                let input: pause::Confirm = serde_json::from_value(payload)
                     .map_err(|_| error("invalid_input", "确认参数无效"))?;
                 let token = input.confirmation_token.as_str();
                 let (body, asset_set_id, quote_revision) = {
@@ -950,6 +1003,11 @@ impl NativeGeneration {
                 return Err(error("invalid_response", "任务回执无效，请查询原请求"));
             }
             state.job = Some(result["job"].clone());
+            state.pauses.observe(
+                epoch,
+                result["generationRequestId"].as_str(),
+                &result["job"],
+            );
             state.submission = None;
             state.submission_asset_set = None;
         } else if matches!(
@@ -957,6 +1015,7 @@ impl NativeGeneration {
             "wallpaper.ai.generate.job" | "wallpaper.ai.generate.cancel"
         ) {
             state.job = Some(result.clone());
+            state.pauses.observe(epoch, None, &result);
         }
         Ok(result)
     }
@@ -1155,6 +1214,10 @@ mod transport;
 #[cfg(test)]
 #[path = "generation_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "generation_pause_tests.rs"]
+mod pause_tests;
 
 #[path = "generation_receive.rs"]
 pub(crate) mod receive;

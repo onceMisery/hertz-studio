@@ -8,6 +8,7 @@
 import { clamp, seededRandom } from './util.js';
 import earcut from 'three/src/extras/lib/earcut.js';
 import { FIGURES } from './figures.js';
+import { numericArray } from '../../coast-stage/src/resource-tools.js';
 
 export const SIGN_COUNT = 12;
 
@@ -90,19 +91,20 @@ function unitDir(rnd) {
 
 // Explicit silhouettes own fitting, mesh coverage and particle placement.
 const fitCache = new Array(SIGN_COUNT);
-export function shapeFit(index) {
+export function shapeFit(index, source) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
-  if (!fitCache[i]) {
+  const cache = source ? source.fitCache : fitCache;
+  if (!cache[i]) {
     const points = FIGURES[i].regions.flatMap(r => r.outline);
     const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     const dx = maxX - minX, dy = maxY - minY;
     const k = Math.min(FIG_HALF_W * 2 / dx, FIG_HALF * 2 / dy);
-    fitCache[i] = { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
+    cache[i] = { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
       k, kz: 1, w: dx * k / 2, h: dy * k / 2 };
   }
-  return fitCache[i];
+  return cache[i];
 }
 
 export const FIGURE_MESH_POINTS = 560;
@@ -117,7 +119,7 @@ function insideRing(x, y, ring) {
   return inside;
 }
 
-function reliefDepth(index, x, y) {
+function reliefDepth(index, x, y, source) {
   let distance = 0;
   for (const region of FIGURES[index].regions) {
     if (!insideRing(x, y, region.outline) || region.holes.some(h => insideRing(x, y, h))) continue;
@@ -129,7 +131,7 @@ function reliefDepth(index, x, y) {
         nearest = Math.min(nearest, Math.hypot(x-a[0]-dx*t, y-a[1]-dy*t));
       });
     }
-    distance = Math.max(distance, nearest * shapeFit(index).k);
+    distance = Math.max(distance, nearest * shapeFit(index, source).k);
   }
   return FIGURE_Z + .06 + (FIGURE_DEPTH - FIGURE_Z - .08) * (1 - Math.exp(-distance / RELIEF_TAU));
 }
@@ -141,8 +143,8 @@ const backDepth = figureBackDepth;
 // 体积法线：由三角面片按面积加权求和，再把 z 翻正（正面朝机位）。
 // 起伏只来自 reliefDepth 的径向隆起，所以内部法线接近 +z、靠轮廓处向外倾斜 ——
 // 正好让轮廓附近的星尘能吃到轮廓光。一次按座烘焙，采样时只做插值。
-function vertexNormals(points, triangles, depths) {
-  const out = new Float32Array(points.length * 3);
+function vertexNormals(points, triangles, depths, source) {
+  const out = numericArray(source?.scope, Float32Array, points.length * 3, "Zodiac geometry Float32Array source");
   for (const [a, b, c] of triangles) {
     const p = points[a], q = points[b], r = points[c];
     const ux = q[0]-p[0], uy = q[1]-p[1], uz = depths[b]-depths[a];
@@ -164,9 +166,19 @@ function vertexNormals(points, triangles, depths) {
   return out;
 }
 
-function artwork(index) {
-  if (artworkCache[index]) return artworkCache[index];
-  const points = [], triangles = [], contours = [];
+function artwork(index, source) {
+  const cache = source ? source.artworkCache : artworkCache;
+  if (cache[index]) return cache[index];
+  const vertices = FIGURE_MESH_POINTS;
+  const contours = FIGURES[index].regions.reduce((sum, region) => sum + region.outline.length, 0);
+  const holes = FIGURES[index].regions.reduce((sum, region) => sum + region.holes.length, 0);
+  const triangleBound = 2 * vertices + 2 * holes;
+  // Planar constrained triangulation + refinement: <=2V+2H triangles.
+  // Numeric payload for points/depth/areas/contours, temporary ring flattening
+  // and Earcut nodes (12 scalar fields) stays reserved through this source scope.
+  const ticket = source?.scope?.reserve({ ownedCpuBytes: (vertices * (3 + 2 + 12) + triangleBound * 4 + contours * 3) * 8 },
+    'Zodiac artwork constrained triangulation/refinement numeric working data', 'bounded-estimate');
+  const points = [], triangles = [], contourEdges = [];
   for (const region of FIGURES[index].regions) {
     const rings = [region.outline, ...region.holes];
     const base = points.length;
@@ -175,7 +187,7 @@ function artwork(index) {
       if (r) holes.push(flat.length / 2);
       const start = points.length;
       ring.forEach(p => { points.push(p.slice()); flat.push(...p); });
-      if (!r) ring.forEach((p, k) => contours.push([start + k, start + (k + 1) % ring.length]));
+      if (!r) ring.forEach((p, k) => contourEdges.push([start + k, start + (k + 1) % ring.length]));
     });
     const indices = earcut(flat, holes, 2);
     for (let t = 0; t < indices.length; t += 3) {
@@ -214,13 +226,14 @@ function artwork(index) {
     totalArea += Math.abs((q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0])) / 2;
     return totalArea;
   });
-  const lengths = contours.map(([a,b]) => {
+  const lengths = contourEdges.map(([a,b]) => {
     totalLength += Math.hypot(points[a][0]-points[b][0], points[a][1]-points[b][1]);
     return totalLength;
   });
-  const depths = points.map(([x,y]) => reliefDepth(index,x,y));
-  const normals = vertexNormals(points, triangles, depths);
-  return (artworkCache[index] = { points, triangles, contours, areas, lengths, totalArea, totalLength, depths, normals });
+  const depths = points.map(([x,y]) => reliefDepth(index,x,y,source));
+  const normals = vertexNormals(points, triangles, depths, source);
+  ticket?.commit();
+  return (cache[index] = { points, triangles, contours: contourEdges, areas, lengths, totalArea, totalLength, depths, normals });
 }
 
 function weightedIndex(cumulative, value) {
@@ -232,9 +245,9 @@ function weightedIndex(cumulative, value) {
   return lo;
 }
 
-function sampleArtwork(index, count, seed, surface = false, normalsOut = null) {
-  const art = artwork(index), fit = shapeFit(index), rnd = seededRandom(seed);
-  const pos = new Float32Array(count * 3);
+function sampleArtwork(index, count, seed, surface = false, normalsOut = null, source) {
+  const art = artwork(index, source), fit = shapeFit(index, source), rnd = seededRandom(seed);
+  const pos = numericArray(source?.scope, Float32Array, count * 3, "Zodiac geometry Float32Array source");
   for (let i = 0; i < count; i++) {
     let x, y, depth;
     let nx = 0, ny = 0, nz = 1;
@@ -281,20 +294,20 @@ function sampleArtwork(index, count, seed, surface = false, normalsOut = null) {
   return pos;
 }
 
-export function buildShape(index, count) {
+export function buildShape(index, count, source) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
-  const normals = new Float32Array(count * 3);
-  const pos = sampleArtwork(i, count, 'zodiac-shape:' + ZODIAC[i].id + ':' + count, false, normals);
+  const normals = numericArray(source?.scope, Float32Array, count * 3, "Zodiac geometry Float32Array source");
+  const pos = sampleArtwork(i, count, 'zodiac-shape:' + ZODIAC[i].id + ':' + count, false, normals, source);
   const rnd = seededRandom('zodiac-shine:' + ZODIAC[i].id + ':' + count);
-  const shine = new Float32Array(count);
+  const shine = numericArray(source?.scope, Float32Array, count, "Zodiac geometry Float32Array source");
   for (let k = 0; k < count; k++) shine[k] = .40 + Math.pow(rnd(), 3) * .8;
   return { pos, normals, shine, sign: ZODIAC[i] };
 }
 
 export const CONSTELLATION = FIGURES.map(({nodes,lines}) => ({nodes,lines}));
 
-function surfaceDepth(index, x, y) {
-  const art = artwork(index);
+function surfaceDepth(index, x, y, source) {
+  const art = artwork(index, source);
   for (const [a,b,c] of art.triangles) {
     const p=art.points[a], q=art.points[b], r=art.points[c];
     const det=(q[1]-r[1])*(p[0]-r[0])+(r[0]-q[0])*(p[1]-r[1]);
@@ -302,7 +315,7 @@ function surfaceDepth(index, x, y) {
     const v=((r[1]-p[1])*(x-r[0])+(p[0]-r[0])*(y-r[1]))/det;
     if(u>=-1e-6 && v>=-1e-6 && u+v<=1+1e-6) return art.depths[a]*u+art.depths[b]*v+art.depths[c]*(1-u-v);
   }
-  return reliefDepth(index,x,y);
+  return reliefDepth(index,x,y,source);
 }
 
 export function transitionStyle(cycle, sign = 0) {
@@ -326,21 +339,21 @@ export function transitionStyle(cycle, sign = 0) {
     arc: .72+hash(0x3f)*.65,       // 飞行弧幅
   };
 }
-export function buildConstellation(index) {
+export function buildConstellation(index, source) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
-  const src = CONSTELLATION[i], fit = shapeFit(i);
-  const x = new Float32Array(src.nodes.length), y = new Float32Array(src.nodes.length);
-  const m = new Float32Array(src.nodes.length), links = new Uint8Array(src.nodes.length);
-  const z = new Float32Array(src.nodes.length);
+  const src = CONSTELLATION[i], fit = shapeFit(i, source);
+  const x = numericArray(source?.scope, Float32Array, src.nodes.length, "Zodiac geometry Float32Array source"), y = numericArray(source?.scope, Float32Array, src.nodes.length, "Zodiac geometry Float32Array source");
+  const m = numericArray(source?.scope, Float32Array, src.nodes.length, "Zodiac geometry Float32Array source"), links = numericArray(source?.scope, Uint8Array, src.nodes.length, "Zodiac geometry Uint8Array source");
+  const z = numericArray(source?.scope, Float32Array, src.nodes.length, "Zodiac geometry Float32Array source");
   src.nodes.forEach(([px,py,b], k) => {
     x[k] = (px-fit.cx)*fit.k; y[k] = (py-fit.cy)*fit.k; m[k] = b;
-    z[k] = surfaceDepth(i,px,py) - MESH_INSET + NODE_LIFT;
+    z[k] = surfaceDepth(i,px,py,source) - MESH_INSET + NODE_LIFT;
   });
   src.lines.forEach(([a,b]) => { links[a] += 1; links[b] += 1; });
   return { x, y, z, m, links, nodes: x.length, segments: src.lines.length,
-    core: buildRibbon(x, y, src.lines, LINE_CORE_WIDTH,z),
-    halo: buildRibbon(x, y, src.lines, LINE_HALO_WIDTH,z),
-    reveal: buildRibbonReveal(src.lines) };
+    core: buildRibbon(x, y, src.lines, LINE_CORE_WIDTH,z,source),
+    halo: buildRibbon(x, y, src.lines, LINE_HALO_WIDTH,z,source),
+    reveal: buildRibbonReveal(src.lines, source) };
 }
 
 // Retained pure utility for the existing public test API; artwork uses Earcut.
@@ -419,15 +432,17 @@ export function delaunay2(points) {
 }
 
 
-export function buildFigureMesh(index, cloudCount) {
+export function buildFigureMesh(index, cloudCount, source) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
-  const art = artwork(i), fit = shapeFit(i);
+  const art = artwork(i, source), fit = shapeFit(i, source);
+  source?.scope?.reserve({ ownedCpuBytes: (art.points.length * 6 + art.triangles.length * 3 * 8) * 8 },
+    'Zodiac figure mesh point/depth arrays and three-edge numeric workspace', 'bounded-estimate')?.commit();
   const pts = art.points.map(([x,y]) => ({x:(x-fit.cx)*fit.k, y:(y-fit.cy)*fit.k}));
   // 面罩比星尘皮肤内收一点：亮星浮在实体前面，转动时不会和自己的身体打架。
   const shellFront = art.depths.map(z => z - MESH_INSET);
   const shellBack = art.depths.map(z => backDepth(z) + MESH_INSET);
   const tris = art.triangles;
-  const cloud = sampleArtwork(i, cloudCount, 'zodiac-figure-cloud:' + ZODIAC[i].id + ':' + cloudCount, true);
+  const cloud = sampleArtwork(i, cloudCount, 'zodiac-figure-cloud:' + ZODIAC[i].id + ':' + cloudCount, true, null, source);
 
   const tintRnd = seededRandom('zodiac-figure-tint:' + ZODIAC[i].id);
   const boundary = new Map();
@@ -438,8 +453,8 @@ export function buildFigureMesh(index, cloudCount) {
   }));
   const rims = [...boundary.values()].filter(e=>e.count===1);
   const triangles = tris.length*2+rims.length*2;
-  const meshPos = new Float32Array(triangles * 9);
-  const tint = new Float32Array(triangles * 9);
+  const meshPos = numericArray(source?.scope, Float32Array, triangles * 9, "Zodiac geometry Float32Array source");
+  const tint = numericArray(source?.scope, Float32Array, triangles * 9, "Zodiac geometry Float32Array source");
   const edgeSet = new Map();
   tris.forEach(([a, b, c], t) => {
     const v = [pts[a], pts[b], pts[c]];
@@ -471,25 +486,25 @@ export function buildFigureMesh(index, cloudCount) {
     addFace([[u,false],[u,true],[v,true]]);
     addFace([[u,false],[v,true],[v,false]]);
   });
-  const px = new Float32Array(pts.length);
-  const py = new Float32Array(pts.length);
+  const px = numericArray(source?.scope, Float32Array, pts.length, "Zodiac geometry Float32Array source");
+  const py = numericArray(source?.scope, Float32Array, pts.length, "Zodiac geometry Float32Array source");
   pts.forEach((p, k) => { px[k] = p.x; py[k] = p.y; });
   const edgeLines = [];
   edgeSet.forEach((pair) => edgeLines.push(pair));
   const contourLines = rims.map(({u,v}) => [u,v]);
   const frontDepths = art.depths.map(z => z + .006);
   // 网格顶点的亮点云（参考图里每个三角形顶点都是一个小亮核）。
-  const nodes = new Float32Array(pts.length * 3);
+  const nodes = numericArray(source?.scope, Float32Array, pts.length * 3, "Zodiac geometry Float32Array source");
   pts.forEach((p, k) => {
     nodes[k * 3] = p.x; nodes[k * 3 + 1] = p.y; nodes[k * 3 + 2] = art.depths[k]+.006;
   });
   return {
     cloud,
     mesh: { pos: meshPos, tint },
-    edgeCore: buildRibbon(px, py, edgeLines, EDGE_CORE_WIDTH, art.depths.map(z=>z+.006)),
-    edgeHalo: buildRibbon(px, py, edgeLines, EDGE_HALO_WIDTH, art.depths.map(z=>z+.006)),
-    contourCore: buildRibbon(px, py, contourLines, .012, frontDepths),
-    contourHalo: buildRibbon(px, py, contourLines, .048, frontDepths),
+    edgeCore: buildRibbon(px, py, edgeLines, EDGE_CORE_WIDTH, art.depths.map(z=>z+.006), source),
+    edgeHalo: buildRibbon(px, py, edgeLines, EDGE_HALO_WIDTH, art.depths.map(z=>z+.006), source),
+    contourCore: buildRibbon(px, py, contourLines, .012, frontDepths, source),
+    contourHalo: buildRibbon(px, py, contourLines, .048, frontDepths, source),
     nodes,
     triangles,
     frontTriangles: tris.length,
@@ -500,10 +515,10 @@ export function buildFigureMesh(index, cloudCount) {
 // 连线丝带：二维线段按宽度向两侧挤成四边形（不做屏幕空间的粗线，几何一次性
 // 烘死在造型平面里，缩放旋转下始终清晰）。两端各外扩半个线宽，拐角就不会开豁口。
 // z 支持标量或逐节点深度，连线两端随曲面插值。
-export function buildRibbon(x, y, lines, width, z) {
+export function buildRibbon(x, y, lines, width, z, source) {
   const hw = (width || 0.03) / 2;
   const zz = z == null ? CONSTELLATION_Z : z;
-  const out = new Float32Array(lines.length * 18);
+  const out = numericArray(source?.scope, Float32Array, lines.length * 18, "Zodiac geometry Float32Array source");
   lines.forEach(([a, b], s) => {
     const az = typeof zz === 'number' ? zz : zz[a];
     const bz = typeof zz === 'number' ? zz : zz[b];
@@ -529,10 +544,10 @@ export function buildRibbon(x, y, lines, width, z) {
 
 // 连线生长顺序：每段 6 顶点，a 端先亮、b 端后亮（端序与 buildRibbon 的顶点布局一致）。
 // reveal ∈ [0,1]，配合 uGrow 做「逐根连上」的描绘动画；纯函数、确定性。
-export function buildRibbonReveal(lines) {
+export function buildRibbonReveal(lines, source) {
   const n = Math.max(1, lines.length);
   const end = [0, 0, 1, 0, 1, 1];
-  const out = new Float32Array(lines.length * 6);
+  const out = numericArray(source?.scope, Float32Array, lines.length * 6, "Zodiac geometry Float32Array source");
   lines.forEach((_, s) => {
     for (let v = 0; v < 6; v += 1) out[s * 6 + v] = (s + end[v]) / n;
   });
@@ -541,9 +556,9 @@ export function buildRibbonReveal(lines) {
 
 // 粒子汇聚前 / 散开后的深空云团：大部分是宽球壳里的远星，小部分拉成星流，
 // 让飞行轨迹有「从星海深处冲出来」的纵深。云团围绕 ±4.2..16 的半径。
-export function buildCloud(seedStr, count) {
+export function buildCloud(seedStr, count, source) {
   const rnd = seededRandom('zodiac-cloud:' + seedStr);
-  const pos = new Float32Array(count * 3);
+  const pos = numericArray(source?.scope, Float32Array, count * 3, "Zodiac geometry Float32Array source");
   for (let i = 0; i < count; i += 1) {
     const stream = rnd() < 0.28;
     if (stream) {
@@ -566,9 +581,9 @@ export function buildCloud(seedStr, count) {
 }
 
 // 每个粒子的随机种子（错峰汇聚/闪烁），全周期复用，单独一片 buffer。
-export function buildSeeds(count) {
+export function buildSeeds(count, source) {
   const rnd = seededRandom('zodiac-seeds:' + count);
-  const seeds = new Float32Array(count);
+  const seeds = numericArray(source?.scope, Float32Array, count, "Zodiac geometry Float32Array source");
   for (let i = 0; i < count; i += 1) seeds[i] = rnd();
   return seeds;
 }

@@ -12,7 +12,7 @@ const output = path.resolve(process.env.HERTZ_COMPOSITION_UI_OUTPUT || path.join
 const composition = JSON.parse(fs.readFileSync(path.join(root, 'crates/hertz-wallpaper/contracts/composition.json'), 'utf8'));
 const checks = [], errors = [];
 let html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8').replace(/<script>[\s\S]*?<\/script>/g, '');
-html = html.replace('__AI_CSS__', fs.readFileSync(path.join(assets, 'wallpaper-ai.css'), 'utf8'));
+html = html.replace('__AI_CSS__', fs.readFileSync(path.join(assets, 'wallpaper-ai.css'), 'utf8') + '\n' + fs.readFileSync(path.join(assets, 'wallpaper-work-layers.css'), 'utf8'));
 const server = http.createServer((_request, response) => { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(html); });
 (async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -144,6 +144,8 @@ const server = http.createServer((_request, response) => { response.setHeader('C
     for (let index = 0; index < 32; index++) await page.locator('[data-generation-asset]').nth(index).check();
     assert.equal(await page.locator('[data-generation-asset]').nth(32).isDisabled(), true);
     checks.push('selection limit preserves checked items and blocks a thirty-third resource');
+    await page.addScriptTag({ path: path.join(assets, 'wallpaper-work-structure.js') });
+    await page.addScriptTag({ path: path.join(assets, 'wallpaper-work-layers.js') });
     await page.addScriptTag({ path: path.join(assets, 'wallpaper-work-composition.js') });
     await page.addScriptTag({ path: path.join(assets, 'wallpaper-work.js') });
     await page.evaluate(() => window.hertzWallpaperWork.openDraft('work-' + '1'.repeat(32)));

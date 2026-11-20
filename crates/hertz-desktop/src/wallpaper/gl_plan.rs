@@ -15,6 +15,10 @@ use super::jobs::JobError;
 /// Its six cube-face storage replacements can overlap another 60 bytes under
 /// the original native GL fence discipline: 4+8+12+16+20. Reserve that real peak.
 pub(crate) const THREE_BOOTSTRAP_GPU_PEAK_BYTES: u64 = 96;
+/// The original WebGLState upload arrays and nine RGBA8 texels are also
+/// represented in the page ledger. They coexist with composition resources.
+pub(crate) const THREE_DEFAULT_TEXTURE_BYTES: u64 = 36;
+pub(crate) const THREE_DEFAULT_CPU_BYTES: u64 = 16;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -37,9 +37,10 @@ async function run(browser, viewport) {
       #host,.fl-tempera{position:absolute;inset:0}
       .fl-tempera-eyebrow,.fl-tempera-note,.fl-tempera-hot{display:none}
       </style><div id="host"></div>`);
-    for (const file of ['vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
+    for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
       'stanza/stanza-sonnet-fx.js', 'stanza/stanza-sonnet.js', 'stanza/stanza-tempera.js']) {
-      await page.addScriptTag({ path: path.join(web, file) });
+      if (file === 'vendor/pixi.min.js') await page.evaluate(() => { window.Stage = {resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy))}; });
+    await page.addScriptTag({ path: path.join(web, file) });
     }
     await page.evaluate(() => {
       const f = window.fixture = { time: 1500, circles: 0, contexts: new Map(), playing: false };
@@ -59,7 +60,7 @@ async function run(browser, viewport) {
         text: ['晚风轻轻吹过海面', '让每一颗星拥有自己的颜色', 'Hello 世界，听见 wind and light'][index % 3]
       }));
       f.track = { id: 'tempera-regression', title: '凝彩色彩与切句' };
-      window.Stage = {
+      window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)),
         presentation: () => ({ playing: f.playing, track: f.track }), position: () => f.time,
         lyrics: () => ({ lines: f.lines }),
         lyricTokens: line => [{ text: line.text, start_ms: line.start_ms, end_ms: line.end_ms }],

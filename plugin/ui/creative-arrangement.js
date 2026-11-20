@@ -23,30 +23,40 @@
     });
     return out;
   }
-  function prepare(sections) {
-    var normalized = normalize(sections), CS = CreativeStage, revision = CS.revision();
-    var source = CS.preset(), preset = CS.shareSnapshot(), rules = CS.sectionRules();
-    var paths = Object.keys(rules.verse);
-    preset.cues = normalized.map(function (section) {
-      var set = {};
-      paths.forEach(function (path) {
-        var parts = path.split('.');
-        set[path] = section.mode === 'original' ? preset[parts[0]][parts[1]] : rules[section.mode][path];
+  function prepareLease(sections) {
+    var work = StageJsonSource.reserve('creative-arrangement', 64 * 1024,
+      '32 section records, eight original director target parameters per cue and arrangement envelope');
+    var snapshot, prepared;
+    try {
+      var normalized = normalize(sections), CS = CreativeStage, revision = CS.revision();
+      snapshot = CS.shareSnapshotLease();
+      var source = CS.projectInfo(), preset = snapshot.value, rules = CS.sectionRules();
+      var paths = Object.keys(rules.verse);
+      preset.cues = normalized.map(function (section) {
+        var set = {};
+        paths.forEach(function (path) {
+          var parts = path.split('.');
+          set[path] = section.mode === 'original' ? preset[parts[0]][parts[1]] : rules[section.mode][path];
+        });
+        return {at:section.at,len:section.fade,ease:'inout',set:set};
       });
-      return {at:section.at,len:section.fade,ease:'inout',set:set};
-    });
-    // Absolute authored cues must not compete with the automatic director.
-    preset.director = false;
-    var prepared = CreativeProject.prepare({projectVersion:1,timelineVersion:1,
-      schemaVersion:CreativeStageContract.schemaVersion,schemaHash:CreativeStageContract.schemaHash,
-      preset:preset,media:source.project ? source.project.media : null});
-    if (source.bg && source.bg.type === 'media') prepared.warnings.push('外部图片/视频不进入工程，需另选素材。');
-    return {prepared:prepared,revision:revision,sections:normalized,replacedCueCount:source.cues.length,
-      directorWasOn:source.director,bindingCount:preset.bindings.length};
+      // Absolute authored cues must not compete with the automatic director.
+      preset.director = false;
+      prepared = CreativeProject.prepareLease({projectVersion:1,timelineVersion:1,
+        schemaVersion:CreativeStageContract.schemaVersion,schemaHash:CreativeStageContract.schemaHash,
+        preset:preset,media:source.project ? source.project.media : null});
+      if (source.usesMediaBackground) prepared.value.warnings.push('外部图片/视频不进入工程，需另选素材。');
+      var result = {prepared:prepared.value,revision:revision,sections:normalized,replacedCueCount:source.cueCount,
+        directorWasOn:source.director,bindingCount:preset.bindings.length};
+      var child = prepared;
+      var sourceLease = work.finish(result, 4096, function () { child.release(); child = null; });
+      prepared = null; return sourceLease;
+    } finally { if (snapshot) snapshot.release(); if (prepared) prepared.release(); work.release(); }
   }
+  function prepare(sections) { return StageJsonSource.transfer(prepareLease(sections)); }
   window.CreativeArrangement = {
     modes:function () { return MODES.map(function (m) { return m.slice(); }); },
-    prepare:prepare,
+    prepare:prepare,prepareLease:prepareLease,
     apply:function (plan) { return CreativeProject.apply(plan.prepared,plan.revision); }
   };
 })();

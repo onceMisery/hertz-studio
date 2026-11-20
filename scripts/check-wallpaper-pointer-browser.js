@@ -3,6 +3,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { runtimePage } = require('./stage-runtime-fixture');
 const path = require('node:path');
 const http = require('node:http');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -11,15 +12,13 @@ const assets = path.join(root, 'crates/hertz-desktop/assets');
 const output = path.join(root, 'output/playwright/wallpaper-pointer-browser');
 const html = fs.readFileSync(path.join(assets, 'wallpaper-scene.html'), 'utf8')
   .replace('__GL_BUDGET__', () => fs.readFileSync(path.join(assets, 'wallpaper-gl-budget.js'), 'utf8'))
-  .replace('__RUNTIME__', () => fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8'))
-  .replace('__SHIM__', () => fs.readFileSync(path.join(root, 'plugin/ui/vendor/zodiac-stage.js'), 'utf8'))
   .replace('__SCENE__', () => fs.readFileSync(path.join(assets, 'wallpaper-scene.js'), 'utf8'));
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const server = http.createServer((_, res) => { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true, args: ['--use-angle=swiftshader', '--enable-webgl'] });
-  const page = await browser.newPage({ viewport: { width: 960, height: 540 }, reducedMotion: 'no-preference' });
+  const page = await runtimePage(browser, { viewport: { width: 960, height: 540 }, reducedMotion: 'no-preference' });
   const errors = [], checks = [];
   page.on('pageerror', error => errors.push(error.message));
   const state = () => page.evaluate(() => hertzWallpaper.debug());

@@ -26,16 +26,19 @@ export function createQuality(mode = 'auto', tier = 1) {
     },
     warmup(now) { started = now; windowStart = now || 0; intervals = []; last = null; pressure = 0; },
     dpr(width, height, device = 1) { const q = PROFILES[ORDER[effective]]; return Math.min(device, q.dprCap, Math.sqrt(q.pixelBudget / Math.max(1, width * height))); },
-    sample(now, counts, cpuMs) {
+    sample(now, counts, cpuMs, targetFps) {
       if (started === null) { started = now; windowStart = now; }
       if (last !== null && now > last) intervals.push(now - last);
       last = now;
       if (now - started < 10000 || now - windowStart < 2000) return false;
       const q = PROFILES[ORDER[effective]];
+      // A host may deliberately submit fewer frames than the quality profile.
+      // Judge pressure against that budget, not against frames it never requested.
+      const fps = Number.isFinite(targetFps) && targetFps > 0 ? Math.min(q.fps, targetFps) : q.fps;
       if (typeof counts === 'function') counts = counts();
       const sorted = intervals.slice().sort((a,b) => a-b);
       const p95 = sorted[Math.floor(sorted.length * .95)] || 0;
-      const over = sorted.length >= 10 && (p95 > 1000 / q.fps * 1.4 || cpuMs > 1000 / q.fps * .8 || counts.drawCalls > q.drawCalls || counts.points > q.particles || counts.triangles > q.triangles || counts.estimatedBytes > q.memoryBytes);
+      const over = sorted.length >= 10 && (p95 > 1000 / fps * 1.4 || cpuMs > 1000 / fps * .8 || counts.drawCalls > q.drawCalls || counts.points > q.particles || counts.triangles > q.triangles || counts.estimatedBytes > q.memoryBytes);
       pressure = over ? pressure + 1 : 0;
       windowStart = now; intervals = [];
       if (pressure >= 3 && effective > 0) { effective--; reason = 'sustained-frame-or-resource-pressure'; pressure = 0; return true; }

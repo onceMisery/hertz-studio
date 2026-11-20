@@ -453,13 +453,13 @@ function checkChaoxiThemes() {
 
 
 function checkPrimaryNavigation() {
-  section('一级导航：在线 / 歌单常驻，侧栏两段文案只删文本');
+  section('一级导航：在线 / 每日推荐 / 歌单 / 队列 / 收藏常驻，侧栏两段文案只删文本');
   const js = cleanJs(HERTZ_JS);
   const primary = js.match(/var PRIMARY_RAIL_VIEWS = \[([^\]]+)\]/);
   ok(!!primary, '常驻入口名单存在');
   if (primary) {
     eq(primary[1].replace(/['"\s]/g, '').split(',').join('|'),
-      'home|library|online|playlists|settings', '常驻入口含在线与歌单');
+      'home|library|online|daily|playlists|queue|favorites|settings', '常驻入口含每日推荐、队列与收藏');
   }
   const mount = js.slice(js.indexOf('function mount()'), js.indexOf('function unmount()'));
   const sync = js.slice(js.indexOf('function syncNavigation()'), js.indexOf('function scheduleSync()'));

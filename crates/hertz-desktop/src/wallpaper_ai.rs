@@ -5,6 +5,23 @@ use crate::wallpaper::{ai, api, jobs::JobError};
 type AiResult<T> = std::result::Result<T, JobError>;
 
 impl App {
+    pub(super) fn prepare_generation_pause(
+        &mut self,
+        owner: u64,
+        payload: &serde_json::Value,
+    ) -> AiResult<()> {
+        self.wallpaper_ai.generation.prepare_pause(owner, payload)?;
+        self.sync_generation_pause();
+        Ok(())
+    }
+    pub(super) fn sync_generation_pause(&mut self) {
+        let paused = self.wallpaper_ai.generation.pause_active();
+        if self.ai_generation_paused != paused {
+            self.ai_generation_paused = paused;
+            self.recompute_wallpaper();
+            self.recompute_preview_generation_pause();
+        }
+    }
     pub(super) fn handle_ai_pair(
         &self,
         payload: serde_json::Value,
@@ -166,6 +183,11 @@ impl App {
             }
             return;
         }
+        if request.command == "wallpaper.ai.pause.resume" {
+            let result = self.wallpaper_ai.generation.resume_pause(request.payload);
+            self.send_wallpaper_management(reply, api::response(id.as_deref(), result, None));
+            return;
+        }
         if matches!(
             request.command.as_str(),
             "wallpaper.ai.receive"
@@ -209,12 +231,19 @@ impl App {
             if request.command == "wallpaper.ai.generate.confirm" {
                 if request.payload.as_object().is_none_or(|fields| {
                     fields.keys().any(|key| {
-                        !matches!(key.as_str(), "confirmationToken" | "externalRequestId")
+                        !matches!(
+                            key.as_str(),
+                            "confirmationToken" | "externalRequestId" | "pauseDynamic"
+                        )
                     })
                 }) || request
                     .payload
                     .get("externalRequestId")
                     .is_some_and(|id| !id.is_string())
+                    || request
+                        .payload
+                        .get("pauseDynamic")
+                        .is_some_and(|value| !value.is_boolean())
                 {
                     self.send_wallpaper_management(
                         reply,
@@ -297,6 +326,13 @@ impl App {
                             api::response(id.as_deref(), Err(error), None),
                         );
                     }
+                    return;
+                }
+                if let Err(error) = self.prepare_generation_pause(owner, &request.payload) {
+                    self.send_wallpaper_management(
+                        reply,
+                        api::response(id.as_deref(), Err(error), None),
+                    );
                     return;
                 }
             }

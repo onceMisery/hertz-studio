@@ -38,7 +38,7 @@ function safeCatalog(catalog) {
   for (const work of catalog.works) {
     assert.deepEqual(Object.keys(work).sort(), ['kind', 'packageHash', 'tags', 'title', 'version', 'workKey']);
     assert.match(work.workKey, /^[A-Za-z0-9_-]{1,128}$/); assert.match(work.packageHash, hex);
-    assert.ok(['builtin', 'image', 'video'].includes(work.kind));
+    assert.ok(['builtin', 'image', 'video', 'composition'].includes(work.kind));
     assert.ok(Number.isInteger(work.version) && work.version > 0);
     assert.ok(typeof work.title === 'string' && work.title.length > 0);
     assert.ok(Array.isArray(work.tags) && work.tags.every(tag => typeof tag === 'string'));
@@ -426,6 +426,7 @@ async function createExternalChecks(context) {
       work = catalog.works.find(item => item.workKey === saved.workKey && item.packageHash === saved.packageHash);
       const revokeRequest = safeReceipt(await ok(revoked, 'wallpaper_switch_request', { operationId: operationId('revoked'), workKey: work.workKey, packageHash: work.packageHash, targetHandle: catalog.targetHandle }));
       before = await effects(); await api('/v1/ai/grants/' + revoked.grantId, 'DELETE');
+      grants.splice(grants.indexOf(revoked.grantId), 1);
       await denied(revoked, 'wallpaper_request_get', { requestId: revokeRequest.requestId }, ['grant_revoked', 'unauthorized', 'not_connected']);
       await action(revokeRequest.requestId, 'confirm'); await consent('switch', 6);
       await until(() => page.evaluate(id => window.externalFixtureConfirmations.some(item => item.requestId === id && item.ok === false), revokeRequest.requestId), 'revoked grant confirmation rejected');

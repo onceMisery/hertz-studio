@@ -12,7 +12,9 @@ const output = process.env.HERTZ_WALLPAPER_SETTINGS_OUTPUT
   ? path.resolve(process.env.HERTZ_WALLPAPER_SETTINGS_OUTPUT)
   : path.join(root, 'output/playwright/wallpaper-display-settings');
 let html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8');
-for (const [key, file] of Object.entries({ DISPLAYS_CSS:'wallpaper-displays.css', DISPLAYS:'wallpaper-displays.js', SETTINGS:'wallpaper-settings.js', LIBRARY:'wallpaper-library.js', WORKS:'wallpaper-work.js', PLAYLIST:'wallpaper-playlist.js', AI:'wallpaper-ai.js', AI_CSS:'wallpaper-ai.css', EMBEDDED_CSS:'wallpaper-embedded.css' })) html = html.replace('__' + key + '__', () => fs.readFileSync(path.join(assets, file), 'utf8'));
+for (const [key, file] of Object.entries({ DISPLAYS_CSS:'wallpaper-displays.css', DISPLAYS:'wallpaper-displays.js', SETTINGS:'wallpaper-settings.js', LIBRARY:'wallpaper-library.js', WORKS:'wallpaper-work.js', PLAYLIST:'wallpaper-playlist.js', AI:'wallpaper-ai.js', AI_CSS:'wallpaper-ai.css', EMBEDDED_CSS:'wallpaper-embedded.css' })) html = html.replace('__' + key + '__', () => (key === 'PLAYLIST' ? fs.readFileSync(path.join(assets, 'wallpaper-playlist-editor.js'), 'utf8') + '\n' : '') + fs.readFileSync(path.join(assets, file), 'utf8'));
+// This fixture exercises settings/display owners; community is covered separately.
+html = html.replace('<script>__COMMUNITY__</script>', '').replace('__COMMUNITY_PANEL__', () => fs.readFileSync(path.join(assets, 'wallpaper-community.html'), 'utf8').replace('__AUTHOR_PANEL__', () => fs.readFileSync(path.join(assets, 'wallpaper-community-author.html'), 'utf8')));
 const presentation = { fps:30, quality:'low', brightness:1, motion:1, fit:'cover', pointer:false };
 const payload = {
  revision:9, mediaPreviewAvailable:true, previewActive:false, previewLease:null, launchAtLogin:false, positionEditing:false,
@@ -323,12 +325,43 @@ async function checkPublicProperties(page) {
  await page.evaluate(value=>hertzWallpaperSettings.applyStatus(value),newProfile);await releaseProperty();await page.waitForFunction(()=>propertyPending===0);
  assert.equal(await page.locator('#public-properties').isVisible(),false);assert.equal(await page.locator('.public-property').count(),0);assert.equal(await page.evaluate(()=>propertyMaxPending),1);
  checks.push('conflicting external revisions retain edited values with Apply disabled; Discard adopts saved overrides; previous-profile responses cannot restore controls after source replacement');
+
+ const mirrorValue=structuredClone(single);
+ mirrorValue.capabilities={...mirrorValue.capabilities,mirrorInspection:true,mirrorPackages:false};
+ mirrorValue.config.groups[0].mode='mirror';
+ mirrorValue.config.groups[0].displays=[{kind:'fixed',displayId:'screen-a'},{kind:'fixed',displayId:'screen-b'}];
+ mirrorValue.config.groups[0].selection={kind:'package',workKey:'composition-ranges',packageHash:'c'.repeat(64)};
+ mirrorValue.config.groups[0].properties={range:1500};
+ const rangeSchema=[{id:'range',label:'视频范围',type:'number',default:1500,constraints:{min:1,max:2000},target:{kind:'node',nodeId:'b',property:'loopEndMs',component:null}}];
+ await reset(mirrorValue,{propertySchemas:{'composition-ranges':rangeSchema}});await waitReady(1);
+ const mirrorOption=()=>page.locator('[data-focus-key=mode] option[value=mirror]');
+ await page.waitForFunction(()=>!document.querySelector('[data-focus-key=mode] option[value=mirror]').disabled);
+ await page.evaluate(()=>{gateCommand='wallpaper.layout.inspect';window.dispatchEvent(new Event('wallpaper-layout-invalidated'));});
+ await page.waitForFunction(()=>!!gates['wallpaper.layout.inspect']);
+ await input('range').fill('1000');
+ assert.equal(await mirrorOption().evaluate(node=>node.disabled),true);
+ await page.evaluate(()=>{gateCommand='wallpaper.layout.inspect';const reply=gates['wallpaper.layout.inspect'];delete gates['wallpaper.layout.inspect'];reply();});
+ await page.waitForFunction(()=>!!gates['wallpaper.layout.inspect']&&requests.filter(r=>r.command==='wallpaper.layout.inspect').at(-1).payload.properties.range===1000);
+ assert.equal(await mirrorOption().evaluate(node=>node.disabled),true,'late eligibility for previous public values cannot enable mirror');
+ assert.equal(await page.locator('#apply').isDisabled(),true);
+ await page.evaluate(()=>{const reply=gates['wallpaper.layout.inspect'];delete gates['wallpaper.layout.inspect'];reply();});
+ await page.waitForFunction(()=>layoutPending===0);
+ assert.equal(await mirrorOption().evaluate(node=>node.disabled),true,'different ranges need two decoders per member');
+ await input('range').fill('1500');
+ await page.waitForFunction(()=>layoutPending===0&&!document.querySelector('[data-focus-key=mode] option[value=mirror]').disabled);
+ assert.equal(await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.layout.inspect').at(-1).payload.properties.range),1500);
+ const inspectedCount=await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.layout.inspect').length);
+ await input('range').fill('1000');assert.equal(await mirrorOption().evaluate(node=>node.disabled),true);
+ await input('range').fill('1500');assert.equal(await mirrorOption().evaluate(node=>node.disabled),false);
+ assert.equal(await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.layout.inspect').length),inspectedCount,'cache is keyed by exact typed public values');
+ assert.equal(await page.evaluate(()=>layoutMaxPending),1);
+ checks.push('mirror inspection sends typed public values, fences late replies after range edits, rejects split decoders and re-enables merged ranges using value-specific cache entries');
 }
 (async()=>{
  fs.mkdirSync(output,{recursive:true});
  const server=http.createServer((req,res)=>{if(req.url.startsWith('/scene-thumbnails/')){res.setHeader('Content-Type','image/jpeg');return res.end(fs.readFileSync(path.join(assets,'scene-thumbnails',path.basename(req.url))));}res.setHeader('Content-Type','text/html;charset=utf-8');res.end(html);});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
- const browser=await chromium.launch({channel:'chrome',headless:true});
+ const browser=await chromium.launch({executablePath:process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
  const page=await browser.newPage({viewport:{width:1180,height:900},reducedMotion:'reduce'});
  page.on('pageerror', e=>errors.push(e.message));
  await page.addInitScript(()=>{
@@ -349,7 +382,8 @@ async function checkPublicProperties(page) {
      if(layoutPendingReplies>0){layoutPendingReplies--;queueMicrotask(()=>hertzWallpaperSettings.applyManagement({protocol:2,requestId:req.requestId,ok:true,result:{pending:true}}));return;}
      if(layoutFailures>0){layoutFailures--;queueMicrotask(()=>hertzWallpaperSettings.applyManagement({protocol:2,requestId:req.requestId,ok:false,error:{code:'query_timeout',message:'检查超时'}}));return;}
      const selection=req.payload.selection,integrated=['builtin','followHertz'].includes(selection.kind),video=selection.kind==='package'&&selection.workKey.startsWith('video');
-     const maxMembers=video?2:4,mirrorEligible=!integrated&&!layoutDenied&&req.payload.members<=maxMembers;
+     const composition=selection.kind==='package'&&selection.workKey==='composition-ranges';
+     const maxMembers=composition?(req.payload.properties?.range===1500?2:1):video?2:4,mirrorEligible=!integrated&&!layoutDenied&&req.payload.members<=maxMembers;
      result={layouts:mirrorEligible?['single','span','mirror']:['single','span'],mirrorEligible,maxMembers,...(!mirrorEligible?{reason:integrated?'内置场景仅支持单屏或跨屏':layoutDenied?'列表中有尚未就绪的版本':'视频镜像最多支持 2 个显示器'}:{})};
     }
     if(req.command==='wallpaper.capabilities')result=capabilities;
@@ -372,6 +406,7 @@ async function checkPublicProperties(page) {
     if(req.command==='wallpaper.preview.update')result={leaseId:req.payload.leaseId};
     if(req.command==='wallpaper.preview.release'){hertzWallpaperSettings.unmountPreview();result={released:true};}
     if(req.command==='wallpaper.preview.renew')result={leaseId:req.payload.leaseId};
+    if(req.command==='wallpaper.playlist.update')result={...req.payload,playlistId:req.payload.playlistId,itemCount:req.payload.operations.filter(op=>op.kind==='insert').length,revision:req.payload.expectedPlaylistRevision+1};
     if(req.command==='wallpaper.playlist.save')result={...req.payload,playlistId:'playlist-new',title:req.payload.title,revision:1};
     if(req.command==='wallpaper.playlist.list')result={playlists:[],nextCursor:null};
     if(req.command==='wallpaper.library.list')result={works:[],nextCursor:null};
@@ -434,11 +469,11 @@ async function checkPublicProperties(page) {
   assert.equal(await page.locator('#music').isEnabled(),true);assert.equal(await page.locator('#audio-device').isEnabled(),true);assert.equal(await page.locator('#audio-options').isVisible(),true);
   await page.locator('[data-focus-key=group-alpha]').click();
   await page.evaluate(()=>window.dispatchEvent(new CustomEvent('wallpaper-playlist-add',{detail:{work:{workKey:'video-1',title:'海边影像'},version:{packageHash:'a'.repeat(64),version:2}}})));
-  await page.evaluate(()=>window.gateCommand='wallpaper.playlist.save');
+  await page.evaluate(()=>window.gateCommand='wallpaper.playlist.update');
   await page.locator('#playlist-choose').click();
-  await page.waitForFunction(()=>!!gates['wallpaper.playlist.save']);
+  await page.waitForFunction(()=>!!gates['wallpaper.playlist.update']);
   await page.locator('[data-focus-key=group-beta]').click();
-  await page.evaluate(()=>{gates['wallpaper.playlist.save']();delete gates['wallpaper.playlist.save'];});
+  await page.evaluate(()=>{gates['wallpaper.playlist.update']();delete gates['wallpaper.playlist.update'];});
   await page.waitForFunction(()=>window.nativeWallpaper.groups[0].selection.kind==='playlist');
   native=await page.evaluate(()=>nativeWallpaper);
   assert.equal(native.groups[0].selection.kind,'playlist');assert.equal(native.groups[1].selection.workKey,'video-1');assert.equal(await page.evaluate(()=>hertzWallpaperSettings.currentGroupId()),'beta');
@@ -462,7 +497,7 @@ async function checkPublicProperties(page) {
    await page.screenshot({path:path.join(output,'mobile-'+width+'.png')});
   }
   checks.push('390px and 320px mobile viewports have no document or main horizontal overflow');
-  await page.locator('#apply').click(); await page.waitForFunction(()=>requests.some(r=>r.command==='wallpaper.apply')); const applied=await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.draft.update').at(-1).payload.operations); assert.equal(applied.filter(op=>op.kind==='replaceWallpaper').length,1); assert.deepEqual(applied[0].wallpaper.groups.map(g=>g.id),['alpha','beta']); assert.equal(applied[0].wallpaper.groups[0].selection.playlistId,'playlist-new'); assert.equal(applied[0].wallpaper.groups[1].selection.workKey,'video-1'); assert.deepEqual(applied[0].wallpaper.audioInput,payload.config.audioInput); checks.push('Apply sends the whole two-group wallpaper in one replaceWallpaper operation and ignores independent work form validity'); assert.deepEqual(errors,[]);
+  await page.locator('#apply').click(); await page.waitForFunction(()=>requests.some(r=>r.command==='wallpaper.apply')); const applied=await page.evaluate(()=>requests.filter(r=>r.command==='wallpaper.draft.update').at(-1).payload.operations); assert.equal(applied.filter(op=>op.kind==='replaceWallpaper').length,1); assert.deepEqual(applied[0].wallpaper.groups.map(g=>g.id),['alpha','beta']); assert.equal(applied[0].wallpaper.groups[0].selection.playlistId,await page.evaluate(()=>requests.find(r=>r.command==='wallpaper.playlist.update').payload.playlistId)); assert.equal(applied[0].wallpaper.groups[1].selection.workKey,'video-1'); assert.deepEqual(applied[0].wallpaper.audioInput,payload.config.audioInput); checks.push('Apply sends the whole two-group wallpaper in one replaceWallpaper operation and ignores independent work form validity'); assert.deepEqual(errors,[]);
   await page.reload();await page.setViewportSize({width:1180,height:900});
   const inspectCapabilities={layouts:['single','span','mirror'],multiDisplay:true,mirrorInspection:true,mirrorBuiltin:false,mirrorPackages:false,mirrorPlaylists:false};
   const inspectPayload=structuredClone(payload);inspectPayload.capabilities=inspectCapabilities;
@@ -606,6 +641,24 @@ async function checkPublicProperties(page) {
   await page.screenshot({path:path.join(output,'mirror-inspection.png'),fullPage:true});
   await checkWindowPolicies(page);
   await checkPublicProperties(page);
+  // The real settings close path must wait for the original playlist write.
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('wallpaper-playlist-add', { detail: { work: { workKey: 'close-item', title: '关闭保存' }, version: { packageHash: 'a'.repeat(64), version: 1 } } }));
+    window.gateCommand = 'wallpaper.playlist.update';
+    window.closeProbe = hertzWallpaperSettings.requestClose();
+  });
+  await page.waitForFunction(() => !!gates['wallpaper.playlist.update']);
+  assert.equal(await page.evaluate(() => requests.filter(r => r.cmd === 'close').length), 0);
+  await page.evaluate(() => { gates['wallpaper.playlist.update'](); delete gates['wallpaper.playlist.update']; return closeProbe; });
+  assert.equal(await page.evaluate(() => requests.filter(r => r.cmd === 'close').length), 1);
+  await page.evaluate(() => {
+    const title = document.querySelector('#playlist-title'); title.value = ''; title.dispatchEvent(new Event('input', { bubbles: true }));
+    return hertzWallpaperSettings.requestClose();
+  });
+  assert.equal(await page.evaluate(() => requests.filter(r => r.cmd === 'close').length), 1);
+  assert.match(await page.locator('#status').textContent(), /轮播列表尚未保存/);
+  checks.push('settings close waits for the original playlist save; invalid remaining input keeps the window open');
+
   assert.deepEqual(errors,[]);
   fs.writeFileSync(path.join(output,'report.json'),JSON.stringify({checks,errors},null,2));
   console.log(JSON.stringify({checks,errors,output},null,2));

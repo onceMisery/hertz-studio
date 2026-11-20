@@ -598,7 +598,7 @@ function uiSourceFiles() {
     ctx.gates = [{ name: 'throw', fpsFn: () => 60, tickFn: () => { clock.value += 3; throw new Error('render error'); }, skip: 0, wait: 0 }];
     let error;
     try { ctx.runGates(1000 / 60); } catch (e) { error = e.message; }
-    eq(error, 'render error', '渲染异常保持原传播语义');
+    eq(error, undefined, '渲染异常隔离在帧门，不能中断共享循环');
     eq(P.summary().metrics['gate.throw']?.totalMs, 3, '异常路径已花费的时间仍入账');
     delete ctx.HertzPerf;
     ctx.gates = [{ name: 'absent', fpsFn: () => 60, tickFn: () => { frames++; }, skip: 0, wait: 0 }];

@@ -569,6 +569,12 @@ impl App {
             enabled: true,
             wallpaper: &self.desktop.configuration,
             manual_pause: self.wallpaper_hidden,
+            ai_generation: self.ai_generation_paused
+                && self
+                    .desktop
+                    .surface
+                    .as_ref()
+                    .is_none_or(WallpaperSurface::dynamic),
             fullscreen: self.desktop.fullscreen_gate.stable(),
             maximized: self.desktop.maximized_gate.stable(),
             application_rule: self.desktop.application_gate.stable(),

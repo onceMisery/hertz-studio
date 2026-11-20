@@ -124,12 +124,50 @@ pub(crate) async fn authenticated_get(
 }
 
 pub(crate) async fn bounded(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     maximum: usize,
 ) -> Result<Vec<u8>, JobError> {
     if response.status() != reqwest::StatusCode::OK {
         return Err(error("community_response", "社区响应状态无效"));
     }
+    bounded_json(response, maximum).await
+}
+
+pub(super) async fn bounded_write(
+    response: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>, JobError> {
+    use reqwest::StatusCode;
+    match response.status() {
+        StatusCode::OK | StatusCode::CREATED => bounded_json(response, maximum).await,
+        StatusCode::UNAUTHORIZED => Err(error("login_required", "社区登录已失效，请重新登录")),
+        StatusCode::FORBIDDEN => Err(error("community_denied", "当前账号没有此操作的权限")),
+        StatusCode::NOT_FOUND => Err(error("community_not_found", "没有找到当前账号可操作的对象")),
+        StatusCode::CONFLICT => Err(error(
+            "community_conflict",
+            "作品已认领、版本冲突或原操作仍在处理，请刷新并核对",
+        )),
+        StatusCode::TOO_MANY_REQUESTS => Err(error(
+            "community_rate_limit",
+            "社区请求或上传槽已达上限，请稍后再试",
+        )),
+        StatusCode::BAD_REQUEST
+        | StatusCode::UNPROCESSABLE_ENTITY
+        | StatusCode::PAYLOAD_TOO_LARGE => Err(error(
+            "community_invalid_input",
+            "社区未接受此包或请求，请核对版本、许可与大小",
+        )),
+        _ => Err(error(
+            "author_result_unknown",
+            "社区未返回确定结果，请查询原操作",
+        )),
+    }
+}
+
+async fn bounded_json(
+    mut response: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>, JobError> {
     identity(&response)?;
     if response
         .content_length()

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { geometry } from './resource-tools.js';
 import { clamp, smoothstep, lerp } from './util.js';
 
 // 天空与海面共用的 uniforms（颜色均为线性空间）
@@ -152,7 +153,7 @@ void main() {
 }
 `;
 
-export function createSky() {
+export function createSky(scope) {
   const uniforms = { ...SKY, uDetail: { value: 1 } };
   const mat = new THREE.ShaderMaterial({
     uniforms,
@@ -161,12 +162,12 @@ export function createSky() {
     side: THREE.BackSide,
     depthWrite: false,
   });
-  const geo = new THREE.SphereGeometry(400, 48, 24);
+  const geo = geometry(scope, "SphereGeometry", [400, 48, 24]);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false;
   mesh.renderOrder = -10;
   // 用于 PMREM 生成环境光照的副本
-  const envMesh = new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), mat);
+  const envMesh = new THREE.Mesh(geometry(scope, "SphereGeometry", [50, 32, 16]), mat);
   return { mesh, envMesh, material: mat };
 }
 

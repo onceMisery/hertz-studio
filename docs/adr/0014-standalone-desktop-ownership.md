@@ -21,6 +21,8 @@
 
 功能编译边界由 `crates/hertz-studio/Cargo.toml`、`lib.rs`、`routes.rs` 和 `plugin/backend/Cargo.toml` 共同装配；UI 形态由原 `build-support/edition-ui.rs` 与资源清单产生。它们表达同一个独立桌面归属，不建立新的配置、安装、信任或播放真值。
 
+2026-11-20 增量继续采用以上归属。本地生成的暂停状态由原生 `NativeGeneration` 按请求及服务代际持有，原呈现策略消费该原因；取消或连接失效不冒充外部推理终止，明确恢复只解除相应呈现租约。作品改编由原 `WorkDrafts` 创建独立 workId，迁移 0013 在原 Library 保存来源版本、许可证与资源闭包，后续发布和导入仍通过原包校验。组合镜像的相位归原 `GroupPlayback`，已释放的 source generation、epoch、token 共同决定时间身份；准备下一项不会继承上一项的相位。现行行为与软件验证范围见[离线实施记录](../offline-design-completion.md)，这些增量不改变 DBX 的桌面能力边界。
+
 现行说明已同步 [桌面客户端](../desktop-client.md)、[壁纸设计](../desktop-wallpaper.md)、[API 清单](../api-routes.md)和[DBX 提交边界](../dbx-store-submission.md)。[验收矩阵](../release-validation.md)记录当前证据：两版实际 wrapper/依赖图/生成 UI、三种页面的真实 opaque iframe 负例、独立 Full/native 编译和隔离 WebView2 管理通过。完整日志及范围见 [实施回执](../../output/community-integration-20261118/implementation-20261118.json)。
 
 这些检查不证明正式 DBX 宿主、生产 OIDC/Signer/恢复、物理显示或长稳资格；560px DBX 主界面的宽布局裁切另行保留为未完成界面验收。G3-S 未合格，社区 Web 执行仍关闭。

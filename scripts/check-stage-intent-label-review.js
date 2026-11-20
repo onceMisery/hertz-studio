@@ -17,12 +17,12 @@ try {
   const privateMap = JSON.parse(fs.readFileSync(bundle.privateMapFile, 'utf8'));
   const serializedBlind = fs.readFileSync(path.join(bundlePath, 'briefs.jsonl'), 'utf8');
 
-  assert.equal(blindCases.length, 160);
-  assert.equal(template.length, 160);
+  assert.equal(blindCases.length, corpus.cases.length);
+  assert.equal(template.length, corpus.cases.length);
   assert.equal(fs.existsSync(path.join(bundlePath, 'private-map.json')), false);
   assert.equal(Object.keys(blindCases[0]).sort().join(','), 'brief,reviewId');
-  assert.equal(new Set(blindCases.map(item => item.reviewId)).size, 160);
-  assert.equal(Object.keys(privateMap.reviewIdToCaseId).length, 160);
+  assert.equal(new Set(blindCases.map(item => item.reviewId)).size, corpus.cases.length);
+  assert.equal(Object.keys(privateMap.reviewIdToCaseId).length, corpus.cases.length);
   assert.ok(corpus.cases.every(item => !serializedBlind.includes(item.id)),
     'blind case file must not reveal source case ids');
   assert.ok(!serializedBlind.includes('"expect"') && !serializedBlind.includes('"category"')
@@ -50,7 +50,7 @@ try {
     };
   });
   const accepted = verifyAnswers(bundlePath, answers, 'fixture reviewer', corpus);
-  assert.equal(accepted.reviewedCases, 160);
+  assert.equal(accepted.reviewedCases, corpus.cases.length);
   assert.equal(accepted.labelsConfirmed, true);
   assert.equal(accepted.releaseEligible, false);
 
@@ -66,7 +66,7 @@ try {
   invalidPath.find(answer => answer.label.kind === 'candidate').label.checks.push(['sc.not-a-field', 'eq', 1]);
   assert.throws(() => verifyAnswers(bundlePath, invalidPath, 'fixture reviewer', corpus), /not available/);
 
-  console.log('StageIntent blind label review: 160 opaque cases, private mapping, complete coverage, mismatch reporting, and invalid answer rejection passed');
+  console.log('StageIntent blind label review: '+corpus.cases.length+' opaque cases, private mapping, complete coverage, mismatch reporting, and invalid answer rejection passed');
 } finally {
   assert.ok(path.dirname(tempRoot) === os.tmpdir(), 'temporary review path must stay under the OS temp directory');
   fs.rmSync(tempRoot, { recursive: true, force: true });

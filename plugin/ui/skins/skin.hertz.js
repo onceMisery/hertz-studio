@@ -12,7 +12,7 @@
   var libraryDetail = null, settingsTab = 'appearance', preferenceKey = 'vmusic.hertz.appearance.v1';
   var preferences = { intensity: 70, animated: true, wordSync: true };
   // 常驻导航轨的入口；其余一律收进「更多功能」。挂载与每次同步共用同一份名单。
-  var PRIMARY_RAIL_VIEWS = ['home', 'library', 'online', 'playlists', 'settings'];
+  var PRIMARY_RAIL_VIEWS = ['home', 'library', 'online', 'daily', 'playlists', 'queue', 'favorites', 'settings'];
   var mobile = window.matchMedia('(max-width: 899px)');
   function id(value) { return document.getElementById(value); }
   function icon(name) { return `<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${name}"></use></svg>`; }
@@ -512,8 +512,8 @@
   function syncNavigation() {
     if (!mounted) return;
     var view = window.HertzShell.activeView(), entries = Array.from(id('rail').querySelectorAll('.rail-item[data-view]'));
-    // 在线 / 歌单是一级入口，常驻导航轨；其余（含设置到手后才挂载的每日推荐）
-    // 归入同一展开菜单。两处名单必须一致，否则同步时会被重新收进「更多功能」。
+    // 在线 / 每日推荐 / 歌单 / 队列 / 收藏都是一级入口，常驻导航轨；播客、一起听、
+    // 阅读归入同一展开菜单。两处名单必须一致，否则同步时会被重新收进「更多功能」。
     entries.forEach(function (entry) {
       if (!PRIMARY_RAIL_VIEWS.includes(entry.dataset.view) && entry.parentNode !== refs.extraEntries) layout.move(entry, refs.extraEntries);
     });
@@ -611,7 +611,7 @@
     var mobileBrand = make('span', 'hz-mobile-brand', topbar, 'HertzStudio'); topbar.prepend(mobileBrand);
     var libraryEntry = rail.querySelector('[data-view="library"]'), settingsEntry = rail.querySelector('[data-view="settings"]');
     layout.move(settingsEntry, rail, libraryEntry.nextSibling);
-    ['online', 'playlists'].forEach(function (view) { layout.move(rail.querySelector('[data-view="' + view + '"]'), rail, settingsEntry); });
+    ['online', 'playlists', 'queue', 'favorites'].forEach(function (view) { layout.move(rail.querySelector('[data-view="' + view + '"]'), rail, settingsEntry); });
     var moreNavigation = make('details', 'hz-extra-nav', rail); rail.insertBefore(moreNavigation, settingsEntry.nextSibling);
     var extraSummary = make('summary', '', moreNavigation); extraSummary.innerHTML = icon('grid'); make('span', '', extraSummary, '更多功能');
     var extraEntries = make('div', 'hz-extra-nav-items', moreNavigation); refs.extraEntries = extraEntries;

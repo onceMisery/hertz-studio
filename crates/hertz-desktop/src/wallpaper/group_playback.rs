@@ -496,6 +496,18 @@ impl GroupPlayback {
         Some(self.time(now).saturating_sub(anchor))
     }
 
+    /// A replacement switch has no phase until its own first reveal batch.
+    /// content_time intentionally retains the visible predecessor while preparing;
+    /// callers establishing a new sampling epoch must not adopt that old anchor.
+    pub(crate) fn released_content_time(&mut self, now: Instant) -> Option<(u64, u64, Duration)> {
+        let transition = self
+            .transition
+            .as_ref()
+            .filter(|transition| transition.released)?;
+        let token = transition.switch.token;
+        Some((self.epoch, token, self.content_time(now)?))
+    }
+
     /// Preserve same-key sampling across clock membership rebuilds. A resumed or
     /// newly joined member samples the current phase with zero hidden-interval dt.
     pub(crate) fn sample(&mut self, key: &str, now: Instant) -> Option<ClockSample> {

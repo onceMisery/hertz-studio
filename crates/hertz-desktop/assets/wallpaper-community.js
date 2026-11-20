@@ -7,7 +7,10 @@
   if (!panel || !settings || !window.hertzWallpaperCommunityView) return;
   const el = id => document.getElementById(id);
   const storageKey = 'hertz.wallpaper.community.pending.v1';
-  const mutations = new Set(['confirmRoot', 'subscribe', 'policy', 'download', 'apply', 'login', 'logout']);
+  const authorStorageKey = 'hertz.wallpaper.community.author.pending.v1';
+  const authorMutations = new Set(['authorCreate', 'authorUpload', 'authorSubmit', 'reportSubmit']);
+  const unknownAuthorCodes = new Set(['author_result_unknown', 'community_network', 'community_response', 'community_response_limit', 'community_encoding']);
+  const mutations = new Set(['confirmRoot', 'subscribe', 'policy', 'download', 'apply', 'login', 'logout', ...authorMutations]);
   let snapshot = { sources: [], subscriptions: [], updates: [], accounts: [] }, selectedSource = '';
   let active = null, uncertain = restore(), rootTicket = null, reviewTicket = null;
   let scopeKey = '', epoch = 0, browseOffset = null, refreshFlight = null, pollTimer = 0, expiryTimer = 0, invalidateTimer = 0, disposed = false;
@@ -18,9 +21,13 @@
   }
   function visible() { return !panel.hidden && !document.hidden && !disposed; }
   function native() { return !!(window.ipc && typeof window.ipc.postMessage === 'function'); }
+  function authorRecovery() { return !!(uncertain && authorMutations.has(uncertain.command.split('.').pop())); }
+  function clearOwnPending(record) { if (!uncertain || uncertain.requestId === record.requestId) savePending(null); }
   function restore() {
     try {
-      const record = JSON.parse(sessionStorage.getItem(storageKey));
+      const saved = localStorage.getItem(authorStorageKey) || sessionStorage.getItem(storageKey);
+      if (saved && saved.length > 4096) return null;
+      const record = JSON.parse(saved);
       if (record && typeof record.requestId === 'string' && /^[0-9a-f-]{36}$/.test(record.requestId)
         && typeof record.command === 'string' && record.command.startsWith('wallpaper.community.')) return record;
     } catch (_) {}
@@ -28,14 +35,20 @@
   }
   function savePending(record) {
     try {
-      if (!record) sessionStorage.removeItem(storageKey);
-      else sessionStorage.setItem(storageKey, JSON.stringify({ requestId: record.requestId, command: record.command, sourceId: record.sourceId,
+      if (!record) { sessionStorage.removeItem(storageKey); localStorage.removeItem(authorStorageKey); }
+      else {
+        const author = authorMutations.has(record.command.split('.').pop());
+        const storage = author ? localStorage : sessionStorage;
+        storage.setItem(author ? authorStorageKey : storageKey, JSON.stringify({ requestId: record.requestId, command: record.command, sourceId: record.sourceId,
         operationId: record.operationId, remoteWorkId: record.payload && record.payload.remoteWorkId, subscriptionId: record.payload && record.payload.subscriptionId,
         subscriptionRevision: record.payload && record.payload.subscriptionRevision, policy: record.payload && record.payload.policy, enabled: record.payload && record.payload.enabled,
-        fingerprint: record.payload && record.payload.fingerprint, origin: record.origin, groupId: record.groupId }));
+        fingerprint: record.payload && record.payload.fingerprint, origin: record.origin, groupId: record.groupId,
+        uploadId: record.payload && record.payload.uploadId, accountIssuer: record.accountIssuer, accountSubject: record.accountSubject }));
+      }
     } catch (_) {}
   }
   const view = window.hertzWallpaperCommunityView.create(panel, {
+    report: work => author && author.showReport(work),
     subscribe: work => run('subscribe', { sourceId: selectedSource, remoteWorkId: work.toLowerCase() }),
     download: sub => run('download', { subscriptionId: sub.subscriptionId, targetGroupId: context().groupId }, { target: true }),
     policy: (sub, revision, policy, enabled) => run('policy', { subscriptionId: sub.subscriptionId, subscriptionRevision: revision, policy, enabled }),
@@ -48,11 +61,24 @@
       } catch (error) { view.message(error.message, true); }
     }
   });
+  const author = window.hertzWallpaperCommunityAuthor && window.hertzWallpaperCommunityAuthor.create(panel, {
+    run, message: view.message, update: controls,
+    invalidate() { if (native() && !disposed) settings.requestManagement('wallpaper.community.authorInvalidate', {}).catch(() => {}); },
+    async cancel() {
+      const record = active || uncertain;
+      if (!record) return;
+      try { await settings.requestManagement('wallpaper.community.authorCancel', { requestId: record.requestId }); view.message('已请求停止传输。远端结果仍按原编号核对。'); }
+      catch (error) { view.message(error.message, true); }
+    }
+  });
   function controls() {
+    if (author) author.setState({ sourceId: selectedSource, account: snapshot.accounts.find(item => item.sourceId === selectedSource),
+      native: native(), busy: !!active, uncertain: !!uncertain, active: active || uncertain });
     el('community-root-form').querySelector('button[type=submit]').dataset.blocked = String(!rootTicket);
     el('community-apply').dataset.blocked = String(!reviewTicket);
     view.uncertain(uncertain);
     view.controls({ native: native(), busy: !!active, uncertain: !!uncertain,
+      authorRecovery: authorRecovery(),
       login: !!(active && active.command === 'wallpaper.community.login' || uncertain && uncertain.command === 'wallpaper.community.login') });
   }
   function render() {
@@ -126,36 +152,49 @@
     } else if (command === 'apply') {
       view.dismissReview(); reviewTicket = null;
       view.message(result.saved === true || result.state === 'committed' ? '配置提交已确认。实际桌面状态可在壁纸页查看。' : '原配置提交仍需核对，请查询原操作。', result.state !== 'committed' && result.saved !== true);
+    } else if (author && /^(author|report)/.test(command) && !authorMutations.has(command) && record.epoch !== epoch) {
+      view.message('社区或设置状态已变化，请重新读取这次作者操作。', true);
+    } else if (author && author.accept(command, result, record)) {
+      // The author view consumes only typed native metadata for this source.
     } else {
       const messages = { subscribe: '订阅已保存，默认下载后提示应用。', policy: '更新策略已保存。', download: '下载已登记，后续状态见原任务记录。', login: '登录已完成。', logout: '已退出此社区账号。', me: '账号状态已核对。' };
       if (messages[command]) view.message(messages[command]);
     }
     if (uncertain && uncertain.requestId === record.requestId) uncertain = null;
-    if (mutations.has(command)) savePending(null);
+    if (mutations.has(command)) clearOwnPending(record);
     if (!['browse', 'review', 'discover'].includes(command)) await refresh();
     render(); return result;
   }
   async function run(command, payload, options = {}) {
     if (disposed || !native()) { view.message('社区操作需要原生桌面设置窗口。', true); return; }
-    if (active || uncertain) { view.message(uncertain ? '请先查询原操作的结果。' : '请等待当前社区操作完成。', true); return; }
+    const reauthentication = authorRecovery() && ['login', 'logout'].includes(command);
+    if (active || uncertain && !reauthentication) { view.message(uncertain ? '请先查询原操作的结果。' : '请等待当前社区操作完成。', true); return; }
     const current = context();
     if (options.target && (!current.ready || !current.groupId || current.pending)) { view.message('请先完成设置保存或位置调整，并选择一个已保存的显示组。', true); return; }
+    if (author && ['login', 'logout'].includes(command)) author.clear();
     const record = { requestId: crypto.randomUUID(), command: 'wallpaper.community.' + command, payload,
       sourceId: payload.sourceId || selectedSource, operationId: options.operationId || payload.operationId,
       groupId: current.groupId, scope: scope(), epoch, origin: options.origin || (rootTicket && rootTicket.profile.origin) };
-    active = record; if (mutations.has(command)) savePending(record); controls();
+    const account = snapshot.accounts.find(item => item.sourceId === record.sourceId);
+    record.accountIssuer = account && account.issuer; record.accountSubject = account && account.subject;
+    active = record; if (mutations.has(command) && !reauthentication) savePending(record); controls();
     try {
       const receipt = await settings.requestManagement(record.command, payload, record.requestId, options.target ? current.revision : undefined);
       return await consume(record, receipt);
     } catch (error) {
-      if (['receipt_timeout', 'operation_pending', 'journal_unavailable'].includes(error.code) && mutations.has(command)) {
-        uncertain = { ...record, subscriptionId: payload.subscriptionId, remoteWorkId: payload.remoteWorkId,
-          subscriptionRevision: payload.subscriptionRevision, fingerprint: payload.fingerprint };
-        savePending(record); view.message('操作结果尚未确认，请查询原操作。', true);
+      if ((['receipt_timeout', 'operation_pending', 'journal_unavailable'].includes(error.code)
+        || authorMutations.has(command) && unknownAuthorCodes.has(error.code)) && mutations.has(command)) {
+        if (!reauthentication) {
+          uncertain = { ...record, subscriptionId: payload.subscriptionId, remoteWorkId: payload.remoteWorkId,
+            subscriptionRevision: payload.subscriptionRevision, fingerprint: payload.fingerprint };
+          savePending(record);
+        }
+        view.message(reauthentication ? '登录状态仍需核对；原作者操作的编号保持保留。' : '操作结果尚未确认，请查询原操作。', true);
       } else {
-        if (mutations.has(command)) savePending(null);
+        if (mutations.has(command)) clearOwnPending(record);
         view.message(error.code === 'cancelled' ? '社区登录或操作已取消。' : error.message, error.code !== 'cancelled');
         if (command === 'apply' || error.code === 'confirmation_expired') { reviewTicket = null; view.dismissReview(); }
+        if (author) author.fault(error.code);
       }
     } finally { if (active === record) active = null; controls(); schedulePoll(); }
   }
@@ -177,7 +216,22 @@
   async function recover() {
     const record = uncertain; if (!record) return;
     const command = record.command.split('.').pop();
-    if (command === 'download' || command === 'apply') {
+    if (author && authorMutations.has(command)) {
+      const account = snapshot.accounts.find(item => item.sourceId === record.sourceId);
+      if (selectedSource !== record.sourceId || !account || account.issuer !== record.accountIssuer || account.subject !== record.accountSubject) {
+        view.message('请切回原社区并登录原账号，再查询这次操作。', true); return;
+      }
+      try {
+        const receipt = await settings.requestManagement('wallpaper.community.authorOperation', {
+          sourceId: record.sourceId, kind: author.operationKind(command), operationId: record.operationId || record.requestId,
+          uploadId: record.uploadId, originalRequestId: record.requestId
+        });
+        if (!receipt.ok) throw new Error(receipt.error && receipt.error.message || '原请求查询未完成。');
+        const result = receipt.result;
+        author.accept('authorOperation', result, record);
+        if (result.found && !result.localPending && (!result.upload || !['receiving', 'validating'].includes(result.upload.state))) retireUncertain();
+      } catch (error) { view.message(error.message, true); }
+    } else if (command === 'download' || command === 'apply') {
       await queryUpdate({ operationId: record.operationId || record.requestId });
     } else await refresh();
     if (uncertain === record) view.message('尚未取得原操作的最终事实。可继续查询，当前不会重新派发这次操作。', true);
@@ -186,6 +240,9 @@
     const record = uncertain;
     if (!record || record.requestId !== receipt.requestId) return;
     if (receipt.ok && receipt.result && receipt.result.loginPending) return;
+    if (!receipt.ok && authorMutations.has(record.command.split('.').pop()) && unknownAuthorCodes.has(receipt.error && receipt.error.code)) {
+      view.message('原作者操作尚未取得确定结果，请继续查询原编号。', true); return;
+    }
     consume(record, receipt).catch(error => { retireUncertain(); view.message(error.message, true); }).finally(() => { controls(); schedulePoll(); });
   }
   function loginPending(receipt) {

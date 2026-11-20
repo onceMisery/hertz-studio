@@ -69,6 +69,39 @@ pub(crate) struct Upload {
     pub release_id: Option<String>,
 }
 
+impl Upload {
+    pub(crate) fn validate_read(&self) -> Result<()> {
+        for id in [&self.id, &self.owner_id, &self.work_id] {
+            canonical_id(id).map_err(|_| HubError::unavailable())?;
+        }
+        text(&self.operation_id, 128).map_err(|_| HubError::unavailable())?;
+        if let Some(id) = &self.release_id {
+            canonical_id(id).map_err(|_| HubError::unavailable())?;
+        }
+        if !hertz_wallpaper::valid_sha256_hex(&self.operation_digest)
+            || !hertz_wallpaper::valid_sha256_hex(&self.package_hash)
+            || !(1..=hertz_wallpaper::MAX_PACKAGE_BYTES as i64).contains(&self.expected_bytes)
+            || !(1..=u32::MAX as i64).contains(&self.min_engine_protocol)
+            || !(1..=9_007_199_254_740_991).contains(&self.created_at)
+            || !(1..=9_007_199_254_740_991).contains(&self.expires_at)
+            || !matches!(
+                self.state.as_str(),
+                "reserved"
+                    | "receiving"
+                    | "ready"
+                    | "validating"
+                    | "submitted"
+                    | "expired"
+                    | "rejected"
+            )
+            || (self.state == "submitted") != self.release_id.is_some()
+        {
+            return Err(HubError::unavailable());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Work {
@@ -77,6 +110,53 @@ pub(crate) struct Work {
     pub license_json: String,
     pub created_at: i64,
 }
+
+impl Work {
+    pub(crate) fn validate_read(&self) -> Result<()> {
+        canonical_id(&self.id).map_err(|_| HubError::unavailable())?;
+        text(&self.title, 120).map_err(|_| HubError::unavailable())?;
+        if self.license_json.is_empty()
+            || self.license_json.len() > 4096
+            || !(1..=9_007_199_254_740_991).contains(&self.created_at)
+        {
+            return Err(HubError::unavailable());
+        }
+        serde_json::from_str::<hertz_wallpaper::License>(&self.license_json)
+            .map_err(|_| HubError::unavailable())?;
+        Ok(())
+    }
+}
+
+pub(crate) const WORK_SELECT: &str = concat!(
+    "SELECT CASE WHEN length(CAST(id AS BLOB))=36 THEN id ELSE NULL END AS id,",
+    "CASE WHEN length(CAST(title AS BLOB)) BETWEEN 1 AND 480 AND length(title)<=120 ",
+    "THEN title ELSE NULL END AS title,",
+    "CASE WHEN length(CAST(license_json AS BLOB)) BETWEEN 2 AND 4096 ",
+    "THEN license_json ELSE NULL END AS license_json,",
+    "CASE WHEN typeof(created_at)='integer' AND created_at BETWEEN 1 AND 9007199254740991 ",
+    "THEN created_at ELSE NULL END AS created_at FROM works"
+);
+
+pub(crate) const UPLOAD_SELECT: &str = concat!(
+    "SELECT CASE WHEN length(CAST(id AS BLOB))=36 THEN id ELSE NULL END AS id,",
+    "CASE WHEN length(CAST(owner_id AS BLOB))=36 THEN owner_id ELSE NULL END AS owner_id,",
+    "CASE WHEN length(CAST(work_id AS BLOB))=36 THEN work_id ELSE NULL END AS work_id,",
+    "CASE WHEN length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 128 THEN operation_id ELSE NULL END AS operation_id,",
+    "CASE WHEN length(CAST(operation_digest AS BLOB))=64 THEN operation_digest ELSE NULL END AS operation_digest,",
+    "CASE WHEN length(CAST(package_hash AS BLOB))=64 THEN package_hash ELSE NULL END AS package_hash,",
+    "CASE WHEN typeof(expected_bytes)='integer' AND expected_bytes BETWEEN 1 AND 536870912 ",
+    "THEN expected_bytes ELSE NULL END AS expected_bytes,",
+    "CASE WHEN typeof(min_engine_protocol)='integer' AND min_engine_protocol BETWEEN 1 AND 4294967295 ",
+    "THEN min_engine_protocol ELSE NULL END AS min_engine_protocol,",
+    "CASE WHEN state IN ('reserved','receiving','ready','validating','submitted','expired','rejected') ",
+    "AND ((state='submitted' AND length(CAST(release_id AS BLOB))=36) OR (state!='submitted' AND release_id IS NULL)) ",
+    "THEN state ELSE NULL END AS state,",
+    "CASE WHEN typeof(created_at)='integer' AND created_at BETWEEN 1 AND 9007199254740991 ",
+    "THEN created_at ELSE NULL END AS created_at,",
+    "CASE WHEN typeof(expires_at)='integer' AND expires_at BETWEEN 1 AND 9007199254740991 ",
+    "THEN expires_at ELSE NULL END AS expires_at,",
+    "CASE WHEN release_id IS NULL OR length(CAST(release_id AS BLOB))=36 THEN release_id ELSE NULL END AS release_id FROM uploads"
+);
 
 #[derive(Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]

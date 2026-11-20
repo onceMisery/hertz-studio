@@ -2,7 +2,7 @@
 //! Immutable composition package construction and attribution belong to WorkDrafts.
 use super::*;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Seek, SeekFrom},
     sync::atomic::AtomicBool,
 };
@@ -18,6 +18,10 @@ pub(crate) struct PackageBuild {
 #[path = "work_drafts_models.rs"]
 mod models;
 const MAX_ATTRIBUTION_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ATTRIBUTION_SOURCES: usize = 4096;
+const MAX_LICENSE_EDGES: usize = 16384;
+const MAX_LICENSE_DEPTH: usize = 64;
+const MAX_LICENSE_GRAPH_WORK: usize = MAX_ATTRIBUTION_SOURCES + 2 * MAX_LICENSE_EDGES;
 
 fn stable_resource_path(entry: &hertz_wallpaper::FileEntry, assets_directory: &str) -> String {
     let extension = match entry.mime.as_str() {
@@ -64,19 +68,29 @@ fn merge_inventory(inventories: &mut BTreeMap<String, Value>, inventory: Value) 
     Ok(())
 }
 
+fn source_identity(source: &Value) -> Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(source).map_err(invalid)?)
+    ))
+}
+
 fn merge_flat_attribution(
     value: &Value,
     package_hash: &str,
     sources: &mut BTreeMap<String, Value>,
     inventories: &mut BTreeMap<String, Value>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let version = value["formatVersion"]
         .as_u64()
         .ok_or_else(|| invalid("署名库存版本无效"))?;
-    let mut prior_sources = value["sources"]
+    let prior_sources = value["sources"]
         .as_array()
-        .ok_or_else(|| invalid("已保存署名来源结构无效"))?
-        .clone();
+        .ok_or_else(|| invalid("已保存署名来源结构无效"))?;
+    if prior_sources.len() > MAX_ATTRIBUTION_SOURCES {
+        return Err(invalid("署名来源超过4096项上限"));
+    }
+    let mut prior_sources = prior_sources.clone();
     let mut prior_inventories = value["inventories"]
         .as_array()
         .ok_or_else(|| invalid("已保存署名库存结构无效"))?
@@ -171,6 +185,7 @@ fn merge_flat_attribution(
             }
         }
     }
+    let mut identities = Vec::new();
     for source in prior_sources {
         if !source["priorInventory"].is_null()
             && source["priorInventory"]
@@ -179,18 +194,127 @@ fn merge_flat_attribution(
         {
             return Err(invalid("已保存署名来源缺少库存"));
         }
-        sources.insert(
-            format!(
-                "{:x}",
-                Sha256::digest(serde_json::to_vec(&source).map_err(invalid)?)
-            ),
-            source,
-        );
+        if !source["licenseDocuments"].is_null() {
+            let documents = source["licenseDocuments"]
+                .as_array()
+                .ok_or_else(|| invalid("许可文档引用结构无效"))?;
+            if documents
+                .iter()
+                .any(|document| document.as_str().is_none_or(|id| !ids.contains(id)))
+            {
+                return Err(invalid("许可文档引用缺少原文"));
+            }
+        }
+        let id = source_identity(&source)?;
+        if !sources.contains_key(&id) && sources.len() == MAX_ATTRIBUTION_SOURCES {
+            return Err(invalid("署名来源超过4096项上限"));
+        }
+        identities.push(id.clone());
+        sources.insert(id, source);
     }
     for inventory in prior_inventories {
         merge_inventory(inventories, inventory)?;
     }
-    Ok(())
+    Ok(identities)
+}
+
+#[derive(Default)]
+struct AttributionClosure {
+    root: Option<String>,
+    sources: Vec<String>,
+    documents: Vec<String>,
+}
+
+fn derivative_denied() -> JobError {
+    JobError::new(
+        "derivative_license_required",
+        "此版本的改编许可未明确或不支持改编，无法另存为新作品；原作品仍可使用和导出",
+    )
+}
+
+/// Kahn traversal: each source and edge is visited at most a fixed number of
+/// times. No recursive stack and no repeated scan of the remaining sources.
+fn validate_license_graph(sources: &BTreeMap<String, Value>) -> Result<usize> {
+    if sources.len() > MAX_ATTRIBUTION_SOURCES {
+        return Err(invalid("署名来源超过4096项上限"));
+    }
+    let indices: BTreeMap<_, _> = sources
+        .keys()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
+    let mut parents = vec![Vec::new(); sources.len()];
+    let mut pending = vec![0usize; sources.len()];
+    let mut depth = vec![0usize; sources.len()];
+    let mut ready = VecDeque::new();
+    let mut edges = 0usize;
+    let mut work = 0usize;
+    for (index, source) in sources.values().enumerate() {
+        work += 1;
+        if source["license"] != "LicenseRef-inventory" {
+            // Only the placeholder defines this typed edge field. Ignoring an
+            // extra dangling dependency on a concrete license would hide data.
+            if !source["licenseSources"].is_null() {
+                return Err(derivative_denied());
+            }
+            ready.push_back(index);
+            continue;
+        }
+        let children = source["licenseSources"]
+            .as_array()
+            .ok_or_else(derivative_denied)?;
+        if children.is_empty() {
+            return Err(derivative_denied());
+        }
+        edges = edges
+            .checked_add(children.len())
+            .ok_or_else(derivative_denied)?;
+        if edges > MAX_LICENSE_EDGES {
+            return Err(invalid("许可依赖超过16384条上限"));
+        }
+        pending[index] = children.len();
+        let mut unique = BTreeSet::new();
+        for child in children {
+            work += 1;
+            let child = child
+                .as_str()
+                .and_then(|id| indices.get(id))
+                .copied()
+                .ok_or_else(derivative_denied)?;
+            if !unique.insert(child) {
+                return Err(derivative_denied());
+            }
+            parents[child].push(index);
+        }
+    }
+    let mut resolved = 0usize;
+    while let Some(child) = ready.pop_front() {
+        resolved += 1;
+        for &parent in &parents[child] {
+            work += 1;
+            if work > MAX_LICENSE_GRAPH_WORK {
+                return Err(invalid("许可核验超过工作量上限"));
+            }
+            depth[parent] = depth[parent].max(depth[child] + 1);
+            if depth[parent] > MAX_LICENSE_DEPTH {
+                return Err(invalid("许可依赖超过64层上限"));
+            }
+            pending[parent] -= 1;
+            if pending[parent] == 0 {
+                ready.push_back(parent);
+            }
+        }
+    }
+    if resolved != sources.len() {
+        return Err(derivative_denied());
+    }
+    Ok(work)
+}
+
+fn explicit_attribution_path(attribution: &str) -> Option<&str> {
+    attribution
+        .strip_prefix("Attribution and asset licenses: ")
+        .or_else(|| attribution.strip_prefix("See "))
 }
 
 fn collect_attribution(
@@ -199,21 +323,41 @@ fn collect_attribution(
     cancel: &AtomicBool,
     sources: &mut BTreeMap<String, Value>,
     inventories: &mut BTreeMap<String, Value>,
-) -> Result<Option<String>> {
-    let root_path = package
-        .manifest
-        .license
-        .attribution
-        .strip_prefix("Attribution and asset licenses: ")
-        .filter(|path| package.manifest.file(path).is_some())
-        .unwrap_or("documents/attribution.json")
-        .to_owned();
-    if package.manifest.file(&root_path).is_none() {
-        return Ok(None);
+) -> Result<AttributionClosure> {
+    let named = explicit_attribution_path(&package.manifest.license.attribution);
+    if named.is_some_and(|path| package.manifest.file(path).is_none()) {
+        return Err(invalid("署名明确引用的许可文件未被原包索引"));
     }
-    let mut pending = vec![root_path.clone()];
+    let root_path = named.or_else(|| {
+        package
+            .manifest
+            .file("documents/attribution.json")
+            .map(|_| "documents/attribution.json")
+    });
+    // Account for every non-media attachment, for every accepted content kind.
+    // The composition document is rebuilt; declared asset bytes are copied by
+    // the resource closure. All other files must be preserved legal metadata
+    // or rejected, regardless of their filename or attribution prose.
+    let mut content_files = BTreeSet::new();
+    for asset in &package.manifest.assets {
+        content_files.insert(asset.source.as_str());
+        content_files.extend(asset.variants.iter().map(|variant| variant.file.as_str()));
+    }
+    if let hertz_wallpaper::Content::Composition { document } = &package.manifest.content {
+        content_files.insert(document);
+    }
+    let mut pending: Vec<String> = package
+        .manifest
+        .files
+        .iter()
+        .filter(|entry| !content_files.contains(entry.path.as_str()))
+        .map(|entry| entry.path.clone())
+        .collect();
+    if let Some(path) = root_path {
+        pending.push(path.into());
+    }
     let mut seen = BTreeSet::new();
-    let mut root = None;
+    let mut closure = AttributionClosure::default();
     let mut total = 0usize;
     while let Some(path) = pending.pop() {
         if !seen.insert(path.clone()) {
@@ -241,9 +385,24 @@ fn collect_attribution(
         if raw.len() as u64 != entry.bytes {
             return Err(invalid("署名资料字节长度不符"));
         }
-        let value: Value = serde_json::from_str(&raw).map_err(invalid)?;
-        if path == root_path && value["kind"] == "hertzAttribution" {
-            merge_flat_attribution(&value, &package.package_hash, sources, inventories)?;
+        // Preserve text license notices verbatim inside the bounded inventory;
+        // a declared text document must never disappear on re-publication.
+        let value = match entry.mime.as_str() {
+            "application/json" => Some(serde_json::from_str::<Value>(&raw).map_err(invalid)?),
+            "text/plain" | "text/markdown" => None,
+            _ => return Err(invalid("许可文件必须为有界 UTF-8 JSON 或纯文本")),
+        };
+        if root_path == Some(path.as_str())
+            && value
+                .as_ref()
+                .is_some_and(|value| value["kind"] == "hertzAttribution")
+        {
+            closure.sources = merge_flat_attribution(
+                value.as_ref().unwrap(),
+                &package.package_hash,
+                sources,
+                inventories,
+            )?;
             continue;
         }
         fn references(value: &Value, paths: &mut BTreeSet<String>) {
@@ -267,7 +426,9 @@ fn collect_attribution(
             }
         }
         let mut referenced = BTreeSet::new();
-        references(&value, &mut referenced);
+        if let Some(value) = &value {
+            references(value, &mut referenced);
+        }
         let mut links = Vec::new();
         for path in referenced {
             let child = package
@@ -278,15 +439,142 @@ fn collect_attribution(
             pending.push(path);
         }
         let id = inventory_identity(&package.package_hash, &path, &entry.sha256)?;
-        if path == root_path {
-            root = Some(id.clone());
+        if root_path == Some(path.as_str()) {
+            closure.root = Some(id.clone());
         }
-        merge_inventory(
-            inventories,
-            serde_json::json!({"id":id,"sourcePackageHash":package.package_hash,"rawSha256":entry.sha256,"originalPath":path,"raw":raw,"references":links}),
-        )?;
+        closure.documents.push(id.clone());
+        let mut record = serde_json::json!({"id":id,"sourcePackageHash":package.package_hash,"rawSha256":entry.sha256,"originalPath":path,"raw":raw,"references":links});
+        if value.is_none() {
+            record["mime"] = serde_json::json!(entry.mime);
+        }
+        merge_inventory(inventories, record)?;
     }
-    Ok(root)
+    Ok(closure)
+}
+
+/// Fixed product policy, not a free-text "I own it" override. Declarative
+/// builtin/composition packages contain no executable code, so code:none is
+/// meaningful; assets:none does not grant rights to an imported arrangement.
+pub(in crate::wallpaper::work_drafts) async fn validate_derivative_license(
+    package: &crate::wallpaper::assets::StagedPackage,
+    assets: &AssetStore,
+    locally_authored: bool,
+    library: &Library,
+) -> Result<()> {
+    fn known(value: &str) -> bool {
+        matches!(
+            value,
+            "CC0-1.0"
+                | "CC-BY-4.0"
+                | "CC-BY-SA-4.0"
+                | "MIT"
+                | "Apache-2.0"
+                | "BSD-2-Clause"
+                | "BSD-3-Clause"
+                | "ISC"
+                | "Unlicense"
+        )
+    }
+    let denied = derivative_denied;
+    let mut sources = BTreeMap::new();
+    let mut inventories = BTreeMap::new();
+    let closure = collect_attribution(
+        assets,
+        package,
+        &AtomicBool::new(false),
+        &mut sources,
+        &mut inventories,
+    )?;
+    validate_license_graph(&sources)?;
+    let check = |value: &str, code: bool| known(value) || value == "none" && code;
+    if !(check(&package.manifest.license.assets, false)
+        || package.manifest.license.assets == "LicenseRef-inventory" && !closure.sources.is_empty()
+        || locally_authored && package.manifest.license.assets == "none")
+        || !check(&package.manifest.license.code, true)
+    {
+        return Err(denied());
+    }
+    fn inspect(
+        value: &Value,
+        check: &impl Fn(&str, bool) -> bool,
+        skip_root_placeholder: bool,
+    ) -> Result<()> {
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if (key == "license" || key == "codeLicense")
+                        && !(skip_root_placeholder
+                            && key == "license"
+                            && value == "LicenseRef-inventory")
+                    {
+                        if let Some(license) = value.as_str() {
+                            if !check(license, key == "codeLicense") {
+                                return Err(derivative_denied());
+                            }
+                        } else if key == "license" {
+                            let license: hertz_wallpaper::License =
+                                serde_json::from_value(value.clone())
+                                    .map_err(|_| derivative_denied())?;
+                            if !check(&license.code, true) || !check(&license.assets, false) {
+                                return Err(derivative_denied());
+                            }
+                        } else {
+                            return Err(derivative_denied());
+                        }
+                    }
+                    inspect(value, check, false)?;
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    inspect(value, check, false)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    for source in sources.values() {
+        let source_hash = source["sourcePackageHash"]
+            .as_str()
+            .filter(|hash| hertz_wallpaper::valid_sha256_hex(hash))
+            .ok_or_else(denied)?;
+        // Ownership of the outer composition does not confer rights to its
+        // dependencies. Only an independently recorded exact authored source
+        // can carry assets:none; a copied title/workId is not evidence.
+        let source_authored = if source["license"] == "none" {
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM authored_versions a JOIN versions v ON v.version_key=a.version_key JOIN works w ON w.work_key=v.work_key WHERE w.source_id='local' AND v.package_hash=?)")
+                .bind(source_hash).fetch_one(library.pool()).await.map_err(database)?
+        } else {
+            false
+        };
+        let source_check =
+            |value: &str, code: bool| check(value, code) || source_authored && value == "none";
+        let license = source["license"].as_str().ok_or_else(denied)?;
+        if license == "LicenseRef-inventory" {
+            // The placeholder is not a grant. Resolve this source's explicit
+            // links below; an unrelated permissive source cannot satisfy it.
+            inspect(source, &source_check, true)?;
+            continue;
+        }
+        if !source_check(license, false) {
+            return Err(denied());
+        }
+        inspect(source, &source_check, false)?;
+    }
+    for inventory in inventories.values() {
+        match inventory["mime"].as_str().unwrap_or("application/json") {
+            "application/json" => {
+                let raw: Value =
+                    serde_json::from_str(inventory["raw"].as_str().ok_or_else(denied)?)
+                        .map_err(|_| denied())?;
+                inspect(&raw, &check, false)?;
+            }
+            "text/plain" | "text/markdown" => {}
+            _ => return Err(denied()),
+        }
+    }
+    Ok(())
 }
 
 impl PackageBuild {
@@ -299,12 +587,17 @@ impl PackageBuild {
     ) -> Result<Self> {
         let mut document = document.clone();
         document.normalize()?;
-        let composition = document
-            .composition
-            .as_ref()
-            .ok_or_else(|| invalid("需要组合文档"))?;
-        let bytes = serde_json::to_vec(composition).map_err(invalid)?;
-        let mut manifest = metadata_manifest(&document, &[], &bytes)?;
+        let composition = document.composition.as_ref();
+        let bytes = composition
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(invalid)?
+            .unwrap_or_default();
+        let mut manifest = if composition.is_some() {
+            metadata_manifest(&document, &[], &bytes)?
+        } else {
+            document.manifest(work_id, version)?
+        };
         manifest.work_id = work_id.into();
         manifest.version = version;
         let mut packages = BTreeMap::new();
@@ -318,13 +611,21 @@ impl PackageBuild {
                 entry.insert(package);
             }
         }
+        if let Some(source) = &document.provenance {
+            let key = (source.package_hash.clone(), None);
+            if let std::collections::btree_map::Entry::Vacant(entry) = packages.entry(key) {
+                entry.insert(assets.read_installed_manifest(&source.package_hash)?);
+            }
+        }
         let layout = models::resolve(&document, &packages, assets, cancel)?;
         let document_path = format!("{}/main.json", layout.documents);
         let inventory_path = format!("{}/attribution.json", layout.documents);
-        manifest.files[0].path = document_path.clone();
-        manifest.content = hertz_wallpaper::Content::Composition {
-            document: document_path,
-        };
+        if composition.is_some() {
+            manifest.files[0].path = document_path.clone();
+            manifest.content = hertz_wallpaper::Content::Composition {
+                document: document_path,
+            };
+        }
         let mut pins = BTreeMap::new();
         let mut sources = BTreeMap::new();
         let mut inventories = BTreeMap::new();
@@ -494,20 +795,23 @@ impl PackageBuild {
             licenses.insert(package.manifest.license.assets.clone());
             let prior =
                 collect_attribution(assets, package, cancel, &mut sources, &mut inventories)?;
-            let source = serde_json::json!({"sourcePackageHash":hash,"license":package.manifest.license.assets,"attribution":package.manifest.license.attribution,"priorInventory":prior,"assets":selected.iter().map(|r|&r.asset_id).collect::<Vec<_>>()});
-            sources.insert(
-                format!(
-                    "{:x}",
-                    Sha256::digest(serde_json::to_vec(&source).map_err(invalid)?)
-                ),
-                source,
-            );
+            let mut source = serde_json::json!({"sourcePackageHash":hash,"workId":package.manifest.work_id,"version":package.manifest.version,"title":package.manifest.title,"codeLicense":package.manifest.license.code,"license":package.manifest.license.assets,"attribution":package.manifest.license.attribution,"priorInventory":prior.root,"assets":selected.iter().map(|r|&r.asset_id).collect::<Vec<_>>()});
+            if package.manifest.license.assets == "LicenseRef-inventory" {
+                source["licenseSources"] = serde_json::json!(prior.sources);
+            }
+            if !prior.documents.is_empty() {
+                source["licenseDocuments"] = serde_json::json!(prior.documents);
+            }
+            sources.insert(source_identity(&source)?, source);
+            if sources.len() > MAX_ATTRIBUTION_SOURCES {
+                return Err(invalid("署名来源超过4096项上限"));
+            }
         }
         let inventory=serde_json::to_vec(&serde_json::json!({"kind":"hertzAttribution","formatVersion":2,"sources":sources.into_values().collect::<Vec<_>>(),"inventories":inventories.into_values().collect::<Vec<_>>()})).map_err(invalid)?;
         if inventory.len() > MAX_ATTRIBUTION_BYTES {
             return Err(invalid("完整署名与许可资料超过8 MiB包元数据预算"));
         }
-        if !inventory.is_empty() && !document.resources.is_empty() {
+        if !packages.is_empty() {
             manifest.files.push(hertz_wallpaper::FileEntry {
                 path: inventory_path.clone(),
                 bytes: inventory.len() as u64,
@@ -521,10 +825,20 @@ impl PackageBuild {
             };
             manifest.license.attribution =
                 format!("Attribution and asset licenses: {inventory_path}");
+            if let Some(source) = &document.provenance {
+                // Preserve the work's own license, including declarative
+                // code:none. Resource attribution is additional, not a license
+                // grant for the edited composition or builtin arrangement.
+                let original = &packages[&(source.package_hash.clone(), None)]
+                    .manifest
+                    .license;
+                manifest.license.code = original.code.clone();
+                manifest.license.assets = original.assets.clone();
+            }
         }
         let inputs = composition
-            .bindings
-            .iter()
+            .into_iter()
+            .flat_map(|document| &document.bindings)
             .flat_map(|v| &v.program)
             .filter_map(|v| {
                 if let hertz_wallpaper::document::Operation::Input { name } = v {
@@ -538,7 +852,9 @@ impl PackageBuild {
             .iter()
             .any(|v| matches!(*v, "energy" | "bass" | "mid" | "high") || v.starts_with("spectrum"));
         manifest.permissions.pointer = inputs.iter().any(|v| v.starts_with("pointer"));
-        hertz_wallpaper::document::compile_document(&bytes, &manifest).map_err(invalid)?;
+        if composition.is_some() {
+            hertz_wallpaper::document::compile_document(&bytes, &manifest).map_err(invalid)?;
+        }
         Ok(Self {
             manifest,
             document: bytes,
@@ -618,5 +934,99 @@ impl PackageBuild {
         let file = zip.finish().map_err(io)?;
         file.sync_all().map_err(io)?;
         Ok(file.metadata().map_err(io)?.len())
+    }
+}
+
+#[cfg(test)]
+mod license_graph_tests {
+    use super::*;
+
+    fn add(sources: &mut BTreeMap<String, Value>, source: Value) -> String {
+        let id = source_identity(&source).unwrap();
+        sources.insert(id.clone(), source);
+        id
+    }
+
+    #[test]
+    fn source_edge_and_work_boundaries_are_explicit_and_linear() {
+        let mut sources = BTreeMap::new();
+        let leaves: Vec<_> = (0..3072).map(|index| add(&mut sources, serde_json::json!({"sourcePackageHash":format!("{index:064x}"),"license":"CC0-1.0"}))).collect();
+        for index in 0..1024 {
+            add(
+                &mut sources,
+                serde_json::json!({"sourcePackageHash":format!("{:064x}",index+3072),"license":"LicenseRef-inventory","licenseSources":(0..16).map(|offset| &leaves[(index+offset)%leaves.len()]).collect::<Vec<_>>()}),
+            );
+        }
+        assert_eq!(sources.len(), MAX_ATTRIBUTION_SOURCES);
+        assert_eq!(
+            validate_license_graph(&sources).unwrap(),
+            MAX_LICENSE_GRAPH_WORK
+        );
+        let key = sources
+            .iter()
+            .find(|(_, source)| source["license"] == "LicenseRef-inventory")
+            .unwrap()
+            .0
+            .clone();
+        let children = sources.get_mut(&key).unwrap()["licenseSources"]
+            .as_array_mut()
+            .unwrap();
+        let extra = leaves
+            .iter()
+            .find(|id| !children.iter().any(|child| child == id.as_str()))
+            .unwrap();
+        children.push(serde_json::json!(extra));
+        assert!(validate_license_graph(&sources)
+            .unwrap_err()
+            .message
+            .contains("16384"));
+        sources.get_mut(&key).unwrap()["licenseSources"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        add(
+            &mut sources,
+            serde_json::json!({"sourcePackageHash":"f".repeat(64),"license":"CC-BY-4.0"}),
+        );
+        assert!(validate_license_graph(&sources)
+            .unwrap_err()
+            .message
+            .contains("4096"));
+    }
+
+    #[test]
+    fn graph_depth_boundary_and_cycles_fail_without_repeated_source_scans() {
+        let mut sources = BTreeMap::new();
+        let mut previous = add(
+            &mut sources,
+            serde_json::json!({"sourcePackageHash":"a".repeat(64),"license":"CC0-1.0"}),
+        );
+        for index in 0..MAX_LICENSE_DEPTH {
+            previous = add(
+                &mut sources,
+                serde_json::json!({"sourcePackageHash":format!("{index:064x}"),"license":"LicenseRef-inventory","licenseSources":[previous]}),
+            );
+        }
+        assert_eq!(
+            validate_license_graph(&sources).unwrap(),
+            1 + 3 * MAX_LICENSE_DEPTH
+        );
+        add(
+            &mut sources,
+            serde_json::json!({"sourcePackageHash":"b".repeat(64),"license":"LicenseRef-inventory","licenseSources":[previous]}),
+        );
+        assert!(validate_license_graph(&sources)
+            .unwrap_err()
+            .message
+            .contains("64"));
+        let id = "c".repeat(64);
+        let cycle = BTreeMap::from([(
+            id.clone(),
+            serde_json::json!({"sourcePackageHash":"d".repeat(64),"license":"LicenseRef-inventory","licenseSources":[id]}),
+        )]);
+        assert_eq!(
+            validate_license_graph(&cycle).unwrap_err().code,
+            "derivative_license_required"
+        );
     }
 }

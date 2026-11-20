@@ -4,7 +4,10 @@ use crate::{
     config::{canonical_id, Config},
     error::{HubError, Result},
     limits::Limits,
-    model::{digest, encode, now, Actor, Candidate, CreateWork, Upload, Work, CANDIDATE_SELECT},
+    model::{
+        digest, encode, now, Actor, Candidate, CreateWork, Upload, Work, CANDIDATE_SELECT,
+        UPLOAD_SELECT, WORK_SELECT,
+    },
 };
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -285,8 +288,18 @@ impl Hub {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Work>> {
-        Ok(sqlx::query_as("SELECT id,title,license_json,created_at FROM works WHERE owner_id=? ORDER BY created_at,id LIMIT ? OFFSET ?")
-            .bind(&actor.id).bind(limit).bind(offset).fetch_all(&self.pool).await?)
+        let works: Vec<Work> = sqlx::query_as(&format!(
+            "{WORK_SELECT} WHERE owner_id=? ORDER BY works.created_at,works.id LIMIT ? OFFSET ?"
+        ))
+        .bind(&actor.id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        for work in &works {
+            work.validate_read()?;
+        }
+        Ok(works)
     }
     pub(crate) async fn releases_for(
         &self,
@@ -358,12 +371,14 @@ impl Hub {
     }
     pub(crate) async fn upload(&self, actor: &Actor, id: &str) -> Result<Upload> {
         canonical_id(id)?;
-        sqlx::query_as("SELECT * FROM uploads WHERE id=? AND owner_id=?")
+        let upload: Upload = sqlx::query_as(&format!("{UPLOAD_SELECT} WHERE id=? AND owner_id=?"))
             .bind(id)
             .bind(&actor.id)
             .fetch_optional(&self.pool)
             .await?
-            .ok_or_else(HubError::missing)
+            .ok_or_else(HubError::missing)?;
+        upload.validate_read()?;
+        Ok(upload)
     }
     async fn recover(&self) -> Result<()> {
         let receiving: Vec<String> =

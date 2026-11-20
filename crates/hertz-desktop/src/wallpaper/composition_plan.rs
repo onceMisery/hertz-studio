@@ -29,6 +29,10 @@ use super::text_raster::{self, TextRasterPlan};
 
 type Result<T> = std::result::Result<T, JobError>;
 
+#[path = "composition_inspection.rs"]
+mod inspection;
+pub(crate) use inspection::inspect_layout;
+
 /// Fixed compiler/final-value facts for the single original group job. This
 /// context supplies a memory lower bound, never a runtime admission token.
 #[derive(Clone)]
@@ -1070,9 +1074,8 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
             }
         }
     }
-    // Tracks are evaluated by the shipped runtime only for plain numeric
-    // properties; layout rebuilds, particle instance changes and 3D transforms
-    // would need a new static plan, so the native projection rejects them here.
+    // Transform, opacity and clip controls use the existing numeric sampler.
+    // Changes to prepared text layout or particle capacity still need a new plan.
     for track in compiled.ir().tracks() {
         let slot = compiled
             .ir()
@@ -1084,8 +1087,7 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
             .nodes()
             .get(slot.node_index)
             .ok_or_else(|| JobError::new("adapter_unavailable", "P2-02 track target 无效"))?;
-        let rebuild = node.space == "3d"
-            || node.node_type == "builtinScene"
+        let rebuild = node.node_type == "builtinScene"
             || (node.node_type == "text"
                 && ["width", "height", "fontSize", "lineHeight"].contains(&slot.property.as_str()))
             || (node.node_type == "particles"
@@ -1097,19 +1099,6 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
                     "P2-02 track adapter 尚未准备：{}:{}",
                     node.node_type, slot.property
                 ),
-            ));
-        }
-    }
-    for binding in compiled.ir().bindings() {
-        let node = compiled
-            .ir()
-            .numeric_slots()
-            .get(binding.target_slot)
-            .and_then(|slot| compiled.ir().nodes().get(slot.node_index));
-        if node.is_some_and(|node| node.space == "3d") {
-            return Err(JobError::new(
-                "adapter_unavailable",
-                "3D binding adapter 尚未准备",
             ));
         }
     }
@@ -1285,11 +1274,34 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
     let mut costs = Costs {
         buffer_bytes: 92,
         private_cpu_bytes: 92,
-        programs: 2,
+        programs: 2 + u64::from(
+            compiled
+                .ir()
+                .nodes()
+                .iter()
+                .any(|node| node.node_type == "particles"),
+        ),
         draw_calls: 1,
         triangles: 2,
         ..Default::default()
     };
+    let ir = compiled.ir();
+    if !ir.tracks().is_empty() || !ir.bindings().is_empty() {
+        // Two f64 slot banks, one active-slot byte, dirty node masks, input
+        // values and fixed binding stacks. Same backing as animation.js.
+        let mut timeline_bytes = checked_sum(&[
+            checked_product(ir.numeric_slots().len() as u64, 17)?,
+            checked_product(ir.nodes().len() as u64, 4)?,
+            checked_product(ir.inputs().len() as u64, 8)?,
+        ])?;
+        for binding in ir.bindings() {
+            timeline_bytes = checked_sum(&[
+                timeline_bytes,
+                checked_product(binding.max_stack as u64 + 1, 8)?,
+            ])?;
+        }
+        costs.private_cpu_bytes = checked_sum(&[costs.private_cpu_bytes, timeline_bytes])?;
+    }
     let source = super::builtin_plan::source_costs(compiled, final_values)?;
     if let Some((profile, clock)) = &source {
         costs.buffer_bytes =
@@ -1329,7 +1341,6 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
         let bytes = match node.node_type.as_str() {
             "group" | "builtinScene" | "model" => 0,
             "particles" => {
-                costs.programs = costs.programs.max(if source.is_some() { 7 } else { 3 });
                 let count = final_number(compiled, final_values, index, "count")? as u64;
                 costs.draw_calls += 1;
                 costs.points += count;
@@ -1343,16 +1354,6 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
         };
         costs.buffer_bytes = checked_sum(&[costs.buffer_bytes, bytes])?;
         costs.private_cpu_bytes = checked_sum(&[costs.private_cpu_bytes, bytes])?;
-    }
-    if source.as_ref().is_some_and(|(profile, _)| {
-        costs.draw_calls > profile.draw_calls
-            || costs.points > profile.particles
-            || costs.triangles > profile.triangles
-    }) {
-        return Err(JobError::new(
-            "budget_exceeded",
-            "builtinScene 整组合 primitive 成本超出 source low profile",
-        ));
     }
     // Output effects own real passes/programs in the shipped runtime: glow is a
     // threshold plus one shared two-axis blur program, node effects reuse the
@@ -1371,12 +1372,27 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
             continue;
         }
         let effect = &compiled.document().effects[*effect_index];
+        if effect.effect_type == "colorAdjust" {
+            // The shipped adapter fuses grading into its existing final pass.
+            // The generic IR surface is not allocated by this renderer.
+            continue;
+        }
         let passes = u64::from(cost.draw_passes);
         costs.draw_calls = checked_sum(&[costs.draw_calls, passes])?;
         costs.triangles = checked_sum(&[costs.triangles, checked_product(passes, 2)?])?;
         if effect.effect_type == "glow" {
             costs.programs = checked_sum(&[costs.programs, 2])?;
         }
+    }
+    if source.as_ref().is_some_and(|(profile, _)| {
+        costs.draw_calls > profile.draw_calls
+            || costs.points > profile.particles
+            || costs.triangles > profile.triangles
+    }) {
+        return Err(JobError::new(
+            "budget_exceeded",
+            "builtinScene 整组合 primitive 成本超出 source low profile",
+        ));
     }
     Ok(costs)
 }
@@ -1416,6 +1432,7 @@ fn complete_costs(
     let mut effect_surface_bytes = 0_u64;
     for requirement in compiled.ir().static_requirements() {
         let StaticRequirement::EffectSurfaces {
+            effect_index,
             count,
             sample_scale,
             cost,
@@ -1425,6 +1442,9 @@ fn complete_costs(
             continue;
         };
         if *count == 0 {
+            continue;
+        }
+        if compiled.document().effects[*effect_index].effect_type == "colorAdjust" {
             continue;
         }
         let width = (f64::from(target.width) * sample_scale).ceil().max(1.0) as u64;
@@ -1444,6 +1464,7 @@ fn complete_costs(
         costs.semantic_bytes,
         costs.font_cpu_bytes,
         costs.raster_bytes,
+        super::gl_plan::THREE_DEFAULT_CPU_BYTES,
     ])?;
     // Original RGBA8/depth buffer (8P), linear RGBA16F target (8P),
     // actual textures/private geometry, effect surfaces and unfinished
@@ -1546,6 +1567,27 @@ impl PreparedComposition {
     }
     fn media_costs_with_unprepared_vectors(&self, allow_unprepared: bool) -> Result<Costs> {
         let mut cost = geometry_costs(&self.compiled, &self.final_values)?;
+        let mut model_sources = BTreeSet::new();
+        for usage in self
+            .final_values
+            .resource_uses()
+            .iter()
+            .filter(|usage| usage.usage == "model")
+        {
+            let Some(model) = self
+                .assets
+                .get(&usage.asset_id)
+                .and_then(CompositionAsset::as_model)
+            else {
+                continue;
+            };
+            if !model_sources.insert((model.content_key(), model.facts()["profile"].as_str())) {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "同一模型内容暂不支持多个组合实例",
+                ));
+            }
+        }
         for (index, node) in self.compiled.ir().nodes().iter().enumerate() {
             if self.assets.is_empty() {
                 break;
@@ -1694,11 +1736,48 @@ impl PreparedComposition {
                 cost.decode_rate = checked_sum(&[cost.decode_rate, rate as u64])?;
             }
         }
-        for asset in self.assets.values() {
+        for (asset_id, asset) in &self.assets {
             let Some(model) = asset.as_model() else {
                 continue;
             };
             let facts = model.facts();
+            let mut transparent = false;
+            for usage in self.final_values.resource_uses() {
+                if usage.usage != "model" || &usage.asset_id != asset_id {
+                    continue;
+                }
+                let mut index = usage.node_index;
+                let mut opacity = 1.0;
+                while let Some(current) = index {
+                    let node = &self.compiled.ir().nodes()[current];
+                    opacity *=
+                        final_number(&self.compiled, &self.final_values, current, "opacity")?;
+                    transparent |= self
+                        .compiled
+                        .ir()
+                        .tracks()
+                        .iter()
+                        .map(|t| t.target_slot)
+                        .chain(self.compiled.ir().bindings().iter().map(|b| b.target_slot))
+                        .any(|slot| {
+                            let slot = &self.compiled.ir().numeric_slots()[slot];
+                            slot.node_index == current && slot.property == "opacity"
+                        });
+                    index = usize::try_from(node.parent_index).ok();
+                }
+                transparent |= opacity < 1.0;
+            }
+            let materials = facts["materials"].as_array();
+            let double_sided =
+                materials.is_some_and(|items| items.iter().any(|m| m["doubleSided"] == true));
+            transparent |= materials.is_some_and(|items| {
+                items.iter().any(|m| {
+                    m["alphaMode"] == "BLEND"
+                        || m["baseColorFactor"][3].as_f64().is_some_and(|a| a < 1.0)
+                })
+            });
+            // Bound front/back variants without mutating authored GLB facts.
+            let passes = if double_sided && transparent { 2 } else { 1 };
             let invalid = || JobError::new("adapter_unavailable", "model facts 无效");
             let input = facts.get("input").ok_or_else(invalid)?;
             let resources = facts.get("resources").ok_or_else(invalid)?;
@@ -1738,7 +1817,10 @@ impl PreparedComposition {
                 .as_u64()
                 .or_else(|| resources["materialCount"].as_u64())
                 .unwrap_or(1);
-            cost.programs = checked_sum(&[cost.programs, std::cmp::max(1, program_count)])?;
+            cost.programs = checked_sum(&[
+                cost.programs,
+                checked_product(std::cmp::max(1, program_count), passes)?,
+            ])?;
             if model.texture_upload_bytes() > 0 {
                 cost.texture_bytes =
                     checked_sum(&[cost.texture_bytes, model.texture_upload_bytes()])?;
@@ -1751,11 +1833,11 @@ impl PreparedComposition {
             cost.texture_bytes = checked_sum(&[cost.texture_bytes, 4096])?;
             cost.draw_calls = checked_sum(&[
                 cost.draw_calls,
-                scene["drawCalls"].as_u64().ok_or_else(invalid)?,
+                checked_product(scene["drawCalls"].as_u64().ok_or_else(invalid)?, passes)?,
             ])?;
             cost.triangles = checked_sum(&[
                 cost.triangles,
-                scene["triangles"].as_u64().ok_or_else(invalid)?,
+                checked_product(scene["triangles"].as_u64().ok_or_else(invalid)?, passes)?,
             ])?;
         }
         Ok(cost)
@@ -2042,8 +2124,8 @@ impl PreparedComposition {
             "resolvedAssets":resolved_assets,"resolvedUses":self.final_values.resource_uses().iter().map(|usage|if self.assets.contains_key(&usage.asset_id){usage.asset_id.clone()}else{svg_use_id(usage)}).collect::<Vec<_>>(),"textRasters":self.text_rasters.text_rasters(),"target":{"width":self.target.width,"height":self.target.height,"fit":self.output_fit,
                 "budgetFps":identity.effective_budget_fps,"budgetAllocationRevision":allocation_revision},"sessionId":session_id,"generation":generation,
             "pageLimits":{"gpuContexts":1,"drawingBufferPixels":checked_sum(&[pixels,self.text_rasters.raster_pixels()])?,
-                "renderTargetDeclaredBytes":checked_sum(&[checked_product(pixels,16 + cost.depth_bytes_per_pixel)?,cost.effect_surface_bytes])?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes])?,
-                "bufferDeclaredBytes":cost.buffer_bytes,"ownedCpuBytes":checked_sum(&[cost.private_cpu_bytes,cost.input_bytes,cost.font_cpu_bytes,cost.raster_bytes])?,"decodeReservedBytes":cost.decode_bytes,
+                "renderTargetDeclaredBytes":checked_sum(&[checked_product(pixels,16 + cost.depth_bytes_per_pixel)?,cost.effect_surface_bytes])?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes,super::gl_plan::THREE_DEFAULT_TEXTURE_BYTES])?,
+                "bufferDeclaredBytes":cost.buffer_bytes,"ownedCpuBytes":checked_sum(&[cost.private_cpu_bytes,cost.input_bytes,cost.font_cpu_bytes,cost.raster_bytes,super::gl_plan::THREE_DEFAULT_CPU_BYTES])?,"decodeReservedBytes":cost.decode_bytes,
                 "decoderLeases":cost.decoders,"programs":cost.programs,"canvases":self.text_rasters.unique_raster_count()}});
         // Match the existing MediaAccess payload ceiling before granting the
         // composition scope or loading its first page.

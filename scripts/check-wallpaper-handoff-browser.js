@@ -1,27 +1,29 @@
 // SPDX-License-Identifier: MIT
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const { runtimePage } = require('./stage-runtime-fixture');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..'),assets=path.join(root,'crates/hertz-desktop/assets');
 const read=file=>fs.readFileSync(file,'utf8');
 const html=read(path.join(assets,'wallpaper-scene.html'))
  .replace('__GL_BUDGET__',()=>read(path.join(assets,'wallpaper-gl-budget.js')))
- .replace('__RUNTIME__',()=>read(path.join(root,'plugin/ui/vendor/stage-runtime.js')))
- .replace('__SHIM__',()=>read(path.join(root,'plugin/ui/vendor/zodiac-stage.js')))
  .replace('__SCENE__',()=>read(path.join(assets,'wallpaper-scene.js')));
 const output=path.join(root,'output/playwright/wallpaper-handoff-browser');
+const sharedContract=JSON.parse(read(path.join(root,'crates/hertz-wallpaper/contracts/shared-assets.json')));
+const sharedAssets={maxEntries:sharedContract.maxTexts,maxEntryBytes:sharedContract.maxTextBytes,
+ cpuBytes:sharedContract.maxTexts*sharedContract.maxTextBytes};
 (async()=>{
  fs.mkdirSync(output,{recursive:true});
  const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,args:['--use-angle=swiftshader','--enable-webgl']});
  const checks=[];
  try{
   for(const kind of ['gl','image','video']){
-   const page=await browser.newPage({viewport:{width:960,height:540}}),errors=[];page.on('pageerror',error=>errors.push(error.message));
-   await page.addInitScript(kind=>{
+   const page=await runtimePage(browser, {viewport:{width:960,height:540}}),errors=[];page.on('pageerror',error=>errors.push(error.message));
+   await page.addInitScript(({kind,sharedAssets})=>{
     window.receipts=[];window.ipc={postMessage:message=>receipts.push(message)};
     Object.defineProperty(window,'__hertzWallpaperBinding',{value:Object.freeze({sessionId:'1'.repeat(32),generation:7})});
-    if(kind==='gl')Object.defineProperty(window,'__hertzWallpaperGlAllocation',{value:Object.freeze({generation:7,quality:'low',fps:30,refreshHz:60,pixelBudget:1900000,gpuBytes:64*1048576})});
-   },kind);
+    if(kind==='gl')Object.defineProperty(window,'__hertzWallpaperGlAllocation',{value:Object.freeze({generation:7,quality:'low',fps:30,refreshHz:60,pixelBudget:1900000,gpuBytes:64*1048576,sharedAssets})});
+   },{kind,sharedAssets});
    await page.route('http://frame.test/',route=>route.fulfill({contentType:'text/html',body:html}));
    await page.route('https://**.wallpaper.invalid/files/**',route=>route.fulfill({contentType:kind==='image'?'image/jpeg':'video/webm',body:fs.readFileSync(path.join(root,kind==='image'?'crates/hertz-desktop/assets/scene-thumbnails/coast.jpg':'scripts/fixtures/wallpaper-vp8.webm'))}));
    await page.goto('http://frame.test/');
@@ -32,6 +34,13 @@ const output=path.join(root,'output/playwright/wallpaper-handoff-browser');
     hertzWallpaper.start(30);
    },kind);
    await page.waitForFunction(kind=>{const d=hertzWallpaper.debug();return kind==='gl'?d.draws>2:d.media?.state==='ready';},kind,{timeout:15000});
+   if(kind==='gl') {
+    await page.evaluate(()=>hertzWallpaper.applyConfig({source:'fixed',motion:0,musicResponse:false}));
+    await page.waitForTimeout(250);
+    const draws=await page.evaluate(()=>hertzWallpaper.debug().draws);
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(()=>hertzWallpaper.debug().draws),draws,'capture starts from a sleeping GL scene');
+   }
    const request={token:'2'.repeat(32),sessionId:'1'.repeat(32),generation:7,width:480,height:270};
    assert.equal(await page.evaluate(request=>hertzWallpaper.requestCapture({...request,generation:8}),request),false);
    assert.equal(await page.evaluate(request=>hertzWallpaper.requestCapture({...request,width:961}),request),false);

@@ -26,6 +26,9 @@ use std::{
 
 const MAX_JSON: usize = 65_536;
 
+#[path = "author_http.rs"]
+mod author;
+
 pub(crate) fn router(hub: Hub) -> Router {
     Router::new()
         .route("/.well-known/hertz-wallpaper-community", get(discovery))
@@ -49,6 +52,9 @@ pub(crate) fn router(hub: Hub) -> Router {
         )
         .route("/v1/works/{work}/uploads", post(reserve))
         .route("/v1/me/works", get(own_works))
+        .route("/v1/me", get(author::me))
+        .route("/v1/me/uploads", get(author::uploads))
+        .route("/v1/me/operations/{kind}/{id}", get(author::operation))
         .route("/v1/me/releases", get(own_releases))
         .route("/v1/uploads/{id}", get(upload))
         .route("/v1/uploads/{id}/content", put(receive))

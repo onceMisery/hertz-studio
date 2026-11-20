@@ -15,8 +15,9 @@ async function boot(page, mode) {
     canvas{position:absolute;inset:0;width:100%;height:100%}
     .fl-sonnet-eyebrow,.fl-sonnet-hud,.fl-sonnet-hotspot,.fl-tempera-eyebrow,.fl-tempera-note,.fl-tempera-hotspot{display:none}
     </style><div id="host"></div>`);
-  for (const file of ['vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
+  for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
     'stanza/stanza-sonnet-fx.js', 'stanza/stanza-sonnet.js', 'stanza/stanza-tempera.js']) {
+    if (file === 'vendor/pixi.min.js') await page.evaluate(() => { window.Stage = {resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy))}; });
     await page.addScriptTag({ path: path.join(web, file) });
   }
   await page.evaluate(stageMode => {
@@ -42,7 +43,7 @@ async function boot(page, mode) {
       { start_ms: 6300, end_ms: 11000, text: '让每一颗星都拥有自己的颜色，让每一个梦都可以慢慢发亮' },
       { start_ms: 11000, end_ms: 15000, text: 'Hello 世界，听见 wind & light' }
     ];
-    window.Stage = {
+    window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)),
       presentation: () => ({ playing: fixture.playing, reduced: fixture.reduced, track: fixture.track }),
       position: () => fixture.time,
       lyrics: () => ({ lines: fixture.lines }),

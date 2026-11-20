@@ -62,6 +62,18 @@ async function main() {
   const weak=createQuality('high',0);assert.equal(weak.profile().mode,'low');assert.equal(weak.status().qualityMode,'high');
   const detected=createQuality('high',2);assert.ok(detected.setDeviceTier(1));assert.equal(detected.profile().mode,'medium');detected.setMode('high');assert.equal(detected.profile().mode,'medium');assert.equal(detected.setDeviceTier(2),false);
   const quality=createQuality('high',2);assert.equal(quality.profile().mode,'high');assert.ok(quality.dpr(1920,1080,2)<=1.25);
+  const light={drawCalls:0,points:0,triangles:0,estimatedBytes:0};
+  for(const fps of [15,30,144/5]) {
+    const capped=createQuality('high',2);
+    for(let i=0;i<fps*24;i++) capped.sample(i*1000/fps,light,1,fps);
+    assert.equal(capped.profile().mode,'high','intentional host frame cap is not rendering pressure');
+  }
+  const slowCapped=createQuality('high',2);
+  for(let now=0;now<24000;now+=100) slowCapped.sample(now,light,1,30);
+  assert.notEqual(slowCapped.profile().mode,'high','real missed frames still lower a capped host');
+  const overloaded=createQuality('high',2);
+  for(let now=0;now<24000;now+=1000/30) overloaded.sample(now,{...light,drawCalls:1000},1,30);
+  assert.notEqual(overloaded.profile().mode,'high','resource pressure still lowers a capped host');
   for(let now=0;now<16000;now+=50) quality.sample(now,{drawCalls:0,points:0,triangles:0,estimatedBytes:0},1);
   assert.notEqual(quality.profile().mode,'high','sustained pressure lowers effective quality');assert.equal(quality.status().qualityMode,'high');
   const lowered=quality.profile().mode;for(let now=16000;now<30000;now+=16.7) quality.sample(now,{drawCalls:0,points:0,triangles:0,estimatedBytes:0},1);

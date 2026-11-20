@@ -30,6 +30,7 @@ pub(crate) const TOPOLOGY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// 暂停原因名单；`&'static str` 直接进诊断 JSON，改名会破坏设置页文案映射。
 pub(crate) const REASON_MANUAL_PAUSE: &str = "manualPause";
+pub(crate) const REASON_AI_GENERATION: &str = "aiGeneration";
 pub(crate) const REASON_FULLSCREEN: &str = "fullscreen";
 pub(crate) const REASON_MAXIMIZED: &str = "maximized";
 pub(crate) const REASON_APPLICATION_RULE: &str = "applicationRule";
@@ -45,6 +46,7 @@ pub(crate) struct PolicyInputs<'a> {
     pub(crate) enabled: bool,
     pub(crate) wallpaper: &'a WallpaperConfig,
     pub(crate) manual_pause: bool,
+    pub(crate) ai_generation: bool,
     pub(crate) fullscreen: bool,
     pub(crate) maximized: bool,
     pub(crate) application_rule: Option<RuleAction>,
@@ -64,6 +66,9 @@ pub(crate) fn pause_reasons(inputs: &PolicyInputs) -> Vec<&'static str> {
     }
     if inputs.manual_pause {
         reasons.push(REASON_MANUAL_PAUSE);
+    }
+    if inputs.ai_generation {
+        reasons.push(REASON_AI_GENERATION);
     }
     if inputs.fullscreen && inputs.wallpaper.pause_on_fullscreen {
         reasons.push(REASON_FULLSCREEN);
@@ -100,6 +105,7 @@ pub(crate) fn pause_reasons(inputs: &PolicyInputs) -> Vec<&'static str> {
 pub(crate) fn renderable(inputs: &PolicyInputs) -> bool {
     !battery_pause(inputs)
         && !(inputs.manual_pause
+            || inputs.ai_generation
             || (inputs.fullscreen && inputs.wallpaper.pause_on_fullscreen)
             || (inputs.maximized && inputs.wallpaper.pause_on_maximized)
             || inputs.application_rule.is_some()
@@ -161,6 +167,7 @@ pub(crate) fn preview_pause_reasons(
         enabled: true,
         wallpaper,
         manual_pause: false,
+        ai_generation: false,
         fullscreen: false,
         maximized: false,
         application_rule: None,
@@ -174,6 +181,30 @@ pub(crate) fn preview_pause_reasons(
         reasons.push(REASON_BATTERY);
     }
     reasons
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PreviewGenerationGate {
+    Continue,
+    HoldDynamic,
+    PauseUnconfirmed,
+}
+
+/// Generation defers dynamic presentation, never an already resolved still image.
+/// An unacknowledged media pause is a controller fault even after its lease ends.
+pub(crate) fn preview_generation_gate(
+    ai_generation: bool,
+    prepared: Option<super::session::FrameKind>,
+    current: Option<super::session::FrameKind>,
+    pause_ack_expired: bool,
+) -> PreviewGenerationGate {
+    if pause_ack_expired {
+        PreviewGenerationGate::PauseUnconfirmed
+    } else if ai_generation && prepared.or(current) != Some(super::session::FrameKind::Image) {
+        PreviewGenerationGate::HoldDynamic
+    } else {
+        PreviewGenerationGate::Continue
+    }
 }
 
 /// 非对称去抖门。raw 抖动会重置计时；只有稳定跨越阈值才迁移并返回 Some(新稳定态)。
@@ -289,6 +320,7 @@ mod tests {
             enabled: true,
             wallpaper: Box::leak(Box::new(WallpaperConfig::default())),
             manual_pause: false,
+            ai_generation: false,
             fullscreen: false,
             maximized: false,
             application_rule: None,
@@ -306,6 +338,72 @@ mod tests {
         let inputs = inputs();
         assert!(pause_reasons(&inputs).is_empty());
         assert!(renderable(&inputs));
+    }
+
+    #[test]
+    fn ai_generation_freezes_dynamic_content_without_clearing_other_pauses() {
+        let mut inputs = inputs();
+        inputs.ai_generation = true;
+        assert_eq!(pause_reasons(&inputs), vec![REASON_AI_GENERATION]);
+        assert!(!renderable(&inputs));
+        assert!(
+            retain_frame(&inputs),
+            "generation retains a stationary frame"
+        );
+        inputs.manual_pause = true;
+        inputs.power = PowerState::Battery;
+        inputs.session_unavailable = true;
+        inputs.ai_generation = false;
+        assert_eq!(
+            pause_reasons(&inputs),
+            vec![
+                REASON_MANUAL_PAUSE,
+                REASON_SESSION_UNAVAILABLE,
+                REASON_BATTERY
+            ]
+        );
+        assert!(!renderable(&inputs));
+        assert!(!retain_frame(&inputs));
+    }
+
+    #[test]
+    fn generation_preview_can_stage_resolved_images_without_a_surface() {
+        use super::super::session::FrameKind::{Gl, Image, Video};
+        use PreviewGenerationGate::{Continue, HoldDynamic, PauseUnconfirmed};
+        assert_eq!(
+            preview_generation_gate(true, None, None, false),
+            HoldDynamic,
+            "unresolved content waits without starting a renderer"
+        );
+        for previous in [None, Some(Image), Some(Video), Some(Gl)] {
+            assert_eq!(
+                preview_generation_gate(true, Some(Image), previous, false),
+                Continue,
+                "a resolved image may stage for candidate or saved selection"
+            );
+        }
+        assert_eq!(
+            preview_generation_gate(true, None, Some(Image), false),
+            Continue,
+            "a staged image remains alive"
+        );
+        for kind in [Gl, Video] {
+            assert_eq!(
+                preview_generation_gate(true, Some(kind), None, false),
+                HoldDynamic
+            );
+            assert_eq!(
+                preview_generation_gate(false, Some(kind), None, false),
+                Continue
+            );
+        }
+        for active in [false, true] {
+            assert_eq!(
+                preview_generation_gate(active, Some(Image), Some(Video), true),
+                PauseUnconfirmed,
+                "pause acknowledgement failure wins over lease release and image replacement"
+            );
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { constructedGeometry, declaredArrayPayload, sourcePlan } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 import { createSpatialResources } from './resources.js';
 import { createParticlePointer, particleNoiseShader, particlePointerShader } from './particle-pointer.js';
@@ -291,11 +292,12 @@ export function createTowers(ctx, style = 'spectrum') {
 
 export function createRings(ctx, tunnel = false) {
   const T = ctx.THREE, group = root(ctx), count = tunnel ? 36 : 12;
-  const geometry = own(ctx, new T.TorusGeometry(tunnel ? 4 : 3, tunnel ? .018 : .014, 4, 128));
+  declaredArrayPayload(ctx.scope,count*19,'Ring instance matrix and color backing');
+  const geometry = own(ctx, constructedGeometry(T,ctx.scope,'TorusGeometry',[tunnel?4:3,tunnel?.018:.014,4,128]));
   const material = own(ctx, new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: .8, blending: T.AdditiveBlending, depthWrite: false }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, count)), o = new T.Object3D(), c = new T.Color(), endColor = new T.Color(tunnel ? 0xf36eac : 0xefc986); group.add(mesh);
   if (!tunnel) {
-    const core = new T.Mesh(own(ctx, new T.SphereGeometry(1.05, 32, 24)), own(ctx, new T.MeshBasicMaterial({ color: 0x030506 })));
+    const core = new T.Mesh(own(ctx, constructedGeometry(T,ctx.scope,'SphereGeometry',[1.05,32,24])), own(ctx, new T.MeshBasicMaterial({ color: 0x030506 })));
     group.add(core);
   }
   function update(frame, p) {
@@ -316,8 +318,22 @@ export function createRings(ctx, tunnel = false) {
   return basicInstance(group, ctx.params, ctx.quality, { update, quality, stats: () => ({ instances: mesh.count, triangles: mesh.count * 1024 + (tunnel ? 0 : 1472), drawCalls: tunnel ? 1 : 2 }) });
 }
 
+export function ringsResourcePlan(tunnel = false) {
+  const plan = sourcePlan(4).array((tunnel ? 36 : 12) * 19)
+    .geometry('TorusGeometry', [tunnel ? 4 : 3, tunnel ? .018 : .014, 4, 128]);
+  if (!tunnel) plan.geometry('SphereGeometry', [1.05, 32, 24]);
+  return plan.result();
+}
+export function terrainResourcePlan() {
+  return sourcePlan(2).array(16).geometry('PlaneGeometry', [24, 24, 64, 64]).result();
+}
+export function handdrawnResourcePlan() {
+  return sourcePlan(4).array(6 * 8 + 32 * 16, 4, 1).geometry('PlaneGeometry', [6.4, 6.4, 48, 48]).result();
+}
+
 export function createTerrain(ctx, style = 'terrain') {
-  const T = ctx.THREE, group = root(ctx), geometry = own(ctx, new T.PlaneGeometry(24, 24, 64, 64));
+  declaredArrayPayload(ctx.scope,16,'Terrain spectrum uniform backing');
+  const T = ctx.THREE, group = root(ctx), geometry = own(ctx, constructedGeometry(T,ctx.scope,'PlaneGeometry',[24,24,64,64]));
   geometry.rotateX(-Math.PI / 2);
   const uniforms = { uTime: { value: 0 }, uBass: { value: 0 }, uSpeed: { value: .6 }, uResponse: { value: .7 }, uStyle: { value: style === 'mesh' ? 1 : style === 'spectrogram' ? 2 : 0 }, uBands: { value: new Float32Array(16) } };
   const material = own(ctx, new T.ShaderMaterial({ uniforms, side: T.DoubleSide,
@@ -347,6 +363,7 @@ export function createTerrain(ctx, style = 'terrain') {
 
 export function createHanddrawn(ctx, style) {
   const T = ctx.THREE, group = root(ctx), count = 32;
+  declaredArrayPayload(ctx.scope,6*8+count*16,'Handdrawn numeric geometry and instance backing',4,1);
   const geometry = own(ctx, new T.BufferGeometry());
   geometry.setAttribute('position', new T.Float32BufferAttribute([0,-.5,0,-1,.7,.6,-.35,-.3,.15,0,-.5,0,.35,-.3,.15,1,.7,.6],3));
   geometry.setAttribute('uv', new T.Float32BufferAttribute([.5,0,0,1,.3,.2,.5,0,.7,.2,1,1],2)); geometry.computeVertexNormals();
@@ -380,7 +397,7 @@ export function createHanddrawn(ctx, style) {
     #include <colorspace_fragment>
     }` }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, count)), o = new T.Object3D(); group.add(mesh);
-  const artwork = new T.Mesh(own(ctx, new T.PlaneGeometry(6.4, 6.4, 48, 48)), material); group.add(artwork);
+  const artwork = new T.Mesh(own(ctx, constructedGeometry(T,ctx.scope,'PlaneGeometry',[6.4,6.4,48,48])), material); group.add(artwork);
   function update(f, p) {
     const time = f.time || 0;
     const source = ctx.services.coverUrl, url = (typeof source === 'function' ? source() : source) || f.coverUrl || '';

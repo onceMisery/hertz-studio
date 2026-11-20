@@ -86,6 +86,12 @@
     var lastCurrentId = null;
     var lastMetaPct = -1;
     var coverCache = new Map();     // url -> HTMLImageElement（预加载）
+    var coverBorrows = new Map();
+    function forgetPreload(url) {
+      var image = coverCache.get(url); if (image) image.removeAttribute('src');
+      coverCache.delete(url);
+      var lease = coverBorrows.get(url); if (lease) lease.release(); coverBorrows.delete(url);
+    }
     var narrowScreen = global.matchMedia ? global.matchMedia('(max-width: 760px)') : null;
 
     function reducedMotion() {
@@ -119,11 +125,22 @@
     // ---- 封面预加载：切歌时新卡直接命中缓存，交叉淡化不黑帧
     function preloadCover(url) {
       if (!url || coverCache.has(url)) return;
+      var lease = null;
+      try { if (global.HertzCovers && HertzCovers.borrow) lease = HertzCovers.borrow(url); }
+      catch (_) { return; }
       var img = new Image();
       img.decoding = 'async';
       coverCache.set(url, img);
-      resolveCover(url, function (resolved) { if (resolved && coverCache.get(url) === img) img.src = resolved; });
-      while (coverCache.size > COVER_CACHE_CAP) coverCache.delete(coverCache.keys().next().value);
+      if (lease) coverBorrows.set(url, lease);
+      resolveCover(url, function (resolved) {
+        if (!resolved || coverCache.get(url) !== img) return;
+        if (!lease && global.HertzCovers && HertzCovers.borrow) {
+          try { lease = HertzCovers.borrow(resolved); if (lease) coverBorrows.set(url, lease); }
+          catch (_) { forgetPreload(url); return; }
+        }
+        img.src = lease ? lease.url : resolved;
+      });
+      while (coverCache.size > COVER_CACHE_CAP) forgetPreload(coverCache.keys().next().value);
     }
 
     // ---- DOM 构建 ---------------------------------------------------------
@@ -479,7 +496,7 @@
           img.dataset.url = '';
           img.removeAttribute('src');
           var bad = coverCache.get(failed);
-          if (bad && !bad.naturalWidth) coverCache.delete(failed);
+          if (bad && !bad.naturalWidth) forgetPreload(failed);
         }
       });
     }
@@ -747,7 +764,7 @@
       document.removeEventListener('pointermove', onPointerTrack, true);
       plane.innerHTML = '';
       nodes.clear();
-      coverCache.clear();
+      coverCache.forEach(function (_, url) { forgetPreload(url); });
       dying = [];
       items = [];
       itemIndexes.clear();

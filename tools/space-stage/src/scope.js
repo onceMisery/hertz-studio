@@ -10,6 +10,18 @@ export function createScope(options = {}) {
   const admissions = new Set();
   const preparedBuffers = new Map();
   let disposed = false, cleanupFailed = false, allocationTasks = 0;
+  function reserve(vector, source, basis = 'exact-declared') {
+    if (disposed) throw new Error('Scope disposed');
+    if (!pagePort) return null;
+    const ticket = pagePort.require(vector, source, options.generation || 0, basis);
+    admissions.add(ticket);
+    return ticket;
+  }
+  function releaseReservation(ticket) {
+    if (!ticket) return;
+    const result = ticket.release({ apiReleased: true, allocationEnded: true });
+    if (result.ok) admissions.delete(ticket);
+  }
   function releaseAdmissions() {
     if (!disposed || allocationTasks || cleanupFailed) return;
     admissions.forEach(ticket => ticket.release({ apiReleased: true, allocationEnded: true })); admissions.clear();
@@ -114,13 +126,17 @@ export function createScope(options = {}) {
       preparedBuffers: preparedBuffers.size, unclaimedPreparedBuffers: [...preparedBuffers.values()].filter(plan => !plan.claimed).length,
       estimatedBytes: Math.round(estimatedBytes) };
   }
-  return { signal: controller.signal, track, trackTree, lease, defer, stats, bufferPlan, prepareBufferPlan,
+  return { signal: controller.signal, track, trackTree, lease, defer, stats, reserve, releaseReservation, bufferPlan, prepareBufferPlan,
     releaseLease(poolLease) { if (leases.delete(poolLease)) poolLease.release(); },
     retirementCandidates(renderer) {
       // Unsettled factories and failed cleanup cannot forecast reclaimable quota.
       if (allocationTasks || cleanupFailed) return [];
       const ids = [...admissions].map(ticket => ticket.resourceId), programUses = new Map();
       for (const material of resources) {
+        if (material.isBufferGeometry) {
+          if (material.hertzWireframeCpuResourceId) ids.push(material.hertzWireframeCpuResourceId);
+          if (material.hertzWireframeGpuResourceId) ids.push(material.hertzWireframeGpuResourceId);
+        }
         const attributes = material.isBufferGeometry ? [...Object.values(material.attributes), material.index,
           ...Object.values(material.morphAttributes || {}).flat()] : material.isInstancedMesh ? [material.instanceMatrix, material.instanceColor] : [];
         attributes.filter(Boolean).forEach(attribute => {

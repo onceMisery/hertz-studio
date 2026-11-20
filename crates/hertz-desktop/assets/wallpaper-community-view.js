@@ -222,7 +222,13 @@
         const subscribe = button(subscribed ? '已订阅' : '订阅此作品', () => actions.subscribe(work.id), true); subscribe.dataset.blocked = String(subscribed);
         subscribe.dataset.communityWork=work.id;subscribe.dataset.sourceId=sourceId;
         subscribe.setAttribute('aria-label', (subscribed ? '已订阅 ' : '订阅此作品 ') + work.title);
-        row.append(heading, id, licenseText, subscribe); el('community-works').append(row);
+        const toolbar = node('div', undefined, 'community-actions'); toolbar.append(subscribe);
+        if (actions.report) {
+          const report = button('举报此作品', () => actions.report(work.id), false);
+          report.dataset.communityReport = sourceId;
+          report.setAttribute('aria-label', '举报此作品 ' + work.title); toolbar.append(report);
+        }
+        row.append(heading, id, licenseText, toolbar); el('community-works').append(row);
       });
       el('community-browse-empty').textContent = el('community-works').childElementCount ? '' : '此来源当前没有可公开下载的已签名作品。';
       el('community-browse-empty').hidden = el('community-works').childElementCount > 0;
@@ -254,10 +260,16 @@
     function controls(state) {
       controlsState = state;
       panel.querySelectorAll('[data-community-mutation]').forEach(item => {
-        item.disabled = !state.native || state.busy || state.uncertain || item.dataset.blocked === 'true'
+        const reauthentication = state.authorRecovery && ['community-login', 'community-logout'].includes(item.id);
+        item.disabled = !state.native || state.busy || state.uncertain && !reauthentication || item.dataset.blocked === 'true'
           || item.hasAttribute('data-community-target') && (!context.ready || !context.groupId || context.pending);
       });
       panel.querySelectorAll('[data-community-read]').forEach(item => { item.disabled = !state.native || item.dataset.blocked === 'true'; });
+      panel.querySelectorAll('[data-community-report]').forEach(item => {
+        const loggedIn = snapshot.accounts.some(account => account.sourceId === item.dataset.communityReport);
+        item.disabled ||= !loggedIn;
+        item.textContent = loggedIn ? '举报此作品' : '登录后举报';
+      });
       el('community-source').disabled = !state.native || snapshot.sources.length === 0;
       el('community-target').disabled = !state.native || !context.ready || !(context.groups || []).length || context.pending;
       ['community-sync', 'community-browse', 'community-login', 'community-logout', 'community-me'].forEach(id => { if (!source()) el(id).disabled = true; });

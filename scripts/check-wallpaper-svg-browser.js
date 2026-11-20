@@ -3,6 +3,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { runtimePage } = require('./stage-runtime-fixture');
 const path = require('node:path');
 const {pathToFileURL} = require('node:url');
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -66,8 +67,6 @@ const inputFiles = ['crates/hertz-desktop/assets/wallpaper-scene.html', 'crates/
 evidence.sourceHashes = Object.fromEntries(inputFiles.map(file => [file, hash(Buffer.from(read(file)))]));
 const html = read('crates/hertz-desktop/assets/wallpaper-scene.html')
   .replace('__GL_BUDGET__', () => read('plugin/ui/stage-resource-budget.js') + '\n' + read('crates/hertz-desktop/assets/wallpaper-gl-budget.js'))
-  .replace('__RUNTIME__', () => read('plugin/ui/vendor/stage-runtime.js'))
-  .replace('__SHIM__', () => read('plugin/ui/vendor/zodiac-stage.js'))
   .replace('__SCENE__', () => read('crates/hertz-desktop/assets/wallpaper-scene.js'));
 const mark = label => {evidence.checks.push(label); console.log('PASS ' + label);};
 async function main() {
@@ -88,7 +87,7 @@ async function main() {
   const browser = await chromium.launch({channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true,
     args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader']});
   try {
-    const clock = await browser.newPage();
+    const clock = await runtimePage(browser, );
     const intervals = await clock.evaluate(() => new Promise(resolve => {
       const samples = []; let last;
       const sample = now => {if (last !== undefined) samples.push(now - last); last = now;
@@ -105,7 +104,7 @@ async function main() {
       let init = fs.readFileSync(path.join(frame, 'native-init.js'), 'utf8');
       init = init.replace(/"refreshHz":\d+(?:\.\d+)?/, () => '"refreshHz":' + refreshHz)
         .replace(/"frameDivisor":\d+/, () => '"frameDivisor":' + Math.ceil(refreshHz / projection.target.budgetFps));
-      const page = await browser.newPage({viewport: {width: projection.target.width, height: projection.target.height}});
+      const page = await runtimePage(browser, {viewport: {width: projection.target.width, height: projection.target.height}});
       const errors = [], requests = new Map();
       page.on('pageerror', error => errors.push(error.message)); page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
       await page.addInitScript(init + '\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -144,7 +143,7 @@ async function main() {
       await page.close();
     }
     mark('actual native PNGs preserve final slots, aliases, nested alpha, one load and one context; each page drains');
-    const poolPage = await browser.newPage();
+    const poolPage = await runtimePage(browser, );
     const requirement = original.requirements.find(requirement => requirement.logicalKind === 'vector' && requirement.assetId === 'red' && requirement.width > 4);
     assert(requirement, 'actual full-size SVG representation is available for loader lifetime checks');
     const alternate = original.requirements.find(candidate => candidate.logicalKind === 'vector' && candidate.assetId === requirement.assetId

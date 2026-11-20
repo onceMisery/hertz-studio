@@ -2,6 +2,13 @@
 // Pure timeline track evaluation over compiler-validated keys.
 const EASINGS = new Set(['linear', 'easeInOut', 'step']);
 
+// Retained typed-array backing used by the sampler, reserved before loading.
+export function timelineWorkspaceBytes(ir) {
+  if (!ir.tracks.length && !ir.bindings.length) return 0;
+  return ir.numericSlots.length * 17 + ir.nodes.length * 4 + ir.inputs.length * 8
+    + ir.bindings.reduce((bytes, binding) => bytes + (binding.maxStack + 1) * 8, 0);
+}
+
 export function validateTrack(track, numericSlots) {
   if (!track || !Number.isSafeInteger(track.targetSlot) || track.targetSlot < 0
     || track.targetSlot >= numericSlots.length) return 'composition-track-target-invalid';

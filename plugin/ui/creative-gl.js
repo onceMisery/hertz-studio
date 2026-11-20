@@ -349,6 +349,7 @@ float celLight(vec3 normal) {
   scene({
     id: 'towers',
     label: '频谱塔林',
+    presentation: { family: 'spectrum-towers', dimension: '3d', counterpart: 'towers-flat' },
     geom: { mode: 'TRIANGLES', verts: 36, instances: 64 },
     qualityGeom: [
       { verts: 36, instances: 32 },
@@ -443,6 +444,54 @@ void main() {
   });
 
   // --- 2. 频谱球 -------------------------------------------------------------
+  // The planar member shares the original parameter/default owner. It uses
+  // clip-space bars rather than a flattened perspective scene.
+  scene({
+    id: 'towers-flat', label: '频谱平面',
+    presentation: { family: 'spectrum-towers', dimension: '2d', counterpart: 'towers' },
+    geom: { mode: 'TRIANGLES', verts: 12, instances: 64 },
+    qualityGeom: [{ verts: 12, instances: 32 }, { verts: 12, instances: 48 }, { verts: 12, instances: 64 }],
+    depth: false, blend: 'surface',
+    params: SCENE_BY_ID.towers.params, camera: SCENE_BY_ID.towers.camera,
+    aliases: ['平面频谱', '频谱平面', '二维频谱', 'towers-flat'], ownsLyrics: false,
+    uniforms: ['uCount','uSpan','uHeight','uWidth','uDepth','uMirror'],
+    decl: 'uniform int uCount; uniform float uSpan; uniform float uHeight; uniform float uWidth; uniform float uDepth; uniform float uMirror;',
+    vert: GEOM + `
+out float vId; out float vHeight; out vec2 vLocal; out float vReflection;
+void main() {
+  int id=gl_InstanceID;
+  float u=(float(id)+0.5)/float(uCount);
+  float b=bandIx(id,uCount), r=riseAt(u);
+  vec2 q=quadVert(gl_VertexID%6)*0.5+0.5;
+  float height=clamp((0.22+b*uHeight*0.9+r*uHeight*0.12)/6.0,0.01,1.15);
+  float span=0.4+(uSpan-6.0)*(1.4/54.0);
+  float width=min(uWidth/12.0,span/float(uCount)*0.8);
+  float baseline=-0.38+sin(u*6.2831853+uSeed*6.28)*0.025;
+  bool reflection=gl_VertexID>=6;
+  float vertical=reflection?-q.y*min(height,0.5):q.y*height;
+  vec2 planar=vec2((u-0.5)*span+(q.x-0.5)*width,baseline+vertical);
+  // Uniform stage scale affects both family members; camera projection stays 3D-only.
+  gl_Position=vec4(planar*length(uModel[1].xyz),0.0,1.0);
+  vId=u;vHeight=height;vLocal=q;vReflection=reflection?1.0:0.0;
+}`,
+    frag: `
+in float vId; in float vHeight; in vec2 vLocal; in float vReflection; out vec4 frag;
+void main() {
+  vec3 color=paletteMix(vId*0.72+0.12);
+  float edge=mix(0.6,1.0,vLocal.y);
+  float depthTone=clamp(uDepth*0.08,0.0,0.16)*(1.0-vLocal.x);
+  color*=edge+depthTone+vHeight*0.08;
+  color*=mix(1.0,uMirror*0.5*(1.0-vLocal.y),vReflection);
+  frag=vec4(color,1.0);
+}`,
+    setup: function(gl,U,S) {
+      gl.uniform1i(U.uCount,[32,48,64][qualityOf(S)]);
+      gl.uniform1f(U.uSpan,S.p.span);gl.uniform1f(U.uHeight,S.p.height);
+      gl.uniform1f(U.uWidth,S.p.width);gl.uniform1f(U.uDepth,S.p.depth);
+      gl.uniform1f(U.uMirror,S.p.mirror);
+    }
+  });
+
   // 平滑频谱驱动轻微径向呼吸，连续纬线保留球体轮廓。
   scene({
     id: 'orb',

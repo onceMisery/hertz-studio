@@ -3,6 +3,7 @@
 // qualifier proves integration only; Windows qualification remains separate.
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const { runtimePage } = require('./stage-runtime-fixture');
 const {createHash}=require('node:crypto');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..');
@@ -37,9 +38,7 @@ const scene=read('crates/hertz-desktop/assets/wallpaper-scene.js');
 assert.equal(scene.split('stage=spaceRuntime.create(canvas,').length,2,'passive host instrumentation has one exact site');
 const html=read('crates/hertz-desktop/assets/wallpaper-scene.html')
   .replace('__GL_BUDGET__',()=>read('plugin/ui/stage-resource-budget.js')+'\n'+read('crates/hertz-desktop/assets/wallpaper-gl-budget.js'))
-  .replace('__RUNTIME__',()=>instrumentation+'\n'+read('plugin/ui/vendor/stage-runtime.js'))
-  .replace('__SHIM__',()=>read('plugin/ui/vendor/zodiac-stage.js'))
-  .replace('__SCENE__',()=>scene.replace('stage=spaceRuntime.create(canvas,','stage=window.testNativeHost=spaceRuntime.create(canvas,'));
+  .replace('__SCENE__',()=>instrumentation+'\n'+scene.replace('stage=spaceRuntime.create(canvas,','stage=window.testNativeHost=spaceRuntime.create(canvas,'));
 const evidence={qualification:fs.readFileSync(path.join(directory,'qualification.txt'),'utf8').trim(),
   fixtureSha256:digest(Buffer.from(JSON.stringify(projection))),checks:[],errors:[]};
 evidence.sourceHashes=Object.fromEntries([
@@ -54,7 +53,7 @@ async function main(){
   const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,
     args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
   try{
-    const page=await browser.newPage({viewport:{width:projection.target.width,height:projection.target.height}});
+    const page=await runtimePage(browser, {viewport:{width:projection.target.width,height:projection.target.height}});
     page.on('pageerror',error=>evidence.errors.push(error.message));
     page.on('console',message=>{if(message.type()==='error')evidence.errors.push(message.text());});
     await page.addInitScript(init);
@@ -167,7 +166,7 @@ async function main(){
       canvases:rasterObservations.canvases.filter(canvas=>canvas.width>0&&canvas.height>0).map(canvas=>({width:canvas.width,height:canvas.height}))}));
     assert.equal(retired.budget.error,null);assert.deepEqual(retired.canvases,[]);
     evidence.checks.push({case:'final exit removes FontFace and clears every tracked canvas',retired});
-    const unsupportedPage=await browser.newPage({viewport:{width:projection.target.width,height:projection.target.height}});
+    const unsupportedPage=await runtimePage(browser, {viewport:{width:projection.target.width,height:projection.target.height}});
     await unsupportedPage.addInitScript(init+'\nwindow.textDeviceMaximum=1;');
     let unsupportedFetches=0;
     await unsupportedPage.route('https://**.wallpaper.invalid/**',async route=>{

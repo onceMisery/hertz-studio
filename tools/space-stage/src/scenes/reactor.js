@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 粒子反应堆：每首歌一套「色相 / 粒子壳层 / 机位」配方，切歌与悬停预览都在 GPU 上换场。
 import { basicInstance, level, own, qualityDensity, root, seed } from './factories.js';
@@ -230,6 +232,7 @@ export function createReactor(ctx) {
   const colorA = new T.Color(), colorB = new T.Color(), colorC = new T.Color(), colorD = new T.Color(), colorDim = new T.Color(), white = new T.Color(1, 1, 1);
   const additive = (material, extra = {}) => own(ctx, new material({ transparent: true, depthWrite: false, blending: T.AdditiveBlending, ...extra }));
 
+  declaredArrayPayload(ctx.scope, 9000 * 7 + 12 + 1800 * 3 + MAX_NODES * 7, 'Reactor cloud, morph, dust and node typed backing');
   const COUNT = 9000, positions = new Float32Array(COUNT * 3), seeds = new Float32Array(COUNT * 4);
   for (let i = 0; i < COUNT; i++) {
     const s = [seed(i, 1), seed(i, 2), seed(i, 3), seed(i, 4)], u = s[0] * TAU, v = s[1] * TAU;
@@ -250,7 +253,7 @@ export function createReactor(ctx) {
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   cloud.frustumCulled = false; cloudGroup.add(cloud);
 
-  const glowGeometry = own(ctx, new T.PlaneGeometry(1, 1));
+  const glowGeometry = own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [1, 1]));
   const glow = (opacity) => {
     const material = own(ctx, new T.ShaderMaterial({ uniforms: { uColor: { value: new T.Color() }, uOpacity: { value: opacity } },
       vertexShader: glowVertex, fragmentShader: glowFragment, transparent: true, depthWrite: false, blending: T.AdditiveBlending }));
@@ -259,15 +262,16 @@ export function createReactor(ctx) {
   const coreGlow = glow(.5), accentGlow = glow(.26);
 
   const coreMaterial = own(ctx, new T.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: .3 }));
-  const core = new T.Mesh(own(ctx, new T.IcosahedronGeometry(1.32, 2)), coreMaterial); world.add(core);
+  const core = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'IcosahedronGeometry', [1.32, 2])), coreMaterial); world.add(core);
   const innerMaterial = own(ctx, new T.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: .72 }));
-  const innerGeometry = own(ctx, new T.IcosahedronGeometry(.72, 1));
+  const innerGeometry = own(ctx, constructedGeometry(T, ctx.scope, 'IcosahedronGeometry', [.72, 1]));
   const innerCore = new T.Mesh(innerGeometry, innerMaterial); world.add(innerCore);
   const midMaterial = own(ctx, new T.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: .27 }));
   const midCore = new T.Mesh(innerGeometry, midMaterial); midCore.scale.setScalar(1.48); world.add(midCore);
   const shockMaterial = additive(T.MeshBasicMaterial, { opacity: 0, side: T.DoubleSide });
-  const shockwave = new T.Mesh(own(ctx, new T.RingGeometry(2.9, 2.96, 128)), shockMaterial); shockwave.position.z = 1.4; world.add(shockwave);
+  const shockwave = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'RingGeometry', [2.9, 2.96, 128])), shockMaterial); shockwave.position.z = 1.4; world.add(shockwave);
 
+  declaredArrayPayload(ctx.scope, 7 * 180 * 3 + 180 * 6, 'Reactor ring and ticks source/attribute coexistence', 4, 1);
   const rings = [];
   for (let ring = 0; ring < 7; ring++) {
     const points = [];
@@ -293,11 +297,12 @@ export function createReactor(ctx) {
   });
 
   const scanMaterialA = additive(T.MeshBasicMaterial, { opacity: .35 }), scanMaterialB = additive(T.MeshBasicMaterial, { opacity: .22 });
-  const scanRingA = new T.Mesh(own(ctx, new T.TorusGeometry(4.15, .012, 6, 140)), scanMaterialA); scanRingA.rotation.x = Math.PI / 2; world.add(scanRingA);
-  const scanRingB = new T.Mesh(own(ctx, new T.TorusGeometry(3.55, .01, 6, 140)), scanMaterialB); scanRingB.rotation.x = Math.PI / 2; world.add(scanRingB);
+  const scanRingA = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'TorusGeometry', [4.15, .012, 6, 140])), scanMaterialA); scanRingA.rotation.x = Math.PI / 2; world.add(scanRingA);
+  const scanRingB = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'TorusGeometry', [3.55, .01, 6, 140])), scanMaterialB); scanRingB.rotation.x = Math.PI / 2; world.add(scanRingB);
   const beamMaterial = additive(T.MeshBasicMaterial, { opacity: .028, side: T.DoubleSide });
-  const beam = new T.Mesh(own(ctx, new T.CylinderGeometry(.25, 4.6, 9.5, 48, 1, true)), beamMaterial); beam.position.y = -.2; world.add(beam);
+  const beam = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'CylinderGeometry', [.25, 4.6, 9.5, 48, 1, true])), beamMaterial); beam.position.y = -.2; world.add(beam);
 
+  declaredArrayPayload(ctx.scope,64*6,'Reactor pillar numeric scratch and typed backing',4,1);
   const pillarPositions = [];
   for (let i = 0; i < 64; i++) {
     const angle = i / 64 * TAU, radius = 5.05 + (i % 4) * .06, height = .4 + seed(i, 9) * 1.6;
@@ -313,14 +318,15 @@ export function createReactor(ctx) {
   const dustMaterial = own(ctx, new T.PointsMaterial({ size: .035, transparent: true, opacity: .5, depthWrite: false }));
   const dust = new T.Points(dustGeometry, dustMaterial); dust.frustumCulled = false; group.add(dust);
 
+  declaredArrayPayload(ctx.scope,61*12,'Reactor floor grid numeric scratch and Float32 positions',4,1);
   const gridPositions = [];
   for (let i = 0; i <= 60; i++) { const k = i - 30; gridPositions.push(-30, 0, k, 30, 0, k, k, 0, -30, k, 0, 30); }
   const gridGeometry = own(ctx, new T.BufferGeometry()); gridGeometry.setAttribute('position', new T.Float32BufferAttribute(gridPositions, 3));
   const gridMaterial = own(ctx, new T.LineBasicMaterial({ transparent: true, opacity: .34 }));
   const grid = new T.LineSegments(gridGeometry, gridMaterial); grid.position.y = -4.1; group.add(grid);
   const padMaterial = additive(T.MeshBasicMaterial, { opacity: .22, side: T.DoubleSide }), padAccentMaterial = additive(T.MeshBasicMaterial, { opacity: .16, side: T.DoubleSide });
-  const pad = new T.Mesh(own(ctx, new T.RingGeometry(4.4, 4.46, 128)), padMaterial); pad.rotation.x = -Math.PI / 2; pad.position.y = -4.08; group.add(pad);
-  const padAccent = new T.Mesh(own(ctx, new T.RingGeometry(5.15, 5.18, 128)), padAccentMaterial); padAccent.rotation.x = -Math.PI / 2; padAccent.position.y = -4.08; group.add(padAccent);
+  const pad = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'RingGeometry', [4.4, 4.46, 128])), padMaterial); pad.rotation.x = -Math.PI / 2; pad.position.y = -4.08; group.add(pad);
+  const padAccent = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'RingGeometry', [5.15, 5.18, 128])), padAccentMaterial); padAccent.rotation.x = -Math.PI / 2; padAccent.position.y = -4.08; group.add(padAccent);
 
   const nodePositions = new Float32Array(MAX_NODES * 3), nodeColors = new Float32Array(MAX_NODES * 3), nodeSizes = new Float32Array(MAX_NODES);
   const nodeGeometry = own(ctx, new T.BufferGeometry());
@@ -561,3 +567,6 @@ export function createReactor(ctx) {
       yaw: ((world.rotation.y * 180 / Math.PI) % 360 + 360) % 360, zoom: 15 / Math.max(1, ctx.camera.position.length()) })
   }), { setRig(value) { pose = value; } });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createReactor.resourcePlan = () => sourcePlan(28).array(9000*7+12+1800*3+MAX_NODES*7).geometry('PlaneGeometry',[1,1]).geometry('IcosahedronGeometry',[1.32,2],1,true).geometry('IcosahedronGeometry',[.72,1],1,true).geometry('RingGeometry',[2.9,2.96,128]).array(7*180*3+180*6,4,1).geometry('TorusGeometry',[4.15,.012,6,140]).geometry('TorusGeometry',[3.55,.01,6,140]).geometry('CylinderGeometry',[.25,4.6,9.5,48,1,true]).array(64*6,4,1).array(61*12,4,1).geometry('RingGeometry',[4.4,4.46,128]).geometry('RingGeometry',[5.15,5.18,128]).result();

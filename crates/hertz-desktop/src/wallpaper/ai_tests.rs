@@ -69,6 +69,7 @@ async fn install(
     let document = Document {
         composition: None,
         resources: vec![],
+        provenance: None,
         title: title.into(),
         description: "安静 海岸".into(),
         scene_id: "coast".into(),
@@ -438,5 +439,59 @@ async fn actual_image_video_metadata_budget_and_permission_filter_use_no_decoder
         0,
         "catalog must not construct a decoder or real-time preview"
     );
+    jobs.library().pool().close().await;
+}
+
+#[tokio::test]
+async fn local_and_external_catalogs_include_compiled_compositions_without_preparation() {
+    use std::io::{Cursor, Write};
+    let root = Root::new();
+    let jobs = jobs(&root.0).await;
+    let mut native = NativeAi::new();
+    let context = context(&mut native);
+    let work_id = uuid::Uuid::new_v4().to_string();
+    let document = json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
+        "nodes":[{"id":"p","type":"particles","stateVersion":1}],"timeline":{"durationSeconds":4,"loop":true,"tracks":[]},"bindings":[]});
+    let bytes = serde_json::to_vec(&document).unwrap();
+    let manifest = json!({"formatVersion":1,"workId":work_id,"version":1,"title":"离线组合","description":"安静",
+        "content":{"kind":"composition","document":"composition.json"},"assets":[],
+        "files":[{"path":"composition.json","bytes":bytes.len(),"sha256":crate::config_journal::digest(&bytes),"mime":"application/json"}],
+        "properties":[],"permissions":{"pointer":false,"audioSpectrum":false},"license":{"code":"none","assets":"CC0-1.0","attribution":""}});
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("manifest.json", options).unwrap();
+    writer.write_all(manifest.to_string().as_bytes()).unwrap();
+    writer.start_file("composition.json", options).unwrap();
+    writer.write_all(&bytes).unwrap();
+    let (work, hash) = install_package(
+        &jobs,
+        1,
+        "离线组合",
+        1,
+        &work_id,
+        "composition",
+        writer.finish().unwrap().into_inner(),
+    )
+    .await;
+    let catalog = catalog(Arc::clone(&jobs), "切换到离线组合".into(), context.clone())
+        .await
+        .unwrap();
+    assert_eq!(catalog.actions.len(), 1);
+    assert_eq!(catalog.actions[0].work_key, work);
+    assert_eq!(catalog.actions[0].package_hash, hash);
+    assert!(catalog.explicit_action.is_some());
+    let external = external_catalog(
+        Arc::clone(&jobs),
+        hertz_wallpaper::external_requests::CatalogRequest {
+            cursor: None,
+            limit: 20,
+        },
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(external.items.len(), 1);
+    assert_eq!(external.items[0].kind, "composition");
+    assert_eq!(external.items[0].action.package_hash, hash);
     jobs.library().pool().close().await;
 }

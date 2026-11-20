@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! Persistent, bounded builtin work documents. Draft CAS, saved snapshots and
+//! Persistent, bounded work documents. Draft CAS, saved snapshots and
 //! immutable published versions are separate facts; this module never writes Config.
 
 use std::io::{Cursor, Write};
@@ -22,10 +22,15 @@ const PARAM_PAGE_BYTES: usize = 12 * 1024;
 const PARAM_VALUE_BYTES: usize = 8 * 1024;
 #[path = "work_drafts_composition.rs"]
 mod composition;
+#[path = "work_drafts_fork.rs"]
+mod fork;
+#[path = "work_drafts_structure.rs"]
+mod structure;
 #[cfg(test)]
 pub(crate) use composition::tests::install_source as install_composition_test_source;
 pub(crate) use composition::PackageBuild;
 pub(crate) use composition::{Resource, Section};
+pub(crate) use fork::Provenance;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -45,6 +50,9 @@ pub(crate) struct Document {
     pub composition: Option<hertz_wallpaper::document::Document>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<Resource>,
+    /// Native-populated pointer to immutable source facts; never an API input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
@@ -57,6 +65,9 @@ impl Document {
         // Check bytes before normalizing too: invalid input cannot bypass the cap
         // by having a later typed operation replace one large field.
         bounded_json(self)?;
+        if let Some(source) = &self.provenance {
+            source.validate()?;
+        }
         self.title = self.title.trim().to_owned();
         if self.title.is_empty()
             || self.title.chars().count() > 120
@@ -198,11 +209,22 @@ pub(crate) enum Update {
     RemoveNode {
         id: String,
     },
+    MoveNode {
+        node_id: String,
+        parent_id: Option<String>,
+        index: usize,
+    },
+    ReorderNodes {
+        ids: Vec<String>,
+    },
     SetEffect {
         effect: hertz_wallpaper::document::Effect,
     },
     RemoveEffect {
         id: String,
+    },
+    ReorderEffects {
+        ids: Vec<String>,
     },
     SetTrack {
         track: hertz_wallpaper::document::Track,
@@ -469,13 +491,16 @@ impl<'a> WorkDrafts<'a> {
     }
 
     pub(crate) async fn create(&self, document: Document) -> Result<Draft> {
-        if !document.resources.is_empty() {
+        if !document.resources.is_empty() || document.provenance.is_some() {
             return Err(invalid("请通过已确认的素材快照或本机作品重开加入资源"));
         }
         self.create_owned(document, None, None).await
     }
 
     pub(crate) async fn create_ai(&self, document: Document, receipt: &str) -> Result<Draft> {
+        if document.provenance.is_some() {
+            return Err(invalid("AI 输入不能声明作品来源"));
+        }
         self.create_owned(document, Some(receipt), None).await
     }
     pub(crate) async fn create_prepared_ai(
@@ -485,6 +510,9 @@ impl<'a> WorkDrafts<'a> {
         state: &str,
         diagnostics: Option<&str>,
     ) -> Result<Draft> {
+        if document.provenance.is_some() {
+            return Err(invalid("AI 输入不能声明作品来源"));
+        }
         self.create_owned(document, Some(receipt), Some((state, diagnostics)))
             .await
     }
@@ -516,8 +544,8 @@ impl<'a> WorkDrafts<'a> {
         .await
     }
 
-    /// Only the user's local builtin work can be reopened. Import sources and
-    /// asset-bearing packages require a future explicit licensed fork contract.
+    /// Reopening preserves the exact authored work identity; forks have their
+    /// own explicit entry point and never grant imported packages authorship.
     pub(crate) async fn create_from_version(
         &self,
         work_key: &str,
@@ -544,91 +572,18 @@ impl<'a> WorkDrafts<'a> {
         {
             return Err(JobError::new(
                 "work_not_editable",
-                "仅可重开本机内置场景作品",
+                "仅可重开本机生成的内置场景或组合作品版本",
             ));
         }
         let package = assets.read_installed_manifest(package_hash)?;
-        let manifest = package.manifest.clone();
-        if let hertz_wallpaper::Content::Composition { document: path } = &manifest.content {
-            let pin = assets.pin_package_entry(
-                &package,
-                path,
-                &std::sync::atomic::AtomicBool::new(false),
-            )?;
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            super::assets::open_immutable(&pin.path)?
-                .take(MAX_DOCUMENT_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(io)?;
-            let compiled =
-                hertz_wallpaper::document::compile_document(&bytes, &manifest).map_err(invalid)?;
-            let document = Document {
-                title: manifest.title.clone(),
-                description: manifest.description.clone(),
-                scene_id: String::new(),
-                state_version: 0,
-                params: Map::new(),
-                properties: hertz_wallpaper::properties::validate_properties(&manifest)
-                    .map_err(invalid)?,
-                composition: Some(compiled.document().clone()),
-                resources: manifest
-                    .assets
-                    .iter()
-                    .map(|a| Resource {
-                        asset_id: a.id.clone(),
-                        kind: a.kind,
-                        work_key: work_key.into(),
-                        package_hash: package_hash.into(),
-                        source_asset_id: a.id.clone(),
-                        candidate_id: None,
-                    })
-                    .collect(),
-            };
-            return self
-                .insert(
-                    document,
-                    work_key.into(),
-                    manifest.work_id,
-                    Some(package_hash),
-                )
-                .await;
+        if work.remote_work_id.as_deref() != Some(package.manifest.work_id.as_str()) {
+            return Err(JobError::new("work_not_editable", "作品来源身份不符"));
         }
-        if work.remote_work_id.as_deref() != Some(manifest.work_id.as_str())
-            || !manifest.files.is_empty()
-            || !manifest.assets.is_empty()
-        {
-            return Err(JobError::new(
-                "work_not_editable",
-                "当前编辑器不支持此作品的资源",
-            ));
-        }
-        let properties =
-            hertz_wallpaper::properties::validate_properties(&manifest).map_err(invalid)?;
-        let hertz_wallpaper::Content::Builtin {
-            scene_id,
-            state_version,
-            params,
-        } = manifest.content
-        else {
-            return Err(JobError::new(
-                "work_not_editable",
-                "当前编辑器仅支持内置场景作品",
-            ));
-        };
+        let document = fork::document_from_package(work_key, &package, assets)?;
         self.insert(
-            Document {
-                title: manifest.title,
-                description: manifest.description,
-                scene_id,
-                state_version,
-                params,
-                properties,
-                composition: None,
-                resources: vec![],
-            },
+            document,
             work_key.to_owned(),
-            manifest.work_id,
+            package.manifest.work_id,
             Some(package_hash),
         )
         .await
@@ -1089,7 +1044,7 @@ impl<'a> WorkDrafts<'a> {
         let package_bytes = publication.package_bytes as u64;
         let staging = assets.staging_dir(&job_id);
         let outcome = async {
-            if document.composition.is_none() {
+            if document.composition.is_none() && document.provenance.is_none() {
                 assets.check_disk_space(package_bytes + 4096)?;
                 std::fs::create_dir(&staging).map_err(io)?;
                 let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(staging.join("original.hwpkg")).map_err(io)?;
@@ -1168,9 +1123,10 @@ impl<'a> WorkDrafts<'a> {
                 .execute(&mut *tx).await.map_err(database)?;
             sqlx::query("DELETE FROM draft_publications WHERE draft_id=?1")
                 .bind(id).execute(&mut *tx).await.map_err(database)?;
-            if document.composition.is_some() {
+            if document.composition.is_some() || document.provenance.is_some() {
                 let mut rebound=document.clone();
                 for r in &mut rebound.resources {r.work_key=draft.work_key.clone();r.package_hash=package.package_hash.clone();r.source_asset_id=r.asset_id.clone();r.candidate_id=None;}
+                if rebound.provenance.is_some() { rebound.provenance=Some(Provenance { work_key:draft.work_key.clone(),package_hash:package.package_hash.clone() }); }
                 let json=rebound.normalize()?;
                 sqlx::query("UPDATE drafts SET document_json=?,committed_document_json=?,base_package_hash=? WHERE draft_id=?").bind(&json).bind(&json).bind(&package.package_hash).bind(id).execute(&mut *tx).await.map_err(database)?;
                 sync_resource_references(&mut tx,id,&rebound).await?;
@@ -1253,7 +1209,9 @@ impl<'a> WorkDrafts<'a> {
             .committed_document
             .as_ref()
             .ok_or_else(|| JobError::database("已保存工程缺失"))?;
-        let (bytes, hash, manifest_json, package_bytes) = if document.composition.is_some() {
+        let (bytes, hash, manifest_json, package_bytes) = if document.composition.is_some()
+            || document.provenance.is_some()
+        {
             drop(tx);
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let build = composition::PackageBuild::resolve(
@@ -1346,6 +1304,9 @@ impl<'a> WorkDrafts<'a> {
 /// Deterministic native package construction from a committed builtin document.
 /// No wall-clock ZIP fields or generated permissions enter the immutable bytes.
 pub(crate) fn builtin_package(document: &Document, work_id: &str, version: u32) -> Result<Vec<u8>> {
+    if document.provenance.is_some() {
+        return Err(invalid("派生作品必须通过完整来源打包器发布"));
+    }
     let mut document = document.clone();
     document.normalize()?;
     let manifest = document.manifest(work_id, version)?;
@@ -1390,6 +1351,18 @@ async fn sync_resource_references(
             }
         }
         sqlx::query("INSERT OR IGNORE INTO draft_resource_references(draft_id,work_key,package_hash,candidate_id) VALUES(?,?,?,?)").bind(id).bind(&r.work_key).bind(&r.package_hash).bind(&r.candidate_id).execute(&mut *conn).await.map_err(database)?;
+    }
+    if let Some(source) = &document.provenance {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=? AND v.package_hash=? AND p.state='installed')")
+            .bind(&source.work_key).bind(&source.package_hash).fetch_one(&mut *conn).await.map_err(database)?;
+        if !exists {
+            return Err(JobError::new(
+                "version_not_found",
+                "派生来源在写入草稿前已被移除",
+            ));
+        }
+        sqlx::query("INSERT OR IGNORE INTO draft_resource_references(draft_id,work_key,package_hash,candidate_id) VALUES(?,?,?,NULL)")
+            .bind(id).bind(&source.work_key).bind(&source.package_hash).execute(&mut *conn).await.map_err(database)?;
     }
     Ok(())
 }
@@ -1451,6 +1424,7 @@ mod tests {
             properties: vec![],
             composition: None,
             resources: vec![],
+            provenance: None,
         }
     }
 

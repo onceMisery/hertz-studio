@@ -54,6 +54,8 @@ function narrow(scene) {
     label: scene.label,
     aliases: scene.aliases || [],
     ownsLyrics: !!scene.ownsLyrics,
+    ...(scene.presentation && scene.presentation.family === 'spectrum-towers'
+      ? { presentation: scene.presentation } : {}),
     params: (scene.params || []).map((row) => ({
       name: row[0],
       min: typeof row[2] === 'number' ? row[2] : null,

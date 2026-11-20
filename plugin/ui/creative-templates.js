@@ -3,20 +3,20 @@
 // contract: incompatible templates need a deliberate catalog revision.
 (function () {
   'use strict';
-  var SCHEMA_HASH = 'b21f66f38c39f600319cb68754ab273e52fc454bfbbc080abc2d7eceaa052337';
+  var SCHEMA_HASH = '5c294943281a4a1234414c0634294e8c2bdfa0216d85c3a5223d2569c4715932';
   var CATALOG = [
-    {id:'quiet-orb',version:2,title:'静夜星球',scene:'orb',mood:'克制、留白',motion:'低 · 无节拍抖动',
+    {id:'quiet-orb',version:3,title:'静夜星球',scene:'orb',mood:'克制、留白',motion:'低 · 无节拍抖动',
       boundary:'适合舒缓音乐与大段歌词；球体仍响应实时频谱，不是完全静止的画面。',
       base:'0d84301863cb08d3ce7c54ed8314a56e97eb54288908f31515ac789c8421c790',
       patch:{'cam.dist':15,'cam.drift':4,'cam.shake':0,'cam.kick':0,'look.bloom':.12,
         'look.chroma':0,'look.grain':.04,'look.saturation':.8,'sc.wobble':.08,'sc.amp':.3,'sc.radius':2.8}},
-    {id:'neon-towers',version:2,title:'霓虹律动',scene:'towers',mood:'清晰、明亮',motion:'中 · 频谱起伏与缓慢漂移',
+    {id:'neon-towers',version:3,title:'霓虹律动',scene:'towers',mood:'清晰、明亮',motion:'中 · 频谱起伏与缓慢漂移',
       boundary:'适合节奏清晰的音乐；画面随实际频谱变化，低配置设备可能降低分辨率。',
       base:'b41c53f82d41e64f3323bf511b06a45da50c5e778a15db05dd54f0af2dc50c67',
       patch:{'cam.dist':18,'cam.pitch':12,'cam.drift':14,'cam.shake':6,'cam.kick':16,
         'look.bloom':.38,'look.chroma':.1,'look.grain':.04,'look.saturation':1.05,'look.grade':3,
         'sc.height':5,'sc.span':24,'sc.mirror':.12}},
-    {id:'ink-terrain',version:2,title:'墨线地形',scene:'terrain',mood:'单色、纸感',motion:'低 · 缓慢地形移动',
+    {id:'ink-terrain',version:3,title:'墨线地形',scene:'terrain',mood:'单色、纸感',motion:'低 · 缓慢地形移动',
       boundary:'适合器乐与低密度歌词；纸感和线条属于后处理，横竖屏构图须分别确认。',
       base:'31e8a2269f8b216ec13197a3994ed30442ead089f7b713f987a7117993608bb9',
       patch:{'cam.dist':17,'cam.height':.8,'cam.pitch':18,'cam.shake':0,'cam.drift':6,'cam.kick':0,
@@ -35,22 +35,34 @@
       source:'Hertz Studio 内置',reviewStatus:'candidate',schemaVersion:'1',schemaHash:SCHEMA_HASH,basePresetHash:t.base,
       compatible:!!c && c.schemaVersion === '1' && c.schemaHash === SCHEMA_HASH && c.basePresetHashes[t.scene] === t.base};
   }
-  async function prepare(id) {
+  async function prepareLease(id) {
     var t = entry(id), meta = info(t);
     if (!meta.compatible) throw new Error('模板与当前舞台版本不兼容，请更新模板或应用');
-    var draft = await CreativeDraft.prepare({artifactVersion:1,mode:'create',schemaVersion:'1',schemaHash:SCHEMA_HASH,
-      basePresetHash:t.base,intent:{version:1,scene:t.scene,patch:copy(t.patch),director:false,hand:{on:false}}});
-    // A local template also owns its display name. Bind the preview to the full
-    // named candidate, and verify it through the same complete preset codec.
-    draft.preset.name = t.title;
-    draft.preset = CreativeStage.normalizeSharePreset(draft.preset);
-    draft.shareCode = await CreativeShareCode.encode(draft.preset,{compress:false});
-    var decoded = await CreativeShareCode.decode(draft.shareCode);
-    if (CreativeDraft.canonical(decoded) !== CreativeDraft.canonical(draft.preset)) throw new Error('模板分享校验失败');
-    draft.proposalHash = await CreativeDraft.hash({templateId:t.id,templateVersion:t.version,
-      artifact:draft.artifact,preset:draft.preset});
-    draft.template = meta;
-    return draft;
+    var source, work, normalized, code, decodedSource, draft;
+    try {
+      work = StageJsonSource.reserve('creative-template', 16384 * 32,
+        'bounded template candidate replacement, metadata and canonical comparison strings');
+      source = await CreativeDraft.prepareLease({artifactVersion:1,mode:'create',schemaVersion:'1',schemaHash:SCHEMA_HASH,
+        basePresetHash:t.base,intent:{version:1,scene:t.scene,patch:copy(t.patch),director:false,hand:{on:false}}});
+      draft = source.value;
+      // A local template also owns its display name. Bind the preview to the full
+      // named candidate, and verify it through the same complete preset codec.
+      draft.preset.name = t.title;
+      normalized = CreativeStage.normalizeShareLease(draft.preset); draft.preset = normalized.value;
+      code = await CreativeShareCode.encodeLease(draft.preset,{compress:false}); draft.shareCode = code.value;
+      decodedSource = await CreativeShareCode.decodeLease(draft.shareCode);
+      var decoded = decodedSource.value;
+      if (CreativeDraft.canonical(decoded) !== CreativeDraft.canonical(draft.preset)) throw new Error('模板分享校验失败');
+      draft.proposalHash = await CreativeDraft.hash({templateId:t.id,templateVersion:t.version,
+        artifact:draft.artifact,preset:draft.preset});
+      draft.template = meta;
+      return work.finish(draft, StageJsonSource.measure(draft).bytes);
+    } finally {
+      draft = decoded = null;
+      if (source) source.release(); if (normalized) normalized.release(); if (code) code.release();
+      if (decodedSource) decodedSource.release(); if (work) work.release();
+    }
   }
-  window.CreativeTemplates = {list:function () { return CATALOG.map(info); },prepare:prepare};
+  async function prepare(id) { return StageJsonSource.transfer(await prepareLease(id)); }
+  window.CreativeTemplates = {list:function () { return CATALOG.map(info); },prepare:prepare,prepareLease:prepareLease};
 })();

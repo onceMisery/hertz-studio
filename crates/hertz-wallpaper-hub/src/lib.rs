@@ -3,6 +3,7 @@
 //! No private key, music database, desktop control or static content mount.
 mod administration;
 mod auth;
+mod author_operations;
 mod authority;
 pub mod config;
 mod downloads;

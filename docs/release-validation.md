@@ -1,5 +1,80 @@
 # 当前路线的能力与发布验收矩阵
 
+## 2026-11-19 千项轮播分页与增量编辑
+
+从 `feat/zcode-design-completion/df35253` 继续补齐 P1-08：每列表最多1000个固定版本、32项分页显示、跨页移动、每批32个增量CAS操作、丢回执核对和关闭前保存。原SQLite列表、内容写门、公开属性检查、镜像资格、社区意图失效与Runner继续负责保存和播放；协议2的16 KiB/64 KiB限制不变。用法及分批保存边界见[轮播说明](wallpaper-works-playlists.md#大型轮播列表2026-11-19-增量)。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| 原生完整库，Rust 1.88，单线程 | 988通过、0失败、2项既有音频设备测试忽略；包含千项重开/分页/Runner、增量原子回滚/CAS、owner/公开属性拒绝/原回执和分页缓存、1000项属性与镜像核验 | [原生回归](../output/playlist-incremental-20261119/native-library-final.log) |
+| 旧库升级与共享SQLite生命周期 | 13项原升级测试和5项共享测试通过；0012保留原32项逐行内容、元数据、索引及外键，迁移中途回滚和999/1000边界已核对 | [升级测试](../output/playlist-incremental-20261119/native-upgrade.log)、[生命周期](../output/playlist-incremental-20261119/sqlite-lifecycle.log) |
+| 独立轮播Chromium交互 | 8组通过、零页面错误；1000项加载、跨页排序、节点/键盘焦点、丢回执无重放、中途失败/冲突/显式恢复、1120/520/360/320px | [浏览器结果](../output/playlist-incremental-20261119/browser/results.json) |
+| 显示组与真实关闭入口Chromium回归 | 34组通过；列表保存保持原显示组，关闭等待原保存，输入无效保留窗口；公开属性/镜像/窗口规则回归通过 | [设置回归](../output/playlist-incremental-20261119/display/report.json) |
+| 编辑算法行为 | 5组通过；1000项创建32批、长距离移动单操作、整表替换容量边界、重复条目及30轮混合增删移动、元数据重开 | [编辑行为](../output/playlist-incremental-20261119/editor-behavior.log) |
+| 前端默认聚合 | 502文件语法与87步通过，API/ADR/资源/350个脚本登记通过 | [前端聚合](../output/playlist-incremental-20261119/frontend-final.log) |
+| Full/native all-targets | Rust 1.88，locked/offline构建检查通过，既有5条原生警告和3条测试警告保留 | [构建](../output/playlist-incremental-20261119/full-native-final.log) |
+
+源码与执行身份见[证据索引](../output/playlist-incremental-20261119/verification.json)。浏览器使用实际客户端脚本与隔离管理回执，数据库、迁移及服务是原Rust/SQLite执行；这些结果不等于本轮真实WebView2桌面播放、多设备、千种不同媒体包性能或8小时长稳验收。默认并发测试隔离问题仍开放。新迁移只在隔离测试库运行，未打开或迁移用户的真实作品库。完整A01–A10、第三方改编、生产OIDC/独立Signer和G3-S保持原未完成范围。
+
+## 2026-11-19 组合图层分组与顺序编辑
+
+本轮从 `feat/zcode-design-completion/62d2b8b` 继续，补齐组合编辑器的层级列表、父组选择、2D/3D 组创建、同组/根层排序和效果执行顺序。结构编辑进入原撤销/重做、自动保存与不可变版本流程；位置示意继承父组变换和可见性，拖动使用父组局部坐标。用法和合同见[作品说明](wallpaper-works-playlists.md#组合图层分组与顺序2026-11-19-增量)。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| 原生结构编辑、保存/重开与不可变包 | 6 项通过；包含原子失败、CAS、空间/循环/八层边界、128 个最长 ID 排序信封 | [结构测试](../output/composition-hierarchy-20261119/native-structure-r3.log) |
+| 原生完整库，Rust 1.88、`--test-threads=1` | 982 通过、0 失败、2 项设备测试按原设置忽略 | [完整回归](../output/composition-hierarchy-20261119/native-library-final.log) |
+| Chromium 图层与顺序编辑 | 9 组通过、零页面错误；分组、父组拖动、撤销/重开、焦点、未知回执、冲突与 1120/520/360/320px | [界面结果](../output/composition-hierarchy-20261119/browser/results.json) |
+| 原组合编辑器回归 | 14 项通过 | [原界面回归](../output/composition-hierarchy-20261119/browser-composition-ui-final.log) |
+| 实际 Rust IR、已发布 bundle、SwiftShader 像素/媒体/字体 | 66 项通过；嵌套半透明组排序像素符合预期，沿用同一个 renderer | [实际渲染](../output/composition-hierarchy-20261119/renderer-r2/evidence.json) |
+| 前端默认检查 | 500 文件语法、86 步通过；包含 API 216 条、ADR 418 项与脚本登记 | [聚合检查](../output/composition-hierarchy-20261119/frontend-final.log) |
+| 独立 Full/native，Rust 1.88 all-targets | `cargo check --locked --offline` 通过 | [构建检查](../output/composition-hierarchy-20261119/full-native-final.log) |
+
+完整库测试后的改动只涉及 App 无关格式恢复与渲染夹具的 `CHROME_PATH` 启动配置；事务、结构算法和其测试源码保持冻结摘要。随后 Full/native 与实际 renderer 以更新后的候选重新验证，源码身份和执行读回汇总于[本轮证据](../output/composition-hierarchy-20261119/verification.json)。原生编译仍有 5 条既有警告，测试构建有 3 条。渲染夹具日志中的故意无效 shader 属于原拒绝测试，不代表正向渲染失败。
+
+这些结果覆盖本机结构编辑切片，包含真实 SQLite/包/编译器和 Chromium fixture；没有据此认领生产 WebView2、多设备、长稳、完整 P2/P3/A01–A10 或 G3-S 资格。原默认并发测试隔离限制和下方各次历史证据范围继续保留。
+
+## 2026-11-19 原生社区作者与举报客户端
+
+本轮以 `feat/zcode-design-completion/6fae95b` 为起点，补齐独立设置社区页的
+“我的创作”：本地固定版本核对、作品认领、上传、单独送审和本人状态查询。
+公开作品的举报绑定已签名确切版本，提交者可按原编号查询处理结果。确认绑定
+当前设置窗口、来源和账号，五分钟后失效；包使用原 AssetStore 固定只读句柄与
+完整 SHA-256。Hub 新增本人账号、未送审上传分页和原操作查询，读取原账本，
+没有新增业务状态存储。源码、执行命令、日志和提交读回汇总于
+[本轮证据](../output/design-gap-completion-20261119/verification.json)。
+
+上传完成与送审保持两个用户动作。成功上传可从 Hub 原 uploads 账本恢复；
+已经发送但回执丢失、损坏或操作取消时保留原请求定位，只查询原 UUID。
+重新继续 reserved 上传仍需核对同一包并由用户明确操作。页面持久信息仅含
+来源、账号及恢复定位，不含 token、文件路径、举报正文或同意票据。
+
+| 检查范围 | 已执行结果 | 证据 |
+| --- | --- | --- |
+| 原生完整库，Rust 1.88、`--test-threads=1` | 976 通过、0 失败、2 项设备测试忽略 | [完整回归](../output/design-gap-completion-20261119/native-library-author-final-r3.log) |
+| Hub、Signer、共享壁纸及其集成/doctest | 15 + 17 + 103 + 275 + 7，共 417 通过 | [完整套件](../output/design-gap-completion-20261119/contracts-author-final.log) |
+| 原生作者传输与固定包 | 5 项真实回环 HTTP 测试通过，覆盖固定文件流、认证、取消/账号换代、坏回执和禁止重定向/重放 | [传输测试](../output/design-gap-completion-20261119/native-author-transport-r2.log) |
+| 引用删除夹具的启动维护等待 | 同一原用例在 10 个独立进程全部通过 | [重复执行结果](../output/design-gap-completion-20261119/reference-fixture-loop-results.json) |
+| Chromium 作者/举报流程 | 8 组通过，零页面错误和对话框；包含重载、未知结果查询、账号/来源隔离、过期、键盘和 1120/520/360/320px 布局 | [浏览器结果](../output/design-gap-completion-20261119/browser-author-resume-r3.log) |
+| 前端默认检查 | 499 文件语法、86 步通过，0 失败 | [聚合检查](../output/design-gap-completion-20261119/frontend-author-final.log) |
+| 独立 Full/native，Rust 1.88 all-targets | `cargo check` 通过 | [构建检查](../output/design-gap-completion-20261119/full-native-author-check-r3.log) |
+| API、ADR、脚本登记及限定格式 | API 216 条、ADR 418 项和脚本登记通过；任务源码与改动片段格式核对通过 | [证据索引](../output/design-gap-completion-20261119/verification.json) |
+
+原生全库结果限定于单线程；默认并发运行仍受全局根目录测试状态与 SQLx
+准入相互干扰，原历史通过基线同样使用单线程。三处夹具前置条件已修订：
+会话在实际 SQL 等待处过期；重开循环在每次真实只读检查之后等待原池退出，
+避免累积自身未关闭的费用；引用删除用例等待库初始化的候选维护实际完成，
+再核对原引用和版本绑定。后者曾与原维护争用内容写门并得到合法的
+`budget_busy`，现在用仅测试构建存在的完成观察消除该用例的前置竞争。
+这些修订不重试删除请求、不禁用维护；产品预算、准入、内容写门与退出守卫
+保持。本轮不认领默认并发测试隔离已经修复。
+
+这些结果覆盖隔离 SQLite、原生测试与 Chromium fixture，不替代真实 OIDC、
+WebView2 对生产 Hub 的完整上传旅程、独立 OS 主体/Signer IPC、生产签名、
+断电恢复、部署或另一台客户端验收。Full 原生库仍有 5 条编译警告，原生测试
+有 3 条，Signer 有 2 条。完整 P3/A01–A10 与 G3-S 仍开放，社区 Web 上传和
+执行保持关闭。下方历史记录只覆盖各自候选和当时范围。
+
 ## 2026-11-19 社区安全与恢复专用验证
 
 本轮以 `master/51979a5` 为起点，沿原批准设计新增 58 项行为测试：Signer 17 项、

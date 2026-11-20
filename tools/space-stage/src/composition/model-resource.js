@@ -11,6 +11,7 @@ import {
 } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+import { runtimeAssetUrl } from '../runtime-assets.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
 export const STATIC_MODEL_PROFILE = 'static-core-pbr-v1';
@@ -1458,14 +1459,14 @@ async function parseTexturedProfile(buffer, expectedFacts, { signal, admissions,
   const manager = new LoadingManager();
   manager.setURLModifier(url => {
     if (/^(blob:|data:)/.test(url)) return url;
+    if (ktx2 && ['basis_transcoder.js', 'basis_transcoder.wasm'].some(file => url === runtimeAssetUrl(file))) return url;
     const mapped = textureUrl(url);
     if (!mapped) throw unavailable('URI-unsupported');
     return mapped;
   });
   const loader = new GLTFLoader(manager); let parser, tracker, completed, facts, clips = [];
   if (ktx2) {
-    // Direct RGBA8 KTX2 uses the loader's raw path. Basis transcode assets are
-    // not shipped; supercompressed containers are rejected by profile facts.
+    // RGBA8 uses the raw path; Basis loads only the two pinned runtime assets.
     const ktx2Loader = new KTX2Loader(manager);
     ktx2Loader.detectSupport(renderer);
     loader.setKTX2Loader(ktx2Loader);

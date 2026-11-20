@@ -325,6 +325,7 @@ pub(crate) async fn external_catalog(
                 hertz_wallpaper::Content::Builtin { .. } => "builtin",
                 hertz_wallpaper::Content::Image { .. } => "image",
                 hertz_wallpaper::Content::Video { .. } => "video",
+                hertz_wallpaper::Content::Composition { .. } => "composition",
                 _ => continue,
             };
             let source = Arc::clone(&jobs);
@@ -599,6 +600,30 @@ fn verify_installed_budget(
         hertz_wallpaper::Content::Builtin { .. } => {
             return type_budget_eligible(&package.manifest, context)
         }
+        hertz_wallpaper::Content::Composition { .. } => {
+            let Some(group) = context
+                .configuration
+                .groups
+                .iter()
+                .find(|group| group.id == context.binding.target_group_id)
+            else {
+                return false;
+            };
+            let Ok(facts) = super::composition_plan::inspect_layout(
+                jobs.assets(),
+                &package,
+                &serde_json::Map::new(),
+            ) else {
+                return false;
+            };
+            if group.mode == config::LayoutMode::Mirror
+                && (!facts.reconstructable
+                    || facts.decoders.saturating_mul(group.displays.len() as u32) > 2)
+            {
+                return false;
+            }
+            return type_budget_eligible(&package.manifest, context);
+        }
         _ => return false,
     };
     let Some(descriptor) = package
@@ -703,6 +728,9 @@ fn type_budget_eligible(manifest: &hertz_wallpaper::Manifest, context: &CatalogC
                 state_version,
                 params,
             } => {
+                if group.mode == config::LayoutMode::Mirror {
+                    return false;
+                }
                 let mut params = params.clone();
                 if config::normalize_builtin(scene_id, *state_version, &mut params).is_err() {
                     return false;
@@ -745,7 +773,25 @@ fn type_budget_eligible(manifest: &hertz_wallpaper::Manifest, context: &CatalogC
                     prepare_tasks: 0,
                 }
             }
-            // Composition costs need the P2 exact prepared document/asset envelope;
+            hertz_wallpaper::Content::Composition { .. } => budget::BudgetRequest {
+                owner: budget::OwnerKind::Desktop,
+                session: "ai-catalog".into(),
+                generation: 1,
+                task_id: "composition-presentation".into(),
+                targets: 1,
+                contexts: 1,
+                decoders: 0,
+                transcode_slots: 0,
+                decode_pixel_rate: 0,
+                output_pixel_rate: 0,
+                texture_upload_bytes_per_second: 0,
+                cpu_bytes: 0,
+                prepare_cpu_bytes: 0,
+                asset_cpu_bytes: 0,
+                gpu_bytes: 0,
+                prepare_tasks: 0,
+            },
+            // Exact composition costs remain with its original prepared envelope;
             // Web is disabled by the original G3-S product qualification gate.
             _ => return false,
         };

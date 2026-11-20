@@ -231,8 +231,8 @@ pub(crate) async fn stored(
         report.push(
             "workDraftResource",
             &id,
-            "组合草稿",
-            "组合草稿保留此固定资源版本",
+            "作品草稿",
+            "作品草稿保留此素材或派生来源版本",
         )
     }
 

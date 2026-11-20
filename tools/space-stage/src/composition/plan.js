@@ -1,11 +1,28 @@
 // SPDX-License-Identifier: MIT
 // This accepts the native compiler/planner projection, never author JSON.
 import { resourceKey } from '../resources/pool.js';
-import { validateBinding, validateTrack } from './animation.js';
+import { THREE_DEFAULT_RESOURCES } from '../render-context.js';
+import { timelineWorkspaceBytes, validateBinding, validateTrack } from './animation.js';
 import { planBuiltin } from './builtin.js';
 const FONT_ADAPTER_VERSION = 'sfnt-ttf-parser-0.25.1-static-v3';
 const RASTER_ADAPTER_VERSION = 'text-raster-v2';
 const SVG_ADAPTER_VERSION = 'svg-static-resvg-049-usvg-049-v1';
+function modelPresentation(ir, values, nodeIndex, facts) {
+  let opacity = 1, dynamic = false;
+  for (let index = nodeIndex; index >= 0; index = ir.nodes[index].parentIndex) {
+    const slot = ir.nodes[index].propertySlots.opacity?.[0];
+    opacity *= values.numeric[slot] ?? 1;
+    dynamic ||= [...ir.tracks, ...ir.bindings].some(item => item.targetSlot === slot);
+  }
+  const materials = facts.materials || [];
+  const doubleSided = materials.some(material => material.doubleSided);
+  const transparent = dynamic || opacity < 1 || materials.some(material =>
+    material.alphaMode === 'BLEND' || material.baseColorFactor?.[3] < 1);
+  // Transparent DoubleSide uses two Three draws and front/back programs.
+  // The source facts stay exact; this is a conservative per-target ceiling.
+  return { dynamicOpacity: dynamic, compositionTransparent: dynamic || opacity < 1,
+    passMultiplier: doubleSided && transparent ? 2 : 1 };
+}
 function checkSvg(asset) {
   if (asset.adapterId !== 'prepared-svg-png') return;
   const hashes = asset.contentKey.split(':');
@@ -301,9 +318,6 @@ export function compilePlan(projection, registry = null, identity = null) {
   for (const binding of ir.bindings) {
     const invalid = validateBinding(binding, ir.numericSlots, ir.inputs.length);
     if (invalid) throw new Error(invalid);
-    const slot = ir.numericSlots[binding.targetSlot];
-    if (slot && ir.nodes[slot.nodeIndex]?.space === '3d')
-      throw new Error('composition-adapter-unavailable:binding-3d');
   }
   const bindingParameters = ir.bindings.map(binding => binding.parameters.map(pair => pair[1]));
   for (const property of ir.publicProperties) {
@@ -323,7 +337,6 @@ export function compilePlan(projection, registry = null, identity = null) {
     const node = ir.nodes[slot.nodeIndex];
     if (!node) throw new Error('composition-track-target-invalid');
     if (node.nodeType === 'builtinScene') throw new Error('composition-adapter-unavailable:track-builtin');
-    if (node.space === '3d') throw new Error('composition-adapter-unavailable:track-3d');
     if ((node.nodeType === 'text' && ['width', 'height', 'fontSize', 'lineHeight'].includes(slot.property))
       || (node.nodeType === 'particles' && ['count', 'seed'].includes(slot.property)))
       throw new Error('composition-adapter-unavailable:track-rebuild');
@@ -350,7 +363,7 @@ export function compilePlan(projection, registry = null, identity = null) {
     checkSvg(asset);
     if (asset.kind === 'font') fontCpuBytes(asset);
     if (asset.kind === 'model') checkModel(asset);
-    assets.set(representation, asset);
+    assets.set(representation, { ...asset });
   }
   const uses = finalPublicValues.resourceUses, nodeResources = ir.nodes.map(() => ({}));
   const unique = new Map(), modelUses = new Map();
@@ -374,7 +387,7 @@ export function compilePlan(projection, registry = null, identity = null) {
     if (asset.kind === 'model') {
       if (effectTarget !== null || use.field !== 'asset' || use.usage !== 'model' || node.nodeType !== 'model')
         throw new Error('composition-model-preparation-required');
-      modelUses.set(asset.assetId, (modelUses.get(asset.assetId) || 0) + 1);
+      asset.presentation = modelPresentation(ir, values, targetIndex, asset.modelFacts);
     }
     if (asset.logicalKind === 'vector' && (asset.adapterId !== 'prepared-svg-png' || !['color','sprite'].includes(use.usage)
         || JSON.parse(asset.decodeOptions.svgCanonicalOptions).usage !== use.usage)) throw new Error('composition-svg-preparation-required');
@@ -388,6 +401,7 @@ export function compilePlan(projection, registry = null, identity = null) {
     const decodeOptions = { ...asset.decodeOptions, usage: use.usage, ...(clock ? { clock } : {}) };
     const identity = { contentKey: asset.contentKey, decodeOptions, adapterId: asset.adapterId, adapterVersion: asset.adapterVersion };
     const key = resourceKey(identity,'target-plan');
+    if (asset.kind === 'model') modelUses.set(key, (modelUses.get(key) || 0) + 1);
     const requirement = unique.get(key) || { ...asset, key, identity, usage: use.usage, clock };
     // A node schema mask and a mask effect would compete for the same sampling
     // slot; accept only one source until their composition semantics are fixed.
@@ -408,8 +422,8 @@ export function compilePlan(projection, registry = null, identity = null) {
   }
   const resources = { renderTargetDeclaredBytes: pixels * 8 + (outputGlow ? outputGlow.width * outputGlow.height * 8 : 0),
     textureDeclaredBytes: 0, bufferDeclaredBytes: 92,
-    ownedCpuBytes: 92, decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0,
-    programs: outputGlow ? 4 : 2 };
+    ownedCpuBytes: 92 + timelineWorkspaceBytes(ir), decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0,
+    programs: 2 + (ir.nodes.some(node => node.nodeType === 'particles') ? 1 : 0) + (outputGlow ? 2 : 0) };
   if (graphic3d) resources.renderTargetDeclaredBytes += pixels * 4;
   const primitives = {drawCalls:1,points:0,triangles:2};
   if (outputGlow) { primitives.drawCalls += 3; primitives.triangles += 6; }
@@ -428,13 +442,14 @@ export function compilePlan(projection, registry = null, identity = null) {
       const textured = facts.profile === MODEL_TEXTURED_PROFILE || facts.profile === MODEL_KTX2_PROFILE;
       resources.bufferDeclaredBytes += facts.resources.gpuBufferBytes;
       resources.ownedCpuBytes += modelConstructionBytes(facts) + facts.resources.cpuBackingBytes;
-      resources.programs += Math.max(1, textured ? facts.resources.programCount : 1);
+      const passes = requirement.presentation.passMultiplier;
+      resources.programs += Math.max(1, textured ? facts.resources.programCount : 1) * passes;
       if (textured) {
         resources.textureDeclaredBytes += requirement.textureUploadBytes;
         resources.decodeReservedBytes += requirement.textureUploadBytes;
       }
-      primitives.drawCalls += facts.scene.drawCalls;
-      primitives.triangles += facts.scene.triangles;
+      primitives.drawCalls += facts.scene.drawCalls * passes;
+      primitives.triangles += facts.scene.triangles * passes;
       continue;
     }
     const bytes = requirement.width * requirement.height * 4;
@@ -476,6 +491,9 @@ export function compilePlan(projection, registry = null, identity = null) {
       result.materialBytes = Math.max(1, result.resources.asset.modelFacts.resources.materialCount || 1) * 1024;
       resources.ownedCpuBytes += result.materialBytes;
       result.model = true;
+      // A continuously fading model uses one transparent program variant.
+      // Include ancestor opacity: a group fade changes each child's material.
+      result.dynamicOpacity = result.resources.asset.presentation.dynamicOpacity;
     }
     if (node.nodeType === 'text') {
       if (!result.resources.fontAsset) throw new Error('composition-font-preparation-required');
@@ -488,7 +506,6 @@ export function compilePlan(projection, registry = null, identity = null) {
       if (!Number.isSafeInteger(result.count) || result.count < 0 || result.count > 65536) throw new Error('composition-particle-count-invalid');
       resources.bufferDeclaredBytes += result.count * 20; resources.ownedCpuBytes += result.count * 20;
       primitives.drawCalls++;primitives.points+=result.count;
-      resources.programs = Math.max(resources.programs,builtin?7:3);
     }
     return result;
   });
@@ -544,13 +561,15 @@ export function compilePlan(projection, registry = null, identity = null) {
   if (builtin) {
     if (primitives.drawCalls>builtin.profile.drawCalls || primitives.points>builtin.profile.particles
         || primitives.triangles>builtin.profile.triangles) throw new Error('composition-builtin-primitive-budget');
-    const gpu=pixels*20+resources.textureDeclaredBytes+resources.bufferDeclaredBytes
+    const gpu=pixels*8+resources.renderTargetDeclaredBytes+resources.textureDeclaredBytes+THREE_DEFAULT_RESOURCES.textureDeclaredBytes+resources.bufferDeclaredBytes
       + [...unique.values()].filter(value=>value.kind==='video').reduce((sum,value)=>sum+value.width*value.height*4,0)+96;
-    if (gpu>builtin.profile.memoryBytes || resources.ownedCpuBytes+resources.decodeReservedBytes>builtin.profile.memoryBytes)
+    if (gpu>builtin.profile.memoryBytes || resources.ownedCpuBytes+THREE_DEFAULT_RESOURCES.ownedCpuBytes+resources.decodeReservedBytes>builtin.profile.memoryBytes)
       throw new Error('composition-builtin-complete-memory-budget');
     const limits=projection.pageLimits;
     for (const key of ['bufferDeclaredBytes','ownedCpuBytes','textureDeclaredBytes','decodeReservedBytes','decoderLeases','programs','canvases'])
-      if (!limits || limits[key] !== resources[key]) throw new Error('composition-builtin-page-projection-mismatch:'+key);
+      // The shared context already owns its defaults. Native page limits cover
+      // the whole renderer; scene preflight requests only the new scene work.
+      if (!limits || limits[key] !== resources[key]+(THREE_DEFAULT_RESOURCES[key] || 0)) throw new Error('composition-builtin-page-projection-mismatch:'+key);
     if (limits.renderTargetDeclaredBytes !== resources.renderTargetDeclaredBytes+pixels*8
         || limits.drawingBufferPixels !== resources.drawingBufferPixels+pixels || limits.gpuContexts !== 1)
       throw new Error('composition-builtin-page-projection-mismatch:output');

@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 折跃隧道：真实纵深光轨 + 环形闸门 + 灭点耀斑；指针弯曲隧道轴，点击/长按触发折跃。
 import { basicInstance, own, qualityDensity, root, seed } from './factories.js';
@@ -84,6 +86,7 @@ export function createWarpTunnel(ctx) {
     uSize: { value: 1 }, uPixel: { value: 1 }, uHeight: { value: 720 }, uOpacity: { value: .9 },
     uColorA: { value: new T.Color(0x64e8ff) }, uColorB: { value: new T.Color(0xc07cff) }, uColorC: { value: new T.Color(0xffd39a) } };
 
+  declaredArrayPayload(ctx.scope, SEGMENTS * 6 * 9, 'Warp streak numeric scratch and attributes', 4, 1);
   const positions = [], lanes = [], radii = [], bases = [], ends = [], alphas = [], streaks = [];
   for (let i = 0; i < SEGMENTS; i++) {
     const lane = (i % 96) / 96 * TAU + (seed(i, 1) - .5) * .14, radius = 1.05 + Math.pow(seed(i, 2), .6) * 3.2, base = seed(i, 3), s = seed(i, 4);
@@ -106,18 +109,20 @@ export function createWarpTunnel(ctx) {
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   streaksMesh.frustumCulled = false; world.add(streaksMesh);
 
-  const shell = new T.Mesh(own(ctx, new T.CylinderGeometry(4.42, 4.42, 64, 48, 1, true)), own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: shellVertex, fragmentShader: shellFragment,
+  const shell = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'CylinderGeometry', [4.42, 4.42, 64, 48, 1, true])), own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: shellVertex, fragmentShader: shellFragment,
     side: T.BackSide, transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   shell.rotation.x = Math.PI / 2; shell.position.z = -30; world.add(shell);
 
-  const ringGeometry = own(ctx, new T.TorusGeometry(3.2, .012, 4, 96));
+  const ringGeometry = own(ctx, constructedGeometry(T, ctx.scope, 'TorusGeometry', [3.2, .012, 4, 96]));
   const ringMaterial = own(ctx, new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: .55, depthWrite: false, blending: T.AdditiveBlending }));
+  declaredArrayPayload(ctx.scope, RINGS * 19, 'Warp instance matrix and color backing');
   const gates = new T.InstancedMesh(ringGeometry, ringMaterial, RINGS); gates.frustumCulled = false; world.add(gates);
   const ringObject = new T.Object3D(), ringColor = new T.Color();
   const ringColors = [0x6fe9ff, 0xb78bff, 0xffc89c];
   for (let i = 0; i < RINGS; i++) { ringColor.set(ringColors[i % ringColors.length]); gates.setColorAt(i, ringColor); }
   if (gates.instanceColor) gates.instanceColor.needsUpdate = true;
 
+  declaredArrayPayload(ctx.scope, DUST * 7, 'Warp dust numeric scratch and attributes', 4, 1);
   const dustPositions = [], dustAngles = [], dustRadii = [], dustBases = [], dustSeeds = [];
   for (let i = 0; i < DUST; i++) {
     dustPositions.push(0, 0, 0); dustAngles.push(seed(i, 5) * TAU); dustRadii.push(.6 + seed(i, 6) * 3.4);
@@ -197,3 +202,6 @@ export function createWarpTunnel(ctx) {
     stats: () => ({ particles: dustGeometry.drawRange.count, lineVertices: streakGeometry.drawRange.count, drawCalls: 8 })
   });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createWarpTunnel.resourcePlan = () => sourcePlan(16).array(SEGMENTS*6*9,4,1).array(RINGS*19).array(DUST*7,4,1).geometry('CylinderGeometry',[4.42,4.42,64,48,1,true]).geometry('TorusGeometry',[3.2,.012,4,96]).glows(5).shock(6).result();

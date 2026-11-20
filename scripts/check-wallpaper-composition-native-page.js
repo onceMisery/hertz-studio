@@ -3,6 +3,7 @@
 // native GlAdmission. Browser routing proves page integration, not OS eligibility.
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const { runtimePage } = require('./stage-runtime-fixture');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..'),output=path.join(root,'output/a04-p2-20261108/native-composition');
 const read=p=>fs.readFileSync(path.join(root,p),'utf8');
@@ -22,8 +23,6 @@ function routeMovie(route){
 }
 let html=read('crates/hertz-desktop/assets/wallpaper-scene.html')
   .replace('__GL_BUDGET__',()=>read('plugin/ui/stage-resource-budget.js')+'\n'+read('crates/hertz-desktop/assets/wallpaper-gl-budget.js'))
-  .replace('__RUNTIME__',()=>read('plugin/ui/vendor/stage-runtime.js'))
-  .replace('__SHIM__',()=>read('plugin/ui/vendor/zodiac-stage.js'))
   .replace('__SCENE__',()=>read('crates/hertz-desktop/assets/wallpaper-scene.js'));
 const diagnostic=process.env.COMPOSITION_BOOTSTRAP_DIAGNOSTIC==='1';
 if(diagnostic){
@@ -36,7 +35,7 @@ if(diagnostic){
   // The headless browser uses this machine's actual rAF cadence. Bind the copied
   // fixture's scheduler metadata to it; target, files and native resource caps
   // stay as admitted. A 60Hz default on a 165Hz browser incorrectly runs at 41fps.
-  const cadencePage=await browser.newPage();
+  const cadencePage=await runtimePage(browser, );
   const cadence=await cadencePage.evaluate(()=>new Promise(resolve=>{
     const intervals=[];let previous=null;
     function sample(now){if(previous!==null)intervals.push(now-previous);previous=now;
@@ -49,7 +48,7 @@ if(diagnostic){
   const bindCadence=source=>source.replace(/"refreshHz":\d+(?:\.\d+)?/,()=>`"refreshHz":${refreshHz}`)
     .replace(/"frameDivisor":\d+/,()=>`"frameDivisor":${Math.ceil(refreshHz/15)}`);
   init=bindCadence(init);
-  const page=await browser.newPage({viewport:{width:64,height:64}}),errors=[];
+  const page=await runtimePage(browser, {viewport:{width:64,height:64}}),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   page.on('console',message=>{if(message.type()==='error'){errors.push(message.text());console.error('browser:',message.text());}});
   await page.addInitScript(init+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -144,7 +143,7 @@ if(diagnostic){
   for(const name of ['contain','cover','stretch']){
     const directory=path.join(output,name),fitProjection=JSON.parse(fs.readFileSync(path.join(directory,'projection.json'),'utf8'));
     const fitUri=fs.readFileSync(path.join(directory,'uri.txt'),'utf8'),fitInit=bindCadence(fs.readFileSync(path.join(directory,'native-init.js'),'utf8'));
-    const fitPage=await browser.newPage({viewport:{width:64,height:128}}),fitErrors=[];
+    const fitPage=await runtimePage(browser, {viewport:{width:64,height:128}}),fitErrors=[];
     fitPage.on('pageerror',error=>fitErrors.push(error.message));
     fitPage.on('console',message=>{if(message.type()==='error')fitErrors.push(message.text());});
     await fitPage.addInitScript(fitInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -181,7 +180,7 @@ if(diagnostic){
     const glowProjection=JSON.parse(fs.readFileSync(path.join(glowDir,'projection.json'),'utf8'));
     const glowUri=fs.readFileSync(path.join(glowDir,'uri.txt'),'utf8');
     const glowInit=bindCadence(fs.readFileSync(path.join(glowDir,'native-init.js'),'utf8'));
-    const glowPage=await browser.newPage({viewport:{width:64,height:64}}),glowErrors=[];
+    const glowPage=await runtimePage(browser, {viewport:{width:64,height:64}}),glowErrors=[];
     glowPage.on('pageerror',error=>glowErrors.push(error.message));
     glowPage.on('console',message=>{if(message.type()==='error')glowErrors.push(message.text());});
     await glowPage.addInitScript(glowInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -215,7 +214,7 @@ if(diagnostic){
     const tracksProjection=JSON.parse(fs.readFileSync(path.join(tracksDir,'projection.json'),'utf8'));
     const tracksUri=fs.readFileSync(path.join(tracksDir,'uri.txt'),'utf8');
     const tracksInit=bindCadence(fs.readFileSync(path.join(tracksDir,'native-init.js'),'utf8'));
-    const tracksPage=await browser.newPage({viewport:{width:64,height:64}}),tracksErrors=[];
+    const tracksPage=await runtimePage(browser, {viewport:{width:64,height:64}}),tracksErrors=[];
     tracksPage.on('pageerror',error=>tracksErrors.push(error.message));
     tracksPage.on('console',message=>{if(message.type()==='error')tracksErrors.push(message.text());});
     await tracksPage.addInitScript(tracksInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -256,7 +255,7 @@ if(diagnostic){
     const maskUri=fs.readFileSync(path.join(maskDir,'uri.txt'),'utf8');
     const maskInit=bindCadence(fs.readFileSync(path.join(maskDir,'native-init.js'),'utf8'));
     const maskFiles=JSON.parse(fs.readFileSync(path.join(maskDir,'files.json'),'utf8'));
-    const maskPage=await browser.newPage({viewport:{width:64,height:64}}),maskErrors=[];
+    const maskPage=await runtimePage(browser, {viewport:{width:64,height:64}}),maskErrors=[];
     maskPage.on('pageerror',error=>maskErrors.push(error.message));
     maskPage.on('console',message=>{if(message.type()==='error')maskErrors.push(message.text());});
     await maskPage.addInitScript(maskInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -294,7 +293,7 @@ if(diagnostic){
     const modelUri=fs.readFileSync(path.join(modelDir,'uri.txt'),'utf8');
     const modelInit=bindCadence(fs.readFileSync(path.join(modelDir,'native-init.js'),'utf8'));
     const modelFiles=JSON.parse(fs.readFileSync(path.join(modelDir,'files.json'),'utf8'));
-    const modelPage=await browser.newPage({viewport:{width:64,height:64}}),modelErrors=[];
+    const modelPage=await runtimePage(browser, {viewport:{width:64,height:64}}),modelErrors=[];
     modelPage.on('pageerror',error=>modelErrors.push(error.message));
     modelPage.on('console',message=>{if(message.type()==='error')modelErrors.push(message.text());});
     await modelPage.addInitScript(modelInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -340,7 +339,7 @@ if(diagnostic){
     const texturedUri=fs.readFileSync(path.join(texturedModelDir,'uri.txt'),'utf8');
     const texturedInit=bindCadence(fs.readFileSync(path.join(texturedModelDir,'native-init.js'),'utf8'));
     const texturedFiles=JSON.parse(fs.readFileSync(path.join(texturedModelDir,'files.json'),'utf8'));
-    const texturedPage=await browser.newPage({viewport:{width:64,height:64}}),texturedErrors=[];
+    const texturedPage=await runtimePage(browser, {viewport:{width:64,height:64}}),texturedErrors=[];
     texturedPage.on('pageerror',error=>texturedErrors.push(error.message));
     texturedPage.on('console',message=>{if(message.type()==='error')texturedErrors.push(message.text());});
     await texturedPage.addInitScript(texturedInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -385,7 +384,7 @@ if(diagnostic){
     const externalUri=fs.readFileSync(path.join(externalDir,'uri.txt'),'utf8');
     const externalInit=bindCadence(fs.readFileSync(path.join(externalDir,'native-init.js'),'utf8'));
     const externalFiles=JSON.parse(fs.readFileSync(path.join(externalDir,'files.json'),'utf8'));
-    const externalPage=await browser.newPage({viewport:{width:64,height:64}}),externalErrors=[];
+    const externalPage=await runtimePage(browser, {viewport:{width:64,height:64}}),externalErrors=[];
     let textureRequests=0;
     externalPage.on('pageerror',error=>externalErrors.push(error.message));
     externalPage.on('console',message=>{if(message.type()==='error')externalErrors.push(message.text());});
@@ -434,7 +433,7 @@ if(diagnostic){
     const ktx2Uri=fs.readFileSync(path.join(ktx2Dir,'uri.txt'),'utf8');
     const ktx2Init=bindCadence(fs.readFileSync(path.join(ktx2Dir,'native-init.js'),'utf8'));
     const ktx2Files=JSON.parse(fs.readFileSync(path.join(ktx2Dir,'files.json'),'utf8'));
-    const ktx2Page=await browser.newPage({viewport:{width:64,height:64}}),ktx2Errors=[];
+    const ktx2Page=await runtimePage(browser, {viewport:{width:64,height:64}}),ktx2Errors=[];
     ktx2Page.on('pageerror',error=>ktx2Errors.push(error.message));
     ktx2Page.on('console',message=>{if(message.type()==='error'){ktx2Errors.push(message.text());console.error('browser:',message.text());}});
     await ktx2Page.addInitScript(ktx2Init+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -480,7 +479,7 @@ if(diagnostic){
     const basisUri=fs.readFileSync(path.join(basisDir,'uri.txt'),'utf8');
     const basisInit=bindCadence(fs.readFileSync(path.join(basisDir,'native-init.js'),'utf8'));
     const basisFiles=JSON.parse(fs.readFileSync(path.join(basisDir,'files.json'),'utf8'));
-    const basisPage=await browser.newPage({viewport:{width:64,height:64}}),basisErrors=[];
+    const basisPage=await runtimePage(browser, {viewport:{width:64,height:64}}),basisErrors=[];
     basisPage.on('pageerror',error=>basisErrors.push(error.message));
     basisPage.on('console',message=>{if(message.type()==='error'){basisErrors.push(message.text());console.error('browser:',message.text());}});
     await basisPage.addInitScript(basisInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -529,7 +528,7 @@ if(diagnostic){
     const multiUri=fs.readFileSync(path.join(multiDir,'uri.txt'),'utf8');
     const multiInit=bindCadence(fs.readFileSync(path.join(multiDir,'native-init.js'),'utf8'));
     const multiFiles=JSON.parse(fs.readFileSync(path.join(multiDir,'files.json'),'utf8'));
-    const multiPage=await browser.newPage({viewport:{width:64,height:64}}),multiErrors=[];
+    const multiPage=await runtimePage(browser, {viewport:{width:64,height:64}}),multiErrors=[];
     multiPage.on('pageerror',error=>multiErrors.push(error.message));
     multiPage.on('console',message=>{if(message.type()==='error'){multiErrors.push(message.text());console.error('browser:',message.text());}});
     await multiPage.addInitScript(multiInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -581,7 +580,7 @@ if(diagnostic){
     const animatedUri=fs.readFileSync(path.join(animatedDir,'uri.txt'),'utf8');
     const animatedInit=bindCadence(fs.readFileSync(path.join(animatedDir,'native-init.js'),'utf8'));
     const animatedFiles=JSON.parse(fs.readFileSync(path.join(animatedDir,'files.json'),'utf8'));
-    const animatedPage=await browser.newPage({viewport:{width:64,height:64}}),animatedErrors=[];
+    const animatedPage=await runtimePage(browser, {viewport:{width:64,height:64}}),animatedErrors=[];
     animatedPage.on('pageerror',error=>animatedErrors.push(error.message));
     animatedPage.on('console',message=>{if(message.type()==='error'){animatedErrors.push(message.text());console.error('browser:',message.text());}});
     await animatedPage.addInitScript(animatedInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -632,7 +631,7 @@ if(diagnostic){
     const morphUri=fs.readFileSync(path.join(morphDir,'uri.txt'),'utf8');
     const morphInit=bindCadence(fs.readFileSync(path.join(morphDir,'native-init.js'),'utf8'));
     const morphFiles=JSON.parse(fs.readFileSync(path.join(morphDir,'files.json'),'utf8'));
-    const morphPage=await browser.newPage({viewport:{width:64,height:64}}),morphErrors=[];
+    const morphPage=await runtimePage(browser, {viewport:{width:64,height:64}}),morphErrors=[];
     morphPage.on('pageerror',error=>morphErrors.push(error.message));
     morphPage.on('console',message=>{if(message.type()==='error'){morphErrors.push(message.text());console.error('browser:',message.text());}});
     await morphPage.addInitScript(morphInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -691,7 +690,7 @@ if(diagnostic){
     const skinUri=fs.readFileSync(path.join(skinDir,'uri.txt'),'utf8');
     const skinInit=bindCadence(fs.readFileSync(path.join(skinDir,'native-init.js'),'utf8'));
     const skinFiles=JSON.parse(fs.readFileSync(path.join(skinDir,'files.json'),'utf8'));
-    const skinPage=await browser.newPage({viewport:{width:64,height:64}}),skinErrors=[];
+    const skinPage=await runtimePage(browser, {viewport:{width:64,height:64}}),skinErrors=[];
     skinPage.on('pageerror',error=>skinErrors.push(error.message));
     skinPage.on('console',message=>{if(message.type()==='error'){skinErrors.push(message.text());console.error('browser:',message.text());}});
     await skinPage.addInitScript(skinInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
@@ -747,7 +746,7 @@ if(diagnostic){
     const opacityUri=fs.readFileSync(path.join(opacityDir,'uri.txt'),'utf8');
     const opacityInit=bindCadence(fs.readFileSync(path.join(opacityDir,'native-init.js'),'utf8'));
     const opacityFiles=JSON.parse(fs.readFileSync(path.join(opacityDir,'files.json'),'utf8'));
-    const opacityPage=await browser.newPage({viewport:{width:64,height:64}}),opacityErrors=[];
+    const opacityPage=await runtimePage(browser, {viewport:{width:64,height:64}}),opacityErrors=[];
     opacityPage.on('pageerror',error=>opacityErrors.push(error.message));
     opacityPage.on('console',message=>{if(message.type()==='error'){opacityErrors.push(message.text());console.error('browser:',message.text());}});
     await opacityPage.addInitScript(opacityInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');

@@ -3,6 +3,38 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-stage-review-browser.js",
+      "purpose": "真实 Chromium：壁纸图片不加载运行时、静止停止提交、尺寸/参数/音频/恢复唤醒、原生质量消费、凤凰按需准备和加载取消。"
+    },
+    {
+      "script": "check-coast-tube-resources.mjs",
+      "purpose": "Pinned real Three DynamicTube geometry and frame-vector CPU retention, preallocation refusal and scope disposal; no browser, service or credentials."
+    },
+    {
+      "script": "check-cover-resources-browser.js",
+      "purpose": "Real Chrome common cover ownership, bounded queues, cache invalidation, pending cancellation, mounted playlist refresh and DOM detach. No external service or credentials; uses actual raster decode and a controlled DBX bridge."
+    },
+    {
+      "script": "check-stage-engine-m1-coast-zodiac-browser.js",
+      "purpose": "Real Chrome Stage gate and original Coast/Zodiac scene admission: negative resource budgets, pause/hidden/zero size, explicit context-loss recovery, all quality profiles, repeat exits and switches. Software GL is not device qualification."
+    },
+    {
+      "script": "check-stage-authoring.cjs",
+      "purpose": "Offline parameter-template pipeline schema/range/license/source-lock/process-boundary and pending human-admission checks; --bundle verifies actual low/medium/high/DPR2 rendering and resource-retirement evidence. No provider or credentials; strict OS isolation, human and target-device approval remain separate gates."
+    },
+    {
+      "script": "check-wallpaper-generation-pause-browser.js",
+      "purpose": "Production native AI panel in isolated Chrome with fixture transport: default local-generation pause consent, opt-out, keyboard/focus, cancellation/disconnect uncertainty, exact request resume and narrow layouts. Requires PLAYWRIGHT_MODULE and Chrome; no provider tokens/network. Native pause/controller tests remain separate."
+    },
+    {
+      "script": "check-wallpaper-licensed-fork-browser.js",
+      "purpose": "Production work library/editor with isolated native receipts: explicit licensed copy action, source/target identity, denied license, attribution, editable save and narrow-screen keyboard interaction. Requires PLAYWRIGHT_MODULE and Chrome; actual package export/import/migration is covered by Rust."
+    },
+    {
+      "script": "check-wallpaper-community-author-browser.js",
+      "purpose": "Actual Chromium interaction with shipped standalone settings/community author/report controllers and isolated native receipts: native form/keyboard validation, exact upload and submit, successful and unknown reload recovery, original UUID/source/account isolation, reauthentication without discarding pending author metadata, no automatic write replay, explicit same-upload resume, late receipt and five-minute expiry, text injection and 1120/520/360/320px layout. Requires PLAYWRIGHT_MODULE and installed Chromium (PLAYWRIGHT_EXECUTABLE optional). Hub and native package/auth state are covered by Rust tests; this fixture does not qualify production HTTPS, OIDC, WebView2 or Signer deployment."
+    },
+    {
       "script": "check-wallpaper-composition-ui-browser.js",
       "purpose": "Real browser interaction checks for the shipped AI composition material selection and original work editor: bounded selected metadata, named controls, preparing/failure/retry states, paginated nodes/effects/tracks/bindings and single-key edits without oversized envelopes. Requires PLAYWRIGHT_MODULE; uses isolated local fixtures. Native resource preparation, immutable package publication and Windows rendering use check-wallpaper-generation-native.js with HERTZ_GENERATION_COMPOSITION_FIXTURE=1."
     },
@@ -85,6 +117,10 @@
     {
       "script": "check-wallpaper-builtin-native.js",
       "purpose": "Fresh source-bound Windows candidate with real WorkerW/WebView2: immutable native package import, builtin/image/font/video/particles shared output, requested high/30fps to actual low/15fps independent preview, three fits, pause/resume, natural exit/reopen, nonzero predicate refusal preserving current selection, all native allocations draining and same-connection PID-verified natural quit. Requires copied wallpaper-media-probe HERTZ_DESKTOP_BIN, HERTZ_DESKTOP_BUILD_RECEIPT, HERTZ_BUILTIN_NATIVE_OUTPUT and PLAYWRIGHT_MODULE. Serial GUI; existing hosts preserved. Other monitor/GPU, native/editor seek and long stability remain separate."
+    },
+    {
+      "script": "check-wallpaper-renderer-probes.js",
+      "purpose": "Real Chrome fixed renderer workloads with the native CSP: eight Canvas/WebGL/PNG/VP8 pixel and lifecycle rounds, unavailable codec and late-frame cleanup, 25 local network paths. Requires PLAYWRIGHT_MODULE. Ordinary Chrome diagnostics only; use source-bound check-wallpaper-sandbox-native.js --renderer-only for native denial counters, owned loopback controls, AppContainer and strict whole-tree exit."
     },
     {
       "script": "check-wallpaper-sandbox-native.js",
@@ -421,6 +457,10 @@
     {
       "script": "check-creative-scenes-browser.js",
       "purpose": "Real WebGL rendering and transform feedback; no service or music library required."
+    },
+    {
+      "script": "check-creative-payload-resources-browser.js",
+      "purpose": "Real Chrome Creative JSON/share/project payload admission, retained output, stream cancellation, stale/close/file/clipboard/download lifetimes and repeated cleanup."
     },
     {
       "script": "check-creative-share-code-browser.js",
@@ -945,6 +985,14 @@
     {
       "script": "check-stage-media-dbx-video-browser.js",
       "purpose": "Real Chrome MediaSource: DBX stage video lease chunks (1000B short reads) feed an MSE SourceBuffer; the VP8 WebM fixture decodes (64x48, 2s) and a locally recorded MP4/H.264 stream whose avcC codec string is derived from its bytes also decodes (320x240), with exact sequential offsets, no reads after release and unsupported-codec lease release. Uses a fake transport and local media; no service, DBX host or native host is involved. Real DBX/device acceptance remains separate."
+    },
+    {
+      "script": "check-wallpaper-work-layers-browser.js",
+      "purpose": "组合编辑器真实Chromium交互：嵌套图层/同组与根顺序/效果链、2D与3D组创建、原草稿桥保存/撤销/重开/丢回执/冲突、父组变换拖动、8层边界和1120～320px。原生SQLite/包/编译器另由WorkDrafts结构测试验证；不替代设备或生产资格。"
+    },
+    {
+      "script": "check-wallpaper-playlist-browser.js",
+      "purpose": "Chromium checks for the shipped 1000-item wallpaper playlist editor: revision-bound page reads, 32-row DOM, cross-page moves, keyboard focus, bounded partial saves, lost/unknown receipt recovery without write replay, CAS conflict, validation and narrow layout. PLAYWRIGHT_MODULE and CHROME_PATH optional; isolated native API fixture, SQLite/upgrade covered by Rust tests."
     }
   ],
   "retiredLayouts": [

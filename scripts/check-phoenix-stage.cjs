@@ -4,11 +4,15 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { pathToFileURL, fileURLToPath } = require('node:url');
 const { readFileSync } = require('node:fs');
 const { createHash } = require('node:crypto');
 
 const stage = path.resolve(__dirname, '../tools/space-stage');
+// Source modules run without a browser file server in this contract test.
+const nativeFetch = global.fetch;
+global.fetch = url => String(url).startsWith('file:')
+  ? Promise.resolve(new Response(readFileSync(fileURLToPath(url)))) : nativeFetch(url);
 const load = relative => import(pathToFileURL(path.join(stage, relative)).href);
 const ID = 'phoenix-vortex';
 const FPS = 60, DT = 1 / FPS, EPS = 1e-8;
@@ -150,14 +154,14 @@ function timelineContract(timeline) {
   assert.equal(phoenixArt.sourceSha256, sourceHash, 'repack changed artwork with python tools/space-stage/build-phoenix-art.py');
 
   let lifecycles = 0;
-  function fixture(quality = 'low', patch = {}) {
+  async function fixture(quality = 'low', patch = {}) {
     const scope = createScope(), scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(58, 16 / 9, .05, 900);
     camera.position.set(0, 0, 16); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
     // Keep the registered default speed: it defines the normal 36-second performance.
     let params = registry.validateParams(ID, patch, defaults), instance;
     try {
-      instance = definition.create({ THREE, scene, camera, scope, signal: scope.signal,
+      instance = await definition.create({ THREE, scene, camera, scope, signal: scope.signal,
         params, quality: PROFILES[quality], services: {} });
       for (const method of ['update', 'resize', 'setParams', 'setQuality', 'stats', 'dispose']) {
         assert.equal(typeof instance[method], 'function', `scene implements ${method}`);
@@ -208,7 +212,7 @@ function timelineContract(timeline) {
   // Start at each profile, including low -> high, to expose undersized initial pools.
   const initialCounts = {};
   for (const initial of ['low', 'medium', 'high']) {
-    const f = fixture(initial);
+    const f = await fixture(initial);
     try {
       initialCounts[initial] = f.update(0);
       const pool = geometryPool(f.scene), owned = f.scope.stats();
@@ -239,7 +243,7 @@ function timelineContract(timeline) {
     assert.ok(initialCounts.low[key] < initialCounts.medium[key] && initialCounts.medium[key] < initialCounts.high[key], `initial ${key} counts scale with quality`);
   }
 
-  const timed = fixture(), shifted = fixture();
+  const timed = await fixture(), shifted = await fixture();
   try {
     for (let i = 0; i <= 36 * FPS; i++) {
       const ordinary = timed.update(i);
@@ -259,7 +263,7 @@ function timelineContract(timeline) {
 
   // Watch the actual rig through two cycles: departures share its transform,
   // the flock is consumed by the shell, and the same bird grows out of the egg.
-  const continuous = fixture();
+  const continuous = await fixture();
   try {
     const hero = continuous.scene.getObjectByName('phoenix-hero');
     const flock = continuous.scene.getObjectByName('phoenix-swarm');
@@ -278,7 +282,7 @@ function timelineContract(timeline) {
     assert.ok(continuous.scene.getObjectByName('phoenix-star-streaks')?.isLineSegments, 'flight uses real perspective star trails');
     const artwork = uniforms.uArtwork.value;
     assert.equal(skin.material.uniforms.uArtwork.value, artwork, 'hero and fledglings share the same reference artwork');
-    assert.ok(artwork.isDataTexture && artwork.image.width >= 900, 'the first frame has a decoded detailed phoenix without network loading');
+    assert.ok(artwork.isDataTexture && artwork.image.width >= 900, 'the first frame has a decoded detailed phoenix after artwork preparation');
     const alphaAt = (x, y) => artwork.image.data[(y * artwork.image.width + x) * 4 + 3];
     assert.equal(alphaAt(0, 0), 0, 'the artwork has no rectangular image background');
     assert.equal(alphaAt(900, 940), 0, 'the reference watermark area is outside the subject cutout');
@@ -364,7 +368,7 @@ function timelineContract(timeline) {
   } finally { continuous.close(); }
 
   for (const [mode, expected] of Object.entries(states)) {
-    const f = fixture('low', { performance: mode });
+    const f = await fixture('low', { performance: mode });
     try {
       for (let i = 0; i <= 240; i++) f.update(i, { sceneTime: 23 + i / FPS, time: 100 + i / FPS });
       expectPhase(f.stats(), expected, `factory performance=${mode} locks the selected phase`, .05);
@@ -383,7 +387,7 @@ function timelineContract(timeline) {
     rebirth: { flames: false, embers: false, egg: false, ring: true, runes: true }
   };
   for (const mode of Object.keys(states)) {
-    const f = fixture('low', { performance: mode });
+    const f = await fixture('low', { performance: mode });
     try {
       f.update(0);
       const flames = f.scene.getObjectByName('phoenix-flames'), embers = f.scene.getObjectByName('phoenix-embers');
@@ -415,7 +419,7 @@ function timelineContract(timeline) {
     } finally { f.close(); }
   }
 
-  const interactive = fixture('low', { performance: 'swarm' });
+  const interactive = await fixture('low', { performance: 'swarm' });
   try {
     for (let i = 0; i <= 240; i++) interactive.update(i);
     expectPhase(interactive.stats(), states.swarm, 'interaction fixture settles in the flock', .05);
@@ -438,7 +442,7 @@ function timelineContract(timeline) {
     assert.equal(interactive.stats().bursts, beforeClick + 1, 'repeating the click serial cannot release another shockwave');
   } finally { interactive.close(); }
 
-  const hatching = fixture('low', { performance: 'egg' });
+  const hatching = await fixture('low', { performance: 'egg' });
   try {
     for (let i = 0; i <= 240; i++) hatching.update(i);
     expectPhase(hatching.stats(), states.egg, 'hatching fixture settles on the egg', .05);
@@ -451,7 +455,7 @@ function timelineContract(timeline) {
     near(hatching.stats().flash, 0, 'the surge decays back to the resting egg', .03);
   } finally { hatching.close(); }
 
-  const breaking = fixture('low', { performance: 'egg' });
+  const breaking = await fixture('low', { performance: 'egg' });
   try {
     for (let i = 0; i <= 240; i++) breaking.update(i);
     let index = 300;
@@ -471,7 +475,7 @@ function timelineContract(timeline) {
     assert.equal(settled.shards, 0, 'shell shards retire after the burst');
   } finally { breaking.close(); }
 
-  const staticScene = fixture();
+  const staticScene = await fixture();
   try {
     staticScene.update(0, { reduced: true });
     const body = staticScene.scene.getObjectByName('phoenix-hero');
@@ -494,7 +498,7 @@ function timelineContract(timeline) {
     near(staticScene.stats().elapsed, 0, 'editing frozen parameters does not advance the performance clock');
   } finally { staticScene.close(); }
 
-  const wired = fixture();
+  const wired = await fixture();
   try {
     wired.update(0);
     const groups = uniformGroups(wired.scene).filter(uniforms => uniforms.uPointerAmount && uniforms.uBass);
@@ -521,7 +525,7 @@ function timelineContract(timeline) {
     }
   } finally { wired.close(); }
 
-  const repeated = fixture(), single = fixture();
+  const repeated = await fixture(), single = await fixture();
   try {
     near(repeated.update(0).interactionBoost, 0, 'serial zero establishes the click baseline');
     near(single.update(0).interactionBoost, 0, 'control establishes the same click baseline');

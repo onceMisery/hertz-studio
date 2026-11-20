@@ -1144,9 +1144,15 @@
     return selectMedia(spec);
   }
 
+  var coverSourceBorrow = null;
   function setCover(url) {
     var next = url || null;
     if (next === state.coverUrl) return;
+    var nextBorrow = null;
+    try { if (window.HertzCovers && HertzCovers.borrow) nextBorrow = HertzCovers.borrow(next); }
+    catch (_) { next = null; }
+    if (nextBorrow) next = nextBorrow.url;
+    if (coverSourceBorrow) coverSourceBorrow.release(); coverSourceBorrow = nextBorrow;
     cancelPalette(); state.coverUrl = next;
     if (state.spec.type === 'cover') refresh();
   }
@@ -1171,6 +1177,7 @@
     init: init,
     destroy: function () {
       cancelPalette(); clearInterval(coverPoll); coverPoll = 0;
+      if (coverSourceBorrow) coverSourceBorrow.release(); coverSourceBorrow = null; state.coverUrl = null;
       state.palette = null;
       clearMedia(); api.commitSelection(); destroyWall(); clearPoster();
       state.ctx = null;
@@ -1221,7 +1228,12 @@
     },
     setCover: setCover,
     frame: function () { /* 背景层有自己的帧门 */ },
-    values: function () { return JSON.parse(JSON.stringify(state.spec)); },
+    values: function (options) {
+      // Share callers need no copy of URL-bearing media metadata. Projecting
+      // here keeps effective background state with its original owner.
+      if (options && options.shareSafe && state.spec.type === 'media') return { type:'theme' };
+      return JSON.parse(JSON.stringify(state.spec));
+    },
     palette: function () { return palette(); },
     // 供工坊预览与测试：把取色算法单独暴露出来
     extractPalette: extractPalette,
@@ -1250,8 +1262,11 @@
 
   window.Backgrounds = api;
   if (window.addEventListener) {
-    window.addEventListener('pagehide', function () {
+    window.addEventListener('pagehide', function (event) {
       cancelPalette();
+      if (!event.persisted) {
+        if (coverSourceBorrow) coverSourceBorrow.release(); coverSourceBorrow = null; state.coverUrl = null;
+      }
       pageInactive = true; selectionSerial++; rememberPosition();
       clearMedia(true); api.commitSelection();
       if (temporaryApply) releaseTemporaryApply(false);

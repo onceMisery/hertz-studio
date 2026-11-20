@@ -54,19 +54,21 @@ mod settings_presentation;
 mod wallpaper_ai;
 #[path = "wallpaper_apply.rs"]
 mod wallpaper_apply;
-#[path = "wallpaper_community.rs"]
-mod wallpaper_community;
-#[path = "wallpaper_community_updates.rs"]
-mod wallpaper_community_updates;
-#[path = "wallpaper_community_background.rs"]
-mod wallpaper_community_background;
-#[path = "wallpaper_community_security.rs"]
-mod wallpaper_community_security;
 #[path = "wallpaper_audio.rs"]
 mod wallpaper_audio;
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
 #[path = "wallpaper_close_probe.rs"]
 mod wallpaper_close_probe;
+#[path = "wallpaper_community.rs"]
+mod wallpaper_community;
+#[path = "wallpaper_community_author.rs"]
+mod wallpaper_community_author;
+#[path = "wallpaper_community_background.rs"]
+mod wallpaper_community_background;
+#[path = "wallpaper_community_security.rs"]
+mod wallpaper_community_security;
+#[path = "wallpaper_community_updates.rs"]
+mod wallpaper_community_updates;
 #[path = "wallpaper_desktop.rs"]
 mod wallpaper_desktop;
 #[path = "wallpaper_external_requests.rs"]
@@ -148,7 +150,11 @@ pub(crate) enum UserEvent {
         Box<Result<crate::wallpaper::ai::Catalog, crate::wallpaper::jobs::JobError>>,
     ),
     WallpaperManagement(ApiReply, serde_json::Value),
-    WallpaperCommunity(u64,crate::wallpaper::api::Request,Box<wallpaper_community::CommunityEvent>),
+    WallpaperCommunity(
+        u64,
+        crate::wallpaper::api::Request,
+        Box<wallpaper_community::CommunityEvent>,
+    ),
     WallpaperExternal(Box<wallpaper_external_requests::Completion>),
     WorkPreviewReady(
         crate::wallpaper::api::Request,
@@ -427,6 +433,11 @@ impl WallpaperSurface {
         })
     }
 
+    fn dynamic(&self) -> bool {
+        !self.static_poster
+            && self.media_frame_kind() != crate::wallpaper::session::FrameKind::Image
+    }
+
     fn load_media_page(&mut self) {
         self.apply_config(&self.configuration, self.monitor.refresh_hz);
         if let Some(media) = self.session.media() {
@@ -442,7 +453,11 @@ impl WallpaperSurface {
         }
         if let Some(url) = self.session.gl().and_then(|gl| gl.composition_url()) {
             let url = serde_json::to_string(url).expect("native composition URL");
-            self.eval(&format!("window.hertzWallpaper.applyComposition({url});"));
+            let mirror =
+                self.configuration.main().mode == crate::wallpaper::config::LayoutMode::Mirror;
+            self.eval(&format!(
+                "window.hertzWallpaper.applyComposition({url},{mirror});"
+            ));
         }
         self.start(self.configuration.presentation().fps);
         self.frame_wait_since = Some(Instant::now());
@@ -820,6 +835,7 @@ struct App {
     library_delete: Option<String>,
     settings_drafts: crate::wallpaper::settings_drafts::SettingsDrafts,
     wallpaper_ai: crate::wallpaper::ai::NativeAi,
+    ai_generation_paused: bool,
     wallpaper_external: crate::wallpaper::external_requests::NativeExternal,
     wallpaper_community: wallpaper_community::CommunityState,
     settings_generation: u64,
@@ -1179,12 +1195,21 @@ impl App {
         );
         // 页面就绪前不能把 WebView2 隐藏：隐藏会让页面不加载，dom_ready 永远不来。
         if !desktop.page_ready {
+            if self.ai_generation_paused && surface.dynamic() {
+                surface.session.add_pause_reason(
+                    policy::REASON_AI_GENERATION,
+                    PauseScope::AllPresentations,
+                    now,
+                );
+                surface.pause_keep_visible();
+            }
             return;
         }
         let inputs = policy::PolicyInputs {
             enabled: global_ready && wallpaper_enabled,
             wallpaper: &desktop.configuration,
             manual_pause: self.wallpaper_hidden,
+            ai_generation: self.ai_generation_paused && surface.dynamic(),
             fullscreen: desktop.fullscreen_gate.stable(),
             maximized: desktop.maximized_gate.stable(),
             application_rule: desktop.application_gate.stable(),
@@ -1198,6 +1223,7 @@ impl App {
         let reasons = policy::pause_reasons(&inputs);
         for (name, scope) in [
             (policy::REASON_MANUAL_PAUSE, PauseScope::DesktopOnly),
+            (policy::REASON_AI_GENERATION, PauseScope::AllPresentations),
             (policy::REASON_FULLSCREEN, PauseScope::DesktopOnly),
             (policy::REASON_MAXIMIZED, PauseScope::DesktopOnly),
             (policy::REASON_APPLICATION_RULE, PauseScope::DesktopOnly),
@@ -1271,6 +1297,7 @@ impl App {
             return;
         }
         self.last_topology_check = now;
+        self.sync_generation_pause();
         let monitors = native::wallpaper_monitors();
         if let Err(error) = self.reconcile_desktops(&monitors, now) {
             log(&format!("wallpaper topology: {error}"));
@@ -1651,11 +1678,13 @@ impl App {
                         return;
                     }
                     if self.is_mirror_target()
-                        && self
-                            .desktop
-                            .surface
-                            .as_ref()
-                            .is_some_and(|surface| surface.media_frame_kind() == FrameKind::Video)
+                        && self.desktop.surface.as_ref().is_some_and(|surface| {
+                            surface.media_frame_kind() == FrameKind::Video
+                                || surface
+                                    .session
+                                    .gl()
+                                    .is_some_and(|gl| gl.composition_url().is_some())
+                        })
                     {
                         return;
                     }
@@ -2518,8 +2547,13 @@ impl App {
         reply: ApiReply,
         target: &EventLoopWindowTarget<()>,
     ) {
-        if value.get("command").and_then(serde_json::Value::as_str).is_some_and(|command|command.starts_with("wallpaper.community.")) {
-            self.handle_community_management(value,reply,target);return;
+        if value
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| command.starts_with("wallpaper.community."))
+        {
+            self.handle_community_management(value, reply, target);
+            return;
         }
         if value
             .get("command")
@@ -2607,7 +2641,10 @@ impl App {
         };
         let proxy = self.proxy.clone();
         let destination = reply.clone();
-        let changes_playlist = matches!(typed, Some(api::Command::PlaylistSave { .. }));
+        let changes_playlist = matches!(
+            typed,
+            Some(api::Command::PlaylistSave { .. } | api::Command::PlaylistUpdate(_))
+        );
         let deletes_library = matches!(
             typed,
             Some(
@@ -2615,23 +2652,21 @@ impl App {
             )
         );
         let deletion_id = deletes_library.then(|| request.request_id.clone());
-        let playlist_properties = match &typed {
+        let edited_playlist = match &typed {
             Some(api::Command::PlaylistSave {
                 playlist_id: Some(id),
                 ..
-            }) => self.config.playlist_property_overrides(id),
-            _ => vec![],
+            }) => Some(id.as_str()),
+            Some(api::Command::PlaylistUpdate(update)) => Some(update.playlist_id.as_str()),
+            _ => None,
         };
+        let playlist_properties = edited_playlist
+            .map(|id| self.config.playlist_property_overrides(id))
+            .unwrap_or_default();
         if changes_playlist {
             self.playlist_writes += 1;
-            if let Some(api::Command::PlaylistSave {
-                playlist_id: Some(id),
-                ..
-            }) = &typed
-            {
-                if let Some(transaction) = &self.wallpaper_apply {
-                    transaction.cancel_for_playlist(id);
-                }
+            if let (Some(id), Some(transaction)) = (edited_playlist, &self.wallpaper_apply) {
+                transaction.cancel_for_playlist(id);
             }
         }
         if let Err(error) = self.wallpaper_library.submit_with_context(
@@ -3036,6 +3071,7 @@ impl App {
     }
 
     fn send_wallpaper_management(&mut self, reply: ApiReply, mut value: serde_json::Value) {
+        self.sync_generation_pause();
         if value["ok"] == true {
             self.observe_external_generation(&value["result"]);
         }
@@ -4282,9 +4318,7 @@ impl App {
                 ) else {
                     return;
                 };
-                if self.policy.locked
-                    || self.last_update.elapsed() > Duration::from_secs(2)
-                {
+                if self.policy.locked || self.last_update.elapsed() > Duration::from_secs(2) {
                     return;
                 }
                 let Some(track) = snapshot.track.as_ref() else {
@@ -4954,6 +4988,11 @@ impl App {
             enabled: self.wallpaper_target_running(&desktop.configuration),
             wallpaper: &desktop.configuration,
             manual_pause: self.wallpaper_hidden,
+            ai_generation: self.ai_generation_paused
+                && desktop
+                    .surface
+                    .as_ref()
+                    .is_none_or(WallpaperSurface::dynamic),
             fullscreen: desktop.fullscreen_gate.stable(),
             maximized: desktop.maximized_gate.stable(),
             application_rule: desktop.application_gate.stable(),
@@ -6109,6 +6148,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
         ),
         settings_drafts: Default::default(),
         wallpaper_ai: crate::wallpaper::ai::NativeAi::new(),
+        ai_generation_paused: false,
         wallpaper_external: crate::wallpaper::external_requests::NativeExternal::default(),
         wallpaper_community: wallpaper_community::CommunityState::new(),
         settings_generation: 0,
@@ -6833,11 +6873,14 @@ fn profile_options(
     candidate: Option<&Profile>,
 ) -> Vec<serde_json::Value> {
     let mut profiles = Vec::new();
-    for profile in std::iter::once(current.clone()).chain(config
-        .known_profiles()
-        .into_iter()
-        .chain(config::detect_profiles())
-        .chain(candidate.cloned()))
+    for profile in std::iter::once(current.clone())
+        .chain(
+            config
+                .known_profiles()
+                .into_iter()
+                .chain(config::detect_profiles())
+                .chain(candidate.cloned()),
+        )
         .filter(|profile| !config::is_dbx(profile))
     {
         if !profiles
@@ -7305,7 +7348,9 @@ fn settings_html() -> String {
         .replace(
             "__WORKS__",
             &format!(
-                "{}\n{}",
+                "{}\n{}\n{}\n{}",
+                include_str!("../assets/wallpaper-work-structure.js"),
+                include_str!("../assets/wallpaper-work-layers.js"),
                 include_str!("../assets/wallpaper-work-composition.js"),
                 include_str!("../assets/wallpaper-work.js")
             ),
@@ -7313,8 +7358,9 @@ fn settings_html() -> String {
         .replace(
             "__AI_CSS__",
             &format!(
-                "{}\n{}",
+                "{}\n{}\n{}",
                 include_str!("../assets/wallpaper-ai.css"),
+                include_str!("../assets/wallpaper-work-layers.css"),
                 include_str!("../assets/wallpaper-external-requests.css")
             ),
         )
@@ -7328,11 +7374,18 @@ fn settings_html() -> String {
         )
         .replace(
             "__PLAYLIST__",
-            include_str!("../assets/wallpaper-playlist.js"),
+            &format!(
+                "{}\n{}",
+                include_str!("../assets/wallpaper-playlist-editor.js"),
+                include_str!("../assets/wallpaper-playlist.js")
+            ),
         )
         .replace(
             "__COMMUNITY_PANEL__",
-            include_str!("../assets/wallpaper-community.html"),
+            &include_str!("../assets/wallpaper-community.html").replace(
+                "__AUTHOR_PANEL__",
+                include_str!("../assets/wallpaper-community-author.html"),
+            ),
         )
         .replace(
             "__COMMUNITY_CSS__",
@@ -7340,12 +7393,16 @@ fn settings_html() -> String {
         )
         .replace(
             "__COMMUNITY__",
-            &format!("{}\n{}",include_str!("../assets/wallpaper-community-view.js"),include_str!("../assets/wallpaper-community.js")),
+            &format!(
+                "{}\n{}\n{}",
+                include_str!("../assets/wallpaper-community-view.js"),
+                include_str!("../assets/wallpaper-community-author.js"),
+                include_str!("../assets/wallpaper-community.js")
+            ),
         )
 }
 
-/// 壁纸页内联的舞台运行时是 MB 级：NavigateToString 有 ~2 MB 上限，file:// 又收不到
-/// window.ipc，所以整页走自定义协议（wry 会映射到 http://hertz.localhost/）。
+/// 壁纸页与按需运行时走固定自定义协议资源（保留 window.ipc 和本地离线加载）。
 const WALLPAPER_PROTOCOL: &str = "hertz";
 const WALLPAPER_PAGE_PATH: &str = "/wallpaper.html";
 const WALLPAPER_PAGE_URL: &str = "hertz://localhost/wallpaper.html";
@@ -7354,19 +7411,40 @@ fn wallpaper_page_response(
     page: Arc<[u8]>,
 ) -> impl Fn(&str, Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> + Send + Sync + 'static {
     move |_id, request| {
-        // 该 origin 只提供壁纸页本身，其他路径不给内容，避免变成通用文件服务。
-        let page_here = request.uri().path() == WALLPAPER_PAGE_PATH;
-        let mut response = Response::new(if page_here {
-            Cow::Owned(page.to_vec())
-        } else {
-            Cow::Borrowed(&[] as &[u8])
-        });
-        if !page_here {
+        // Only compiled-in resources, never a general filesystem route.
+        let resource: Option<(Cow<'static, [u8]>, &'static str)> = match request.uri().path() {
+            WALLPAPER_PAGE_PATH => Some((Cow::Owned(page.to_vec()), "text/html; charset=utf-8")),
+            "/vendor/stage-runtime.js" => Some((
+                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-runtime.js")),
+                "text/javascript; charset=utf-8",
+            )),
+            "/vendor/stage-assets/basis_transcoder.js" => Some((
+                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-assets/basis_transcoder.js")),
+                "text/javascript; charset=utf-8",
+            )),
+            "/vendor/stage-assets/basis_transcoder.wasm" => Some((
+                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-assets/basis_transcoder.wasm")),
+                "application/wasm",
+            )),
+            "/vendor/stage-assets/phoenix-reference-data.json" => Some((
+                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-assets/phoenix-reference-data.json")),
+                "application/json",
+            )),
+            _ => None,
+        };
+        let found = resource.is_some();
+        let (body, content_type) = resource.unwrap_or((Cow::Borrowed(&[]), "text/plain"));
+        let mut response = Response::new(body);
+        if !found {
             *response.status_mut() = wry::http::StatusCode::NOT_FOUND;
         }
         response.headers_mut().insert(
             header::CONTENT_TYPE,
-            header::HeaderValue::from_static("text/html; charset=utf-8"),
+            header::HeaderValue::from_static(content_type),
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
         );
         response
     }
@@ -7381,14 +7459,6 @@ fn wallpaper_html() -> String {
                 include_str!("../../../plugin/ui/stage-resource-budget.js"),
                 include_str!("../assets/wallpaper-gl-budget.js")
             ),
-        )
-        .replace(
-            "__RUNTIME__",
-            include_str!("../../../plugin/ui/vendor/stage-runtime.js"),
-        )
-        .replace(
-            "__SHIM__",
-            include_str!("../../../plugin/ui/vendor/zodiac-stage.js"),
         )
         .replace("__SCENE__", include_str!("../assets/wallpaper-scene.js"))
 }
@@ -7943,6 +8013,35 @@ fn init_log() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn wallpaper_runtime_assets_are_lazy_and_routes_are_closed() {
+        let html = wallpaper_html();
+        assert!(!html.contains("Generated by node tools/build-stages.mjs"));
+        assert!(!html.contains("__RUNTIME__"));
+        assert!(html.len() < 150_000);
+        let serve = wallpaper_page_response(Arc::from(html.into_bytes()));
+        for (path, mime) in [
+            ("/wallpaper.html", "text/html; charset=utf-8"),
+            ("/vendor/stage-runtime.js", "text/javascript; charset=utf-8"),
+            ("/vendor/stage-assets/basis_transcoder.js", "text/javascript; charset=utf-8"),
+            ("/vendor/stage-assets/basis_transcoder.wasm", "application/wasm"),
+            ("/vendor/stage-assets/phoenix-reference-data.json", "application/json"),
+        ] {
+            let response = serve("test", Request::builder().uri(path).body(Vec::new()).unwrap());
+            assert_eq!(response.status(), wry::http::StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
+            assert!(!response.body().is_empty());
+            if path.ends_with(".wasm") {
+                assert_eq!(&response.body()[..4], b"\0asm");
+            }
+        }
+        for path in ["/vendor/other.js", "/vendor/stage-assets/../secret", "/files/test"] {
+            let response = serve("test", Request::builder().uri(path).body(Vec::new()).unwrap());
+            assert_eq!(response.status(), wry::http::StatusCode::NOT_FOUND);
+            assert!(response.body().is_empty());
+        }
+    }
+
     fn profile(dir: &str) -> Profile {
         config::standalone(PathBuf::from(dir), "full")
     }
@@ -8223,6 +8322,7 @@ mod tests {
             enabled,
             wallpaper: Box::leak(Box::new(config::WallpaperConfig::default())),
             manual_pause,
+            ai_generation: false,
             fullscreen: false,
             maximized: false,
             application_rule: None,
@@ -8380,14 +8480,20 @@ mod tests {
         let mut config = config::Config::default();
         config.activate_profile(saved).unwrap();
         let retired = Profile::Dbx {
-            edition: "standard".into(), data_dir: r"C:profileslegacy".into(),
+            edition: "standard".into(),
+            data_dir: r"C:profileslegacy".into(),
             plugin_id: hertz_desktop_ipc::profile::STANDARD_PLUGIN_ID.into(),
         };
         config.activate_profile(retired.clone()).unwrap();
         let options = profile_options(&current, &config, Some(&candidate));
-        assert!(config.known_profiles().iter().any(|source| config::same_profile(source, &retired)));
+        assert!(config
+            .known_profiles()
+            .iter()
+            .any(|source| config::same_profile(source, &retired)));
         assert!(options.iter().all(|option| option["kind"] == "standalone"));
-        assert!(profile_options(&current, &config, Some(&retired)).iter().all(|option| option["kind"] == "standalone"));
+        assert!(profile_options(&current, &config, Some(&retired))
+            .iter()
+            .all(|option| option["kind"] == "standalone"));
         let dirs: Vec<String> = options
             .iter()
             .map(|option| option["dataDir"].as_str().unwrap().to_string())

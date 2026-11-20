@@ -272,6 +272,12 @@
   function writable(path) { return !!specFor(path); }
 
   function currentScene() { var p = displayedPreset(); return p && p.scene || null; }
+  function sameSceneFamily(first, second) {
+    if (!first || !second || !window.CreativeGL) return false;
+    var a = CreativeGL.sceneById(first), b = CreativeGL.sceneById(second);
+    return !!(a && b && a.presentation && b.presentation
+      && a.presentation.family === 'spectrum-towers' && a.presentation.family === b.presentation.family);
+  }
 
   function hasStaleProject() {
     return !!(preset && preset.project && window.CreativeProject
@@ -350,25 +356,26 @@
 
     ['cam', 'look', 'stage'].forEach(function (k) {
       if (!p[k] || typeof p[k] !== 'object') return;
-      Object.keys(p[k]).forEach(function (kk) {
+      for (var kk in p[k]) {
+        if (!Object.prototype.hasOwnProperty.call(p[k], kk)) continue;
         var path = k + '.' + kk;
         var row = specFor(path);
-        if (!row) return;
+        if (!row) continue;
         var v = p[k][kk];
         // 非数字一律丢弃，而不是 Number() 转一下：字符串转出来的 NaN 会顺着
         // 矩阵一路传到顶点着色器，最后的表现是"整块画面消失"，而控制台干净得
         // 像什么都没发生 —— 最难查的一类故障。
-        if (typeof v !== 'number' || !isFinite(v)) return;
+        if (typeof v !== 'number' || !isFinite(v)) continue;
         writePath(out, path, clampTo(row, v));
-      });
+      }
     });
     if (p.sc && typeof p.sc === 'object') {
-      Object.keys(p.sc).forEach(function (kk) {
-        if (!(kk in out.sc)) return;
+      for (var kk in p.sc) {
+        if (!Object.prototype.hasOwnProperty.call(p.sc, kk) || !(kk in out.sc)) continue;
         var sv = p.sc[kk];
-        if (typeof sv !== 'number' || !isFinite(sv)) return;
+        if (typeof sv !== 'number' || !isFinite(sv)) continue;
         out.sc[kk] = clampTo(sceneRow(out.scene, kk), sv);
-      });
+      }
     }
     var archivedCues = Array.isArray(p.legacyCues) ? deep(p.legacyCues) : [];
     if (staleProject) {
@@ -385,6 +392,46 @@
     out.hand = Object.assign({}, out.hand, p.hand && typeof p.hand === 'object' ? p.hand : {});
     if (restoredProject) out.project = restoredProject;
     return out;
+  }
+
+  function normalizedPresetLease(input, source) {
+    var scratch = StageJsonSource.reserve('creative-preset', 4096,
+      'bounded normalization planning descriptors and source reference slots');
+    var work, borrowed, next;
+    try {
+      // The input lease covers aliases only. normalize still creates groups,
+      // defaults, filtered arrays, hand/context copies and legacy cue clones.
+      // Reserve their coexistence with the current preset before calling it.
+      var p = input || {};
+      var projection = { name:p.name, id:p.id, bg:p.bg, hand:p.hand, project:p.project,
+        cues:p.cues, bindings:p.bindings, legacyCues:p.legacyCues };
+      var plan = StageJsonSource.measure(projection, {
+        borrowedRootValues:source ? ['name','id','bg'] : [],
+        borrowedItemValues:source ? ['cues','bindings','hand'] : [],
+        maxArrayLength:4 * 1024 * 1024, maxObjectKeys:4 * 1024 * 1024 });
+      var scene = CreativeGL.sceneById(input && input.scene) || sceneDefinition('towers');
+      var defaults = StageJsonSource.measure(scene.defaults);
+      var base = StageJsonSource.measure(sceneDefinition('towers').defaults);
+      work = StageJsonSource.reserve('creative-preset', 16384 + plan.bytes * 4 + plan.chars * 2
+        + (defaults.bytes + base.bytes + defaults.chars * 2 + base.chars * 2) * 2,
+      'normalized preset groups/default copies/filter arrays/legacy JSON peak plus borrowed source');
+      if (source) borrowed = source.borrow();
+      next = normalize(input);
+      var aliases = [];
+      if (source && input) {
+        if (next.bg === input.bg) aliases.push('bg');
+        if (next.name === input.name) aliases.push('name');
+        if (next.id === input.id) aliases.push('id');
+      }
+      var retained = StageJsonSource.measure(next, { borrowedRootStrings:['thumb'],
+        borrowedRootValues:aliases, borrowedItemValues:source ? ['cues','bindings','hand'] : [],
+        maxArrayLength:4 * 1024 * 1024, maxObjectKeys:4 * 1024 * 1024 }).bytes;
+      var reference = borrowed;
+      var result = work.finish(next, retained, reference ? function () { reference.release(); } : undefined);
+      borrowed = null; return result;
+    } finally {
+      next = null; if (borrowed) borrowed.release(); if (work) work.release(); scratch.release();
+    }
   }
 
   function validCue(c, sceneId) {
@@ -427,7 +474,7 @@
   // Share v1 is a complete preset, not a delta against today's defaults. The
   // codec owns bytes only; this owner derives parameter keys from the same specs
   // as the renderer. Changing this schema/meaning requires a new share version.
-  function normalizeSharePreset(input, options) {
+  function normalizeShareValue(input, options) {
     function fail(message) { throw new Error(message || '分享码中的创意预置不完整或含无效参数'); }
     function object(value) { return value && typeof value === 'object' && !Array.isArray(value); }
     function own(value, key) { return object(value) && Object.prototype.hasOwnProperty.call(value, key); }
@@ -473,8 +520,8 @@
       if (!own(out, 'at') && !own(out, 'every')) fail();
       out.len = own(cue, 'len') ? number(cue.len, 16, 600000) : 600;
       out.ease = ['linear', 'in', 'out', 'inout'].indexOf(cue.ease) >= 0 ? cue.ease : 'out';
-      Object.keys(cue.set).forEach(function (key) {
-        if (Object.prototype.hasOwnProperty.call(paths, key)) {
+      Object.keys(paths).forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(cue.set, key)) {
           out.set[key] = parameter(key, cue.set[key]);
         }
       });
@@ -515,20 +562,56 @@
     return normalize(safe);
   }
 
+  function shareWorkspace(sceneId) {
+    // Bound from the original parameter tables and existing 64-cue/32-binding
+    // contract. Ignored URL/thumbnail/unknown metadata is never traversed/copied.
+    var slots = 0;
+    function count(row) { slots += 38 + row[0].length * 2; }
+    BASE_SPEC.forEach(function (group) {
+      if (group.items) group.items.forEach(count);
+      if (group.selects) group.selects.forEach(count);
+    });
+    var scene = CreativeGL.sceneById(sceneId);
+    if (scene) scene.params.forEach(count);
+    return StageJsonSource.reserve('creative-share-preset', 3 * (16384 + 65 * (512 + slots) + 32 * 512),
+      'bounded complete preset projection, normalized copy and parameter lookup slots from original tables');
+  }
+  function normalizeShareLease(input, options) {
+    var work = shareWorkspace(input && input.scene), value;
+    try { value = normalizeShareValue(input, options); return work.finish(value, StageJsonSource.measure(value).bytes); }
+    finally { value = null; work.release(); }
+  }
+  function normalizeSharePreset(input, options) { return StageJsonSource.transfer(normalizeShareLease(input, options)); }
+
   function committedArtwork() {
     if (!window.Backgrounds || !window.HandDrawn) throw new Error('背景与手绘模块尚未就绪');
     return preview ? { bg: deep(preview.committedBg), hand: deep(preview.committedHand) }
       : { bg: Backgrounds.values(), hand: HandDrawn.values() };
   }
 
-  function shareSnapshot(options) {
-    var full = normalize(preset), artwork = committedArtwork();
-    if (full.project && CreativeProject.isStaleContext(full.project)) {
-      throw new Error(CreativeProject.recoveryMessage(legacyCueCount(full)));
-    }
-    // Materialize effective settings via their existing owners, not a second defaults table.
-    full.bg = artwork.bg; full.hand = artwork.hand;
-    return normalizeSharePreset(full, {preserveProjectContext:!!(options && options.includeProjectContext)});
+  function shareSnapshotLease(options) {
+    if (hasStaleProject()) throw new Error(CreativeProject.recoveryMessage(legacyCueCount(preset)));
+    var work = shareWorkspace(preset.scene), value, artwork;
+    try {
+      // Borrow authored fields, including ignorable metadata. Only the share
+      // projection allocates a new full preset; no preliminary deep copy.
+      artwork = preview ? { bg: preview.committedBg, hand: preview.committedHand }
+        : { bg: Backgrounds.values({ shareSafe:true }), hand: HandDrawn.values() };
+      value = normalizeShareValue(Object.assign({}, preset, artwork),
+        { preserveProjectContext: !!(options && options.includeProjectContext) });
+      return work.finish(value, StageJsonSource.measure(value).bytes);
+    } finally { value = artwork = null; work.release(); }
+  }
+  function shareSnapshot(options) { return StageJsonSource.transfer(shareSnapshotLease(options)); }
+  function exportJSONLease() {
+    if (hasStaleProject()) throw new Error(CreativeProject.recoveryMessage(legacyCueCount(preset)));
+    var work = StageJsonSource.reserve('creative-json', 2048, 'bounded preset export projection slots'), exported;
+    try {
+      exported = Object.assign({}, preset);
+      delete exported.legacyCues;
+      if (exported.bg && exported.bg.type === 'media') exported.bg = { type: 'theme' };
+      return StageJsonSource.stringify(exported, { owner: 'creative-json', space: 2 });
+    } finally { exported = null; work.release(); }
   }
 
   // ---------------------------------------------------------------------------
@@ -596,6 +679,14 @@
       }
       if (k >= 1) animations.splice(i, 1);
     }
+  }
+
+  function queueAnimation(animation) {
+    if (!animation.from) {
+      animation.from = {};
+      animation.keys.forEach(function (key) { animation.from[key] = readPath(runtime, key); });
+    }
+    animations.push(animation);
   }
 
   // -------------------------------------------------------------------------
@@ -671,9 +762,9 @@
     mood['cam.dist'] = home['cam.dist'] * (want === 'quiet' ? 1.06 : want === 'chorus' ? 0.98 : 1);
     mood['cam.fov'] = home['cam.fov'];
     mood['cam.yaw'] = home['cam.yaw'] + (want === 'quiet' ? -3 : want === 'chorus' ? 3 : 0);
-    animations.push({ keys: Object.keys(mood), from: null, to: mood,
+    queueAnimation({ keys: Object.keys(mood), from: null, to: mood,
       start: t, len: 2400, ease: 'inout', mood: want, songClock: !!stageView });
-    // 上面这个动画的 from 要在 stepAnimations 里第一次遇到时补，见下面的补采样。
+    // 入队时捕获当前解析值；暂停调参和同族切换也能安全求值。
     document.dispatchEvent(new CustomEvent('creative:section', { detail: { section: want } }));
   }
 
@@ -901,7 +992,7 @@
       var r = el.getBoundingClientRect();
       py = clamp((e.clientY - r.top) / Math.max(1, r.height), 0, 1);
     }
-    animations.push({
+    queueAnimation({
       keys: ['look.bloom', 'look.chroma'],
       from: null,
       to: { 'look.bloom': clampPath('look.bloom', readPath(runtime, 'look.bloom') * 2.1 + 0.5),
@@ -921,7 +1012,7 @@
     interact.vy = 0;
     cam.shakeYaw = 0;
     cam.shakePitch = 0;
-    animations.push({ keys: Object.keys(target), from: null, to: target,
+    queueAnimation({ keys: Object.keys(target), from: null, to: target,
       start: sceneTimeMs, len: 550, ease: 'inout' });
     saveLocalSoon();
     emit('preset', preset);
@@ -1013,9 +1104,10 @@
     // setScene 同语义（"同场景不算切换、不重置用户调参"）。patch 在
     // 机位落位之后应用——意图里明确写了的值优先于场景默认。
     if (sceneSwitched) {
+      var familySwitch = sameSceneFamily(next.scene, intent.scene);
       next.scene = intent.scene;
-      next.sc = sceneDefaults(intent.scene);
-      var camTo = sceneDefinition(intent.scene).camera;
+      if (!familySwitch) next.sc = sceneDefaults(intent.scene);
+      var camTo = familySwitch ? null : sceneDefinition(intent.scene).camera;
       if (camTo) {
         Object.keys(camTo).forEach(function (k) {
           writePath(next, k, clampPath(k, camTo[k]));
@@ -1065,7 +1157,7 @@
     var m = materializeIntent(preset, intent);
     if (!m.ok) return m;
     invalidatePreview();
-    if (m.sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
+    if (m.sceneSwitched && !sameSceneFamily(preset.scene, m.preset.scene)) animations.length = 0;
     preset = m.preset;                            // 物化时已 normalize
     runtime = {};
     resolve(sceneTimeMs);
@@ -1229,16 +1321,6 @@
 
     resolve(sceneTime);
     if (!reduced && playing) stepDirector(sceneTime);
-    // 导演推进去的动画没有 from（它是"从当前值到目标值"的相对运动）。
-    // 补采样放在这里而不是 fire 里：此刻 runtime 还是上一帧的稳定值，
-    // 补出来的起点与屏幕上正在显示的那一帧一致，不会看到一次回跳。
-    for (var i = 0; i < animations.length; i += 1) {
-      var a = animations[i];
-      if (!a.from) {
-        a.from = {};
-        a.keys.forEach(function (k) { a.from[k] = readPath(runtime, k); });
-      }
-    }
 
     // --- 相机：基线 → camLayers（cinema/peek/freecam）→ 漂移 → shake ---
     stepInteraction(dtMs, fixed);
@@ -1291,8 +1373,8 @@
     var sc = readPath(runtime, 'stage.scale');
 
     var state = {
-      t: logicalSceneId && logicalSceneId !== preset.scene ? 0 : sceneTime,
-      dt: logicalSceneId && logicalSceneId !== preset.scene ? 0 : dtMs,
+      t: logicalSceneId && logicalSceneId !== preset.scene && !sameSceneFamily(logicalSceneId, preset.scene) ? 0 : sceneTime,
+      dt: logicalSceneId && logicalSceneId !== preset.scene && !sameSceneFamily(logicalSceneId, preset.scene) ? 0 : dtMs,
       bands: band, rises: rise, agg: agg,
       pulse: feat.pulse, energy: feat.energy,
       play: document.body.classList.contains('is-playing'),
@@ -1362,9 +1444,12 @@
         if (state === requestedState) {
           v.failedRevision = null; v.failure = null; degradedBecause = null;
           if (logicalSceneId !== state.scene) {
-            logicalSceneId = state.scene; logicalGeneration++; sceneTimeMs = 0; advancing = false;
-            primed = false; spectrumWatermark = frame.spectrumRevision;
-            energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
+            if (!sameSceneFamily(logicalSceneId, state.scene)) {
+              sceneTimeMs = 0; advancing = false;
+              primed = false; spectrumWatermark = frame.spectrumRevision;
+              energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
+            }
+            logicalSceneId = state.scene; logicalGeneration++;
           }
           var committedParams = v.committed && v.committedRevision === presetRevision ? v.committed.p : deep(state.p);
           v.committedRevision = presetRevision;
@@ -2025,6 +2110,7 @@
     clearTimeout(saveTimer); saveTimer = 0;
     controllerAlive = false; controllerGeneration += 1;
     if (preview && window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
+    if (preview && preview.payloadSource) preview.payloadSource.release();
     preview = null;
     document.removeEventListener('stage:track-changed', onTrackChanged);
     pendingStageEl = null; pendingSidebar = false;
@@ -2062,6 +2148,7 @@
   function invalidatePreview() {
     if (!preview) return;
     var motion = preview.motion;
+    if (preview.payloadSource) preview.payloadSource.release();
     preview = null;
     if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
     if (motion) {
@@ -2084,16 +2171,22 @@
 
   function beginPreview(candidate, proposalHash) {
     // Only complete, share-safe presets may enter the temporary presentation layer.
-    var next = normalizeSharePreset(candidate);
-    if (preview) cancelPreview(preview.previewId);
-    var committed = committedArtwork();
-    if (window.Backgrounds && Backgrounds.beginTemporaryApply) Backgrounds.beginTemporaryApply();
-    preview = { committedBg: committed.bg, committedHand: committed.hand, previewId: 'preview-' + (++previewSerial), baseRevision: presetRevision,
-      proposalHash: String(proposalHash || ''), preset: next,
-      motion: { animations: deep(animations), timelineCues: timelineCues === null ? null : deep(timelineCues), startedAt: sceneTimeMs } };
-    refreshPresentation();
-    emit('preview', previewStatus());
-    return previewStatus();
+    var nextSource = normalizeShareLease(candidate), next = nextSource.value;
+    try {
+      if (preview) cancelPreview(preview.previewId);
+      var committed = committedArtwork();
+      if (window.Backgrounds && Backgrounds.beginTemporaryApply) Backgrounds.beginTemporaryApply();
+      preview = { committedBg: committed.bg, committedHand: committed.hand, previewId: 'preview-' + (++previewSerial), baseRevision: presetRevision,
+        proposalHash: String(proposalHash || ''), preset: next, payloadSource: nextSource,
+        motion: { animations: deep(animations), timelineCues: timelineCues === null ? null : deep(timelineCues), startedAt: sceneTimeMs } };
+      refreshPresentation();
+      emit('preview', previewStatus());
+      return previewStatus();
+    } catch (error) {
+      if (preview && preview.payloadSource === nextSource) cancelPreview(preview.previewId);
+      else nextSource.release();
+      throw error;
+    }
   }
 
   function previewStatus() {
@@ -2101,17 +2194,61 @@
       proposalHash: preview.proposalHash } : null;
   }
 
-  function applyPreview(id, proposalHash) {
+  // Shared preset transaction. A preview handoff keeps its cancel authority
+  // until all candidate allocations have been admitted by this owner.
+  function setPreset(p, opts, committingPreview) {
+    if (!controllerAlive) throw new Error('creative-controller-disposed');
+    var source = opts && opts.payloadSource || presetSources.get(p), nextPresetLease = null;
+    var next, nextThumbnail, returned, previousThumbnail = currentThumbnail, previousPresetLease = currentPresetLease;
+    var sharedThumbnail = opts && opts.thumbnailSource;
+    try {
+      nextPresetLease = normalizedPresetLease(p, source); next = nextPresetLease.value;
+      var knownSource = sharedThumbnail && Array.from(thumbnailSources.values()).indexOf(sharedThumbnail) >= 0 && sharedThumbnail.url === next.thumb;
+      nextThumbnail = knownSource ? sharedThumbnail : serializedThumbnail(next.thumb);
+      if (!(opts && opts.returnPreset === false)) returned = StageJsonSource.ownedClone(next, 'creative-preset-result',
+        { maxArrayLength:4 * 1024 * 1024, maxObjectKeys:4 * 1024 * 1024 });
+      if (committingPreview && (preview !== committingPreview || committingPreview.baseRevision !== presetRevision))
+        throw new Error('预览已失效，请重新预览后应用');
+    } catch (error) {
+      if (returned) returned.release(); if (nextPresetLease) nextPresetLease.release();
+      releaseUnusedThumbnail(nextThumbnail); throw error;
+    }
+    if (committingPreview) preview = null;
+    preset = next; currentThumbnail = nextThumbnail;
+    currentPresetLease = nextPresetLease;
+    try {
+      if (!(opts && opts.keepName)) { /* 名字随预置走 */ }
+      animations.length = 0;
+      timelineCues = null;
+      runtime = {};
+      resolve(sceneTimeMs);
+      applyBackground();
+      applyHand();
+      saveLocalSoon();
+      emit('preset', preset);
+      if (returned) return StageJsonSource.transfer(returned);
+    } finally {
+      if (returned) returned.release();
+      releaseUnusedThumbnail(previousThumbnail);
+      if (previousPresetLease) previousPresetLease.release();
+    }
+  }
+
+  function applyPreview(id, proposalHash, options) {
     if (!preview || preview.previewId !== id || preview.baseRevision !== presetRevision
       || preview.proposalHash !== proposalHash) {
       return { ok: false, code: 'preview_stale', message: '预览已失效，请重新预览后应用' };
     }
-    var next = preview.preset;
-    preview = null;
-    api2.setPreset(next);
-    if (window.Backgrounds && Backgrounds.commitTemporaryApply) Backgrounds.commitTemporaryApply();
+    var candidate = preview, source = candidate.payloadSource;
+    try { setPreset(candidate.preset, { payloadSource: source, returnPreset:false }, candidate); }
+    finally {
+      if (preview !== candidate) {
+        if (source) source.release();
+        if (window.Backgrounds && Backgrounds.commitTemporaryApply) Backgrounds.commitTemporaryApply();
+      }
+    }
     emit('preview', null);
-    return { ok: true, preset: deep(preset) };
+    return options && options.returnPreset === false ? { ok:true } : { ok: true, preset: deep(preset) };
   }
 
   document.addEventListener('visibilitychange', function () {
@@ -2153,6 +2290,11 @@
       return !!(preset && sceneDefinition(displayed).ownsLyrics);
     },
     shareSnapshot: shareSnapshot,
+    shareSnapshotLease: shareSnapshotLease,
+    presetLease: function () { return StageJsonSource.ownedClone(preset, 'creative-preset-copy'); },
+    projectInfo: function () { return { usesMediaBackground: !!(preset.bg && preset.bg.type === 'media'),
+      name: preset.name, legacyCueCount: Array.isArray(preset.legacyCues) ? preset.legacyCues.length : 0,
+      cueCount: preset.cues.length, director: preset.director, project: preset.project || null }; },
     beginPreview: beginPreview,
     cancelPreview: cancelPreview,
     applyPreview: applyPreview,
@@ -2183,37 +2325,14 @@
       return StagePersistence.retry();
     },
     normalizeSharePreset: normalizeSharePreset,
+    normalizeShareLease: normalizeShareLease,
     setProjectContext: function (value) {
       var next = CreativeProject.normalizeContext(value);
       preset.project = next;
       animations.length = 0;
       resolve(sceneTimeMs); saveLocalSoon(); emit('project', next);
     },
-    setPreset: function (p, opts) {
-      if (!controllerAlive) throw new Error('creative-controller-disposed');
-      var source = presetSources.get(p), nextPresetLease = source ? source.borrow() : null;
-      var next, nextThumbnail, previousThumbnail = currentThumbnail, previousPresetLease = currentPresetLease;
-      var sharedThumbnail = opts && opts.thumbnailSource;
-      try {
-        next = normalize(p);
-        var knownSource = sharedThumbnail && Array.from(thumbnailSources.values()).indexOf(sharedThumbnail) >= 0 && sharedThumbnail.url === next.thumb;
-        nextThumbnail = knownSource ? sharedThumbnail : serializedThumbnail(next.thumb);
-      } catch (error) { if (nextPresetLease) nextPresetLease.release(); throw error; }
-      preset = next; currentThumbnail = nextThumbnail;
-      currentPresetLease = nextPresetLease;
-      if (!(opts && opts.keepName)) { /* 名字随预置走 */ }
-      animations.length = 0;
-      timelineCues = null;
-      runtime = {};
-      resolve(sceneTimeMs);
-      applyBackground();
-      applyHand();
-      saveLocalSoon();
-      emit('preset', preset);
-      releaseUnusedThumbnail(previousThumbnail);
-      if (previousPresetLease) previousPresetLease.release();
-      return deep(preset);
-    },
+    setPreset: setPreset,
     beginNewCueTrack: function () {
       if (!hasStaleProject()) return false;
       delete preset.project;
@@ -2246,16 +2365,17 @@
     },
     setScene: function (id) {
       if (!window.CreativeGL || !CreativeGL.sceneById(id)) return false;
+      var familySwitch = sameSceneFamily(preset.scene, id);
       // 入画补间的起点要在改数据之前采样：之后 resolve 会把 runtime 刷成
       // 新场景的值，那时再补采样拿到的"起点"就是终点，镜头会瞬移。
-      var camTo = sceneDefinition(id).camera;
+      var camTo = familySwitch ? null : sceneDefinition(id).camera;
       var camFrom = null;
       if (camTo) {
         camFrom = {};
         Object.keys(camTo).forEach(function (k) { camFrom[k] = readPath(runtime, k); });
       }
       preset.scene = id;
-      preset.sc = sceneDefaults(id);
+      if (!familySwitch) preset.sc = sceneDefaults(id);
       if (hasStaleProject()) preset.cues = [];
       else preset.cues = preset.cues.map(function (cue) {
         var set = {};
@@ -2267,7 +2387,7 @@
       preset.bindings = preset.bindings.filter(function (binding) {
         return specFor(binding.target) && Object.prototype.hasOwnProperty.call(BIND_SOURCES, binding.source);
       });
-      animations.length = 0;
+      if (!familySwitch) animations.length = 0;
       if (camTo) {
         Object.keys(camTo).forEach(function (k) { writePath(preset, k, clampPath(k, camTo[k])); });
       }
@@ -2477,23 +2597,20 @@
       trimThumbnailSources(); trimPresetSources();
       return true;
     },
-    exportJSON: function () {
-      if (hasStaleProject()) throw new Error(CreativeProject.recoveryMessage(legacyCueCount(preset)));
-      var exported = deep(preset);
-      delete exported.legacyCues;
-      if (exported.bg && exported.bg.type === 'media') exported.bg = { type: 'theme' };
-      return JSON.stringify(exported, null, 2);
-    },
+    exportJSON: function () { return StageJsonSource.transfer(exportJSONLease()); },
+    exportJSONLease: exportJSONLease,
     importJSON: function (text) {
+      var source;
       try {
-        var p = JSON.parse(text);
+        source = StageJsonSource.parse(text, { owner: 'creative-json-import' });
+        var p = source.value;
         if (!p || typeof p !== 'object') return { ok: false, message: '不是一个对象' };
         if (!p.scene && !p.look && !p.cam) return { ok: false, message: '缺少场景或影调字段' };
-        api2.setPreset(p);
+        api2.setPreset(p, { payloadSource: source, returnPreset:false });
         return { ok: true, message: '已载入「' + (p.name || '未命名') + '」' };
       } catch (e) {
         return { ok: false, message: 'JSON 解析失败：' + (e.message || e) };
-      }
+      } finally { if (source) source.release(); }
     },
     capture: capture,
     stats: function () {

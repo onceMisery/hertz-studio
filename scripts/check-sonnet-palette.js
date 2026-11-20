@@ -121,8 +121,9 @@ async function checkBrowser() {
   page.on('pageerror', error => errors.push(error.message));
   try {
     await page.setContent('<style>html,body{margin:0;width:100%;height:100%}#host,.fl-sonnet{position:absolute;inset:0}.fl-sonnet-canvas{position:absolute;inset:0}.fl-sonnet-hot{position:absolute}.fl-sonnet-eyebrow,.fl-sonnet-hud{display:none}</style><div id="host"></div>');
-    for (const file of ['vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js', 'stanza/stanza-sonnet-fx.js']) {
-      await page.addScriptTag({ path: path.join(web, file) });
+    for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js', 'stanza/stanza-sonnet-fx.js']) {
+      if (file === 'vendor/pixi.min.js') await page.evaluate(() => { window.Stage = {resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy))}; });
+    await page.addScriptTag({ path: path.join(web, file) });
     }
     await page.evaluate(() => {
       const fixture = window.sonnetPaletteFixture = { position: 3200, reduced: false, painted: [] };
@@ -145,7 +146,7 @@ async function checkBrowser() {
         { start_ms: 16000, end_ms: 24000, text: '我们沿着星光继续向前走' }
       ];
       fixture.track = { id: 'palette-check', title: 'Palette check' };
-      window.Stage = {
+      window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)),
         presentation: () => ({ playing: false, reduced: fixture.reduced, track: fixture.track }),
         position: () => fixture.position,
         lyrics: () => ({ lines: fixture.lines }),

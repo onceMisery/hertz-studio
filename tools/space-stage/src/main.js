@@ -4,8 +4,8 @@ import { nodeDefinitions, compositionInputs } from './nodes/definitions.js';
 import { effectDefinitions } from './nodes/effect-definitions.js';
 import { createScope } from './scope.js';
 import { createQuality, normalizeQualityMode } from './quality.js';
-import { createScene as createCoast } from '../../coast-stage/src/main.js';
-import { createScene as createZodiac, pure as zodiac } from '../../zodiac-stage/src/main.js';
+import { createScene as createCoast, resourcePlan as coastResourcePlan } from '../../coast-stage/src/main.js';
+import { createScene as createZodiac, resourcePlan as zodiacResourcePlan, pure as zodiac } from '../../zodiac-stage/src/main.js';
 import { registerScenes } from './scenes/index.js';
 import { createSpatialResources } from './scenes/resources.js';
 import { createRenderContext } from './render-context.js';
@@ -21,7 +21,7 @@ registry.register({ apiVersion: 1, id: 'coast', stateVersion: 1, label: '海岸�
   preview: '/space-scene-preview/coast.jpg', aliases: [],
   params: { ...optionalEffectSpecs, tod: { type: 'number', label: '时段', default: 0, min: 0, max: 1, step: .01 }, reduced: { type: 'boolean', label: '减少动态', default: false } },
   camera: { theta: -1.071, phi: .346, radius: 5.33, fov: 44, lookAt: [0,1.05,.9], minRadius: 2.4, maxRadius: 15 },
-  capabilities: basicCapabilities, quality: { pooled: true }, create: ctx => composeEffects(ctx, createCoast(ctx)) });
+  capabilities: basicCapabilities, quality: { pooled: true }, resourcePlan: coastResourcePlan, create: ctx => composeEffects(ctx, createCoast(ctx)) });
 registry.register({ apiVersion: 1, id: 'zodiac', stateVersion: 1, label: '星座', category: 'world',
   preview: '/space-scene-preview/zodiac.jpg', aliases: [],
   params: { ...optionalEffectSpecs, sign: { type: 'select', label: '星座', default: 'cycle', options: [{value:'cycle',label:'循环'}, ...zodiac.ZODIAC.map(sign => ({value:sign.id,label:sign.cn}))] },
@@ -32,7 +32,7 @@ registry.register({ apiVersion: 1, id: 'zodiac', stateVersion: 1, label: '星座
     speed: { type: 'number', label: '运动', default: 1, min: .15, max: 3, step: .05 }, reduced: { type: 'boolean', label: '减少动态', default: false } },
   camera: { theta: 0, phi: .06, radius: 11.87, fov: 52, lookAt: [0,0,0], minRadius: 2.6, maxRadius: 30,
     fit: { halfWidth: zodiac.FIG_HALF_W * 1.3, halfHeight: zodiac.FIG_HALF * 1.3 } },
-  capabilities: basicCapabilities, quality: { pooled: true }, create: ctx => composeEffects(ctx, createZodiac(ctx)) });
+  capabilities: basicCapabilities, quality: { pooled: true }, resourcePlan: zodiacResourcePlan, create: ctx => composeEffects(ctx, createZodiac(ctx)) });
 registerScenes(registry);
 registerEffects(effects);
 export const catalog = () => registry.catalog();
@@ -402,7 +402,7 @@ export function create(canvas, options = {}) {
           const info = renderer.info.render, scoped = candidate.scope.stats(), shared = spatialResources.stats();
           const post = candidate.post && candidate.post.stats ? candidate.post.stats().bytes : 0;
           return { drawCalls: info.calls, points: info.points, triangles: info.triangles, estimatedBytes: scoped.estimatedBytes + (lyricLayer ? lyricLayer.scope.stats().estimatedBytes : 0) + shared.bytes + post };
-        }, cpuMs)) applyQuality();
+        }, cpuMs, frame.targetFps)) applyQuality();
         const currentFailure = admissionFailure || candidate.post?.stats?.().resourceFailure || spatialResources.stats().resourceFailure || '';
         if (frameCount % 120 === 0 || currentFailure !== lastResourceFailure) notify();
         if (!current() || (typeof document !== 'undefined' && document.hidden) || (options.isVisible && !options.isVisible())) return false;

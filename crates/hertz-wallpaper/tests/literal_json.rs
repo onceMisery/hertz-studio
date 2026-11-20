@@ -388,7 +388,7 @@ fn composition_declaration_defaults_keep_literal_values_before_validation() {
     let field: Field =
         serde_json::from_value(json!({"type":"sceneParams","default":default})).unwrap();
     assert_eq!(field.default.as_ref(), Some(&default));
-    let definitions = json!({"nodes":[{"type":"group","stateVersion":1,"space":"2d",
+    let definitions = json!({"nodes":[{"type":"group","stateVersion":1,"space":"2d","timeModel":"absolute",
         "properties":{"opacity":{"type":"number","min":0,"max":1,"default":0.5}},"assets":{}}],
         "effects":[],"inputs":[]});
     let catalog = |definitions: &Value| {

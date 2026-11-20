@@ -1,9 +1,10 @@
 {
   "version": 1,
   "schemaVersion": "1",
-  "schemaHash": "b21f66f38c39f600319cb68754ab273e52fc454bfbbc080abc2d7eceaa052337",
+  "schemaHash": "5c294943281a4a1234414c0634294e8c2bdfa0216d85c3a5223d2569c4715932",
   "basePresetHashes": {
     "towers": "b41c53f82d41e64f3323bf511b06a45da50c5e778a15db05dd54f0af2dc50c67",
+    "towers-flat": "2fde91e7f08678267d3cb1d863f950bd8634a2c3f9cec1fc76bed3b2dd9865a5",
     "orb": "0d84301863cb08d3ce7c54ed8314a56e97eb54288908f31515ac789c8421c790",
     "tunnel": "80b2e9bd0c1aa912dc90ed5457e5f14da630eaa01d2985b2aee5d7757105df20",
     "nebula": "7487ec15a46d2ec7131de43f14cab045f80ea7d1fd6efbe1e63fa1d37a2fbe3a",
@@ -165,6 +166,7 @@
         "type": "string",
         "enum": [
           "towers",
+          "towers-flat",
           "orb",
           "tunnel",
           "nebula",
@@ -207,6 +209,103 @@
           "properties": {
             "scene": {
               "const": "towers"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "patch": {
+              "type": "object",
+              "properties": {
+                "cam.fov": {
+                  "type": "number"
+                },
+                "cam.dist": {
+                  "type": "number"
+                },
+                "cam.yaw": {
+                  "type": "number"
+                },
+                "cam.pitch": {
+                  "type": "number"
+                },
+                "cam.height": {
+                  "type": "number"
+                },
+                "cam.drift": {
+                  "type": "number"
+                },
+                "cam.shake": {
+                  "type": "number"
+                },
+                "cam.kick": {
+                  "type": "number"
+                },
+                "look.bloom": {
+                  "type": "number"
+                },
+                "look.bloomThresh": {
+                  "type": "number"
+                },
+                "look.chroma": {
+                  "type": "number"
+                },
+                "look.vignette": {
+                  "type": "number"
+                },
+                "look.grain": {
+                  "type": "number"
+                },
+                "look.toon": {
+                  "type": "number"
+                },
+                "look.paper": {
+                  "type": "number"
+                },
+                "look.exposure": {
+                  "type": "number"
+                },
+                "look.saturation": {
+                  "type": "number"
+                },
+                "look.grade": {
+                  "type": "number"
+                },
+                "stage.rotY": {
+                  "type": "number"
+                },
+                "stage.scale": {
+                  "type": "number"
+                },
+                "stage.seed": {
+                  "type": "number"
+                },
+                "sc.height": {
+                  "type": "number"
+                },
+                "sc.span": {
+                  "type": "number"
+                },
+                "sc.width": {
+                  "type": "number"
+                },
+                "sc.depth": {
+                  "type": "number"
+                },
+                "sc.mirror": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "scene": {
+              "const": "towers-flat"
             }
           }
         },
@@ -1156,6 +1255,59 @@
         "towers"
       ],
       "ownsLyrics": false,
+      "presentation": {
+        "family": "spectrum-towers",
+        "dimension": "3d",
+        "counterpart": "towers-flat"
+      },
+      "params": [
+        {
+          "name": "height",
+          "min": 0.5,
+          "max": 22,
+          "default": 5.5
+        },
+        {
+          "name": "span",
+          "min": 6,
+          "max": 60,
+          "default": 24
+        },
+        {
+          "name": "width",
+          "min": 0.1,
+          "max": 2,
+          "default": 0.1
+        },
+        {
+          "name": "depth",
+          "min": 0.1,
+          "max": 2,
+          "default": 0.16
+        },
+        {
+          "name": "mirror",
+          "min": 0,
+          "max": 1,
+          "default": 0.16
+        }
+      ]
+    },
+    {
+      "id": "towers-flat",
+      "label": "频谱平面",
+      "aliases": [
+        "平面频谱",
+        "频谱平面",
+        "二维频谱",
+        "towers flat"
+      ],
+      "ownsLyrics": false,
+      "presentation": {
+        "family": "spectrum-towers",
+        "dimension": "2d",
+        "counterpart": "towers"
+      },
       "params": [
         {
           "name": "height",

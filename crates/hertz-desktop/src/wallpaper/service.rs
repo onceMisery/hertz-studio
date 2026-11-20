@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 #[path = "service_ai.rs"]
 mod ai_operations;
+#[path = "service_playlist.rs"]
+mod playlist_operations;
 
 const REQUEST_CAP: usize = 4;
 const HISTORY_CAP: usize = 256;
@@ -36,7 +38,7 @@ enum Work {
         slot: Slot,
     },
     CompositionDraftPreview {
-        document: super::work_drafts::Document,
+        document: Box<super::work_drafts::Document>,
         target: super::image_prepare::ImageTarget,
         fit: super::config::Fit,
         facts: Option<super::builtin_plan::TargetFacts>,
@@ -86,7 +88,7 @@ enum Work {
         slot: Slot,
     },
     ValidateMirrorLayouts {
-        selections: Vec<(super::config::Selection, usize)>,
+        selections: Vec<super::selection_plan::MirrorIntent>,
         properties: Vec<super::public_properties::PropertySelection>,
         cancel: Arc<AtomicBool>,
         reply: Box<dyn FnOnce(Result<(), JobError>) + Send>,
@@ -127,6 +129,8 @@ struct Record {
 }
 
 struct State {
+    #[cfg(test)]
+    initial_candidate_maintenance_complete: AtomicBool,
     composition_preparing: Mutex<std::collections::HashSet<String>>,
     base: PathBuf,
     probe: ProbeClient,
@@ -378,19 +382,47 @@ pub(crate) struct LibraryService {
 }
 
 impl LibraryService {
-    pub(crate) fn security_check(&self, hash: &str) -> Result<(),JobError> {
-        self.state.jobs.get().ok_or_else(||JobError::new("trust_unavailable","安全库尚未加载"))?.library().trust().security_check(hash)
+    pub(crate) fn security_check(&self, hash: &str) -> Result<(), JobError> {
+        self.state
+            .jobs
+            .get()
+            .ok_or_else(|| JobError::new("trust_unavailable", "安全库尚未加载"))?
+            .library()
+            .trust()
+            .security_check(hash)
     }
 
-    pub(crate) fn security_snapshot(&self, revision:u64, next_due:u64) -> Result<Option<super::community::store::SecuritySnapshot>,JobError> {
-        match self.state.jobs.get(){Some(jobs)=>jobs.library().trust().security_snapshot(revision,next_due),None=>Ok(None)}
+    pub(crate) fn security_snapshot(
+        &self,
+        revision: u64,
+        next_due: u64,
+    ) -> Result<Option<super::community::store::SecuritySnapshot>, JobError> {
+        match self.state.jobs.get() {
+            Some(jobs) => jobs.library().trust().security_snapshot(revision, next_due),
+            None => Ok(None),
+        }
     }
-    pub(crate) fn activation_check(&self,hash:&str,is_web:bool)->Result<(),JobError>{self.state.jobs.get().ok_or_else(||JobError::new("trust_unavailable","安全库尚未加载"))?.library().trust().activation_check(hash,is_web)}
-    pub(crate) fn community_job_active(&self)->bool{self.state.jobs.get().is_some_and(|jobs|jobs.active_status().is_some())}
+    pub(crate) fn activation_check(&self, hash: &str, is_web: bool) -> Result<(), JobError> {
+        self.state
+            .jobs
+            .get()
+            .ok_or_else(|| JobError::new("trust_unavailable", "安全库尚未加载"))?
+            .library()
+            .trust()
+            .activation_check(hash, is_web)
+    }
+    pub(crate) fn community_job_active(&self) -> bool {
+        self.state
+            .jobs
+            .get()
+            .is_some_and(|jobs| jobs.active_status().is_some())
+    }
     pub(crate) fn start(base: PathBuf, probe: ProbeClient) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Work>(REQUEST_CAP);
         let pending = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(State {
+            #[cfg(test)]
+            initial_candidate_maintenance_complete: AtomicBool::new(false),
             composition_preparing: Mutex::new(Default::default()),
             base,
             probe,
@@ -534,6 +566,12 @@ impl LibraryService {
                         }
                         completion = tasks.join_next(), if !tasks.is_empty() => {
                             if let Some(Ok(Some((result, _permit)))) = completion {
+                                #[cfg(test)]
+                                if result.is_ok() {
+                                    worker
+                                        .initial_candidate_maintenance_complete
+                                        .store(true, Ordering::Release);
+                                }
                                 expiry_wake = match result {
                                     Ok(expiry) => expiry.map(|expiry| Instant::now()+Duration::from_secs(expiry.saturating_sub(super::library::now_secs()).max(0) as u64)),
                                     Err(error) => {
@@ -666,7 +704,7 @@ impl LibraryService {
     ) -> Result<(), JobError> {
         self.tx
             .try_send(Work::CompositionDraftPreview {
-                document,
+                document: Box::new(document),
                 target,
                 fit,
                 facts,
@@ -706,12 +744,21 @@ impl LibraryService {
         slot: Slot,
         reply: impl FnOnce(Result<(), JobError>) + Send + 'static,
     ) -> Result<(), JobError> {
-        self.validate_presentation_intents(selections, vec![], cancel, slot, reply)
+        self.validate_presentation_intents(
+            selections
+                .into_iter()
+                .map(|(selection, members)| (selection, members, serde_json::Map::new()))
+                .collect(),
+            vec![],
+            cancel,
+            slot,
+            reply,
+        )
     }
 
     pub(crate) fn validate_presentation_intents(
         &self,
-        selections: Vec<(super::config::Selection, usize)>,
+        selections: Vec<super::selection_plan::MirrorIntent>,
         properties: Vec<super::public_properties::PropertySelection>,
         cancel: Arc<AtomicBool>,
         slot: Slot,
@@ -722,7 +769,7 @@ impl LibraryService {
             || properties.len() > 4
             || selections
                 .iter()
-                .any(|(_, members)| !(1..=4).contains(members))
+                .any(|(_, members, _)| !(1..=4).contains(members))
         {
             return Err(JobError::invalid_input("镜像布局核验需要 1–4 个有效显示组"));
         }
@@ -997,13 +1044,16 @@ impl State {
                 JobError::new("operation_pending", "请求仍在处理，请按 requestId 查询")
             });
         }
-        if request.command == "wallpaper.layout.inspect" {
+        if matches!(
+            request.command.as_str(),
+            "wallpaper.layout.inspect" | "wallpaper.playlist.page"
+        ) {
             // A long inspection can receive many fresh polling IDs. Keep only a small
             // completed read history instead of exhausting mutation idempotency records.
             let mut completed: Vec<_> = history
                 .iter()
                 .filter(|(_, record)| {
-                    record.command == "wallpaper.layout.inspect" && record.response.is_some()
+                    record.command == request.command && record.response.is_some()
                 })
                 .map(|(id, record)| (id.clone(), record.started))
                 .collect();
@@ -1062,6 +1112,7 @@ impl State {
                 | Command::LibraryReferences { .. }
                 | Command::LibraryPoster { .. }
                 | Command::JobsGet { .. }
+                | Command::PlaylistPage(_)
                 | Command::OperationsGet { .. })
         );
         let result = if read_only {
@@ -1117,6 +1168,7 @@ impl State {
         let _layout_invalidation = if matches!(
             command,
             Command::PlaylistSave { .. }
+                | Command::PlaylistUpdate(_)
                 | Command::LibraryDeleteWork { .. }
                 | Command::LibraryDeleteVersion { .. }
                 | Command::ImportBegin { .. }
@@ -1135,7 +1187,7 @@ impl State {
                 ))
             }
             Command::Capabilities => {
-                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm","svg"],"svg":super::api::svg_capability(),"nativeFilePicker":true,"settingsDrafts":true,"workDrafts":true,"publicProperties":true,"playlists":true,"playlistMaxItems":32,"export":true,"nativeOutputPicker":true,"builtinPackages":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"multiDisplay":true,"layouts":["single","span","mirror"],"mirrorBuiltin":false,"mirrorPackages":false,"mirrorPlaylists":false,"mirrorInspection":true,"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
+                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm","svg"],"svg":super::api::svg_capability(),"nativeFilePicker":true,"settingsDrafts":true,"workDrafts":true,"publicProperties":true,"playlists":true,"playlistMaxItems":1000,"playlistPageSize":32,"playlistIncremental":true,"export":true,"nativeOutputPicker":true,"builtinPackages":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"multiDisplay":true,"layouts":["single","span","mirror"],"mirrorBuiltin":false,"mirrorPackages":false,"mirrorPlaylists":false,"mirrorInspection":true,"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
             }
             Command::PropertiesInspect {
                 selection,
@@ -1152,24 +1204,31 @@ impl State {
                     .await?
                 )
             }
-            Command::LayoutInspect { selection, members } => {
+            Command::LayoutInspect {
+                selection,
+                members,
+                properties,
+            } => {
                 let jobs = Arc::clone(self.jobs().await?);
                 self.layout_inspections
                     .observe_import(jobs.active_status().as_ref().map(|job| job.job_id.as_str()));
                 let generation = self.layout_inspections.generation();
-                let snapshot =
-                    match super::selection_plan::layout_snapshot(&jobs, selection, members).await {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            if matches!(
-                                error.code,
-                                "playlist_not_found" | "version_not_found" | "invalid_input"
-                            ) {
-                                self.layout_inspections.invalidate();
-                            }
-                            return Err(error);
+                let snapshot = match super::selection_plan::layout_snapshot(
+                    &jobs, selection, members, properties,
+                )
+                .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        if matches!(
+                            error.code,
+                            "playlist_not_found" | "version_not_found" | "invalid_input"
+                        ) {
+                            self.layout_inspections.invalidate();
                         }
-                    };
+                        return Err(error);
+                    }
+                };
                 let key = snapshot.cache_key();
                 match self
                     .layout_inspections
@@ -1244,11 +1303,25 @@ impl State {
                 )
             }
             Command::PlaylistGet { playlist_id } => {
-                json!(
-                    super::playlist::Repository::new(self.jobs().await?.library())
-                        .get(&playlist_id)
-                        .await?
-                )
+                let playlist = super::playlist::Repository::new(self.jobs().await?.library())
+                    .get(&playlist_id)
+                    .await?;
+                if playlist.items.len() > super::playlist::edit::PAGE_SIZE {
+                    return Err(JobError::new(
+                        "playlist_pagination_required",
+                        "大型列表请使用wallpaper.playlist.page分页读取",
+                    ));
+                }
+                json!(playlist)
+            }
+            Command::PlaylistPage(page) => {
+                super::playlist::Repository::new(self.jobs().await?.library())
+                    .page(&page)
+                    .await?
+            }
+            Command::PlaylistUpdate(update) => {
+                self.update_playlist(update, owner, playlist_properties)
+                    .await?
             }
             Command::PlaylistSave {
                 playlist_id,
@@ -1261,31 +1334,7 @@ impl State {
                 self.check_owner(owner)?;
                 let jobs = self.jobs().await?;
                 let _writer = jobs.assets().content_writer()?;
-                if !playlist_properties.is_empty() {
-                    let source = Arc::clone(jobs);
-                    let references = items.clone();
-                    let overrides = playlist_properties.to_vec();
-                    let runtime = tokio::runtime::Handle::current();
-                    tokio::task::spawn_blocking(move || {
-                        runtime.block_on(async {
-                            let cancel = AtomicBool::new(false);
-                            for properties in &overrides {
-                                super::public_properties::validate_references(
-                                    &source,
-                                    &references,
-                                    properties,
-                                    &cancel,
-                                )
-                                .await?;
-                            }
-                            Ok::<_, JobError>(())
-                        })
-                    })
-                    .await
-                    .map_err(|_| {
-                        JobError::new("worker_unavailable", "轮播公开属性核验线程已退出")
-                    })??;
-                }
+                playlist_operations::validate_properties(jobs, &items, playlist_properties).await?;
                 json!(
                     super::playlist::Repository::new(jobs.library())
                         .save(
@@ -1318,6 +1367,18 @@ impl State {
                         .list(limit, cursor.as_deref())
                         .await?
                 )
+            }
+            Command::WorkDraftFork {
+                work_key,
+                package_hash,
+            } => {
+                self.check_owner(owner)?;
+                let jobs = self.jobs().await?;
+                let _writer = jobs.assets().content_writer()?;
+                json!(super::work_drafts::WorkDrafts::new(jobs.library())
+                    .fork_from_version(&work_key, &package_hash, jobs.assets())
+                    .await?
+                    .receipt())
             }
             Command::WorkDraftGet { draft_id } => {
                 self.check_owner(owner)?;
@@ -1832,10 +1893,12 @@ impl State {
                         .response
                         .ok_or_else(|| JobError::new("operation_pending", "请求仍在处理中"));
                 }
-                if command
-                    .as_deref()
-                    .is_some_and(|command| !matches!(command,"wallpaper.import.begin"|"wallpaper.community.download"))
-                {
+                if command.as_deref().is_some_and(|command| {
+                    !matches!(
+                        command,
+                        "wallpaper.import.begin" | "wallpaper.community.download"
+                    )
+                }) {
                     return Err(JobError::new(
                         "operation_unknown",
                         "该配置请求无保留记录，请重新读取当前配置",
@@ -1893,6 +1956,7 @@ mod tests {
             .block_on(drafts.create(super::super::work_drafts::Document {
                 composition: None,
                 resources: vec![],
+                provenance: None,
                 title: "引用详情作品".into(),
                 description: String::new(),
                 scene_id: "coast".into(),
@@ -1934,6 +1998,21 @@ mod tests {
             native.clone(),
         );
         assert_eq!(observed["ok"], true, "{observed}");
+        // Direct fixture preparation leaves the initial library maintenance wake
+        // for this first management call. Wait for its real content writer to exit
+        // before testing deletion bindings, without replaying a delete request.
+        let maintenance_deadline = Instant::now() + Duration::from_secs(5);
+        while !service
+            .state
+            .initial_candidate_maintenance_complete
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < maintenance_deadline,
+                "initial candidate maintenance did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let kinds = observed["result"]["references"]
             .as_array()
             .unwrap()
@@ -1950,22 +2029,23 @@ mod tests {
             ),
             native,
         );
-        assert_eq!(blocked["error"]["code"], "asset_in_use");
+        assert_eq!(blocked["error"]["code"], "asset_in_use", "{blocked}");
         assert_eq!(blocked["error"]["details"], observed["result"]);
         assert_eq!(std::fs::read(&original).unwrap(), bytes);
         let mut mismatch = delete.clone();
         mismatch["packageHash"] = "b".repeat(64).into();
+        let mismatch_reply = call(
+            &service,
+            request(
+                "mismatch-delete",
+                "wallpaper.library.deleteVersion",
+                mismatch,
+            ),
+            0,
+        );
         assert_eq!(
-            call(
-                &service,
-                request(
-                    "mismatch-delete",
-                    "wallpaper.library.deleteVersion",
-                    mismatch
-                ),
-                0
-            )["error"]["code"],
-            "version_not_found"
+            mismatch_reply["error"]["code"], "version_not_found",
+            "{mismatch_reply}"
         );
         runtime
             .block_on(drafts.discard(&draft.id, draft.revision))
@@ -2393,6 +2473,7 @@ mod tests {
             &crate::wallpaper::work_drafts::Document {
                 composition: None,
                 resources: vec![],
+                provenance: None,
                 title: "布局快照".into(),
                 description: String::new(),
                 scene_id: "coast".into(),
@@ -2459,6 +2540,7 @@ mod tests {
                 jobs,
                 selection.clone(),
                 2,
+                serde_json::Map::new(),
             ))
             .unwrap()
             .cache_key();
@@ -2499,7 +2581,10 @@ mod tests {
             .unwrap();
         let key_after = runtime
             .block_on(super::super::selection_plan::layout_snapshot(
-                jobs, selection, 2,
+                jobs,
+                selection,
+                2,
+                serde_json::Map::new(),
             ))
             .unwrap()
             .cache_key();
@@ -3034,6 +3119,145 @@ mod tests {
                 true
             );
         }
+    }
+
+    #[test]
+    fn licensed_fork_requires_settings_owner_and_replays_the_same_draft_receipt() {
+        let root = tempfileish::temp_dir("service-licensed-fork");
+        let service = LibraryService::start(root.path().to_path_buf(), probe());
+        service.set_settings_owner(41);
+        let created = call(
+            &service,
+            request(
+                "fork-source",
+                "wallpaper.draft.create",
+                json!({"kind":"work","document":{"title":"My source","sceneId":"coast","stateVersion":1,"params":{}}}),
+            ),
+            41,
+        );
+        assert_eq!(created["ok"], true, "{created}");
+        let reference = json!({"draftId":created["result"]["draftId"],"draftRevision":created["result"]["draftRevision"]});
+        assert_eq!(
+            call(
+                &service,
+                request(
+                    "fork-source-save",
+                    "wallpaper.draft.save",
+                    reference.clone()
+                ),
+                41
+            )["ok"],
+            true
+        );
+        let published = call(
+            &service,
+            request("fork-source-publish", "wallpaper.draft.publish", reference),
+            41,
+        );
+        assert_eq!(published["ok"], true, "{published}");
+        let payload = json!({"kind":"fork","workKey":published["result"]["workKey"],"packageHash":published["result"]["packageHash"]});
+        let denied = call(
+            &service,
+            request("fork-no-owner", "wallpaper.draft.create", payload.clone()),
+            0,
+        );
+        assert_eq!(denied["error"]["code"], "settings_session_required");
+        let operation = request("fork-once", "wallpaper.draft.create", payload);
+        let fork = call(&service, operation.clone(), 41);
+        assert_eq!(fork["ok"], true, "{fork}");
+        assert_ne!(fork["result"]["workKey"], published["result"]["workKey"]);
+        let replay = call(&service, operation, 41);
+        assert_eq!(fork["result"], replay["result"]);
+        let page = call(
+            &service,
+            request("fork-drafts", "wallpaper.draft.list", json!({"limit":20})),
+            41,
+        );
+        assert_eq!(page["result"]["drafts"].as_array().unwrap().len(), 2);
+        let source = call(
+            &service,
+            request(
+                "fork-original",
+                "wallpaper.library.get",
+                json!({"workKey":published["result"]["workKey"]}),
+            ),
+            41,
+        );
+        assert_eq!(source["result"]["versions"].as_array().unwrap().len(), 1);
+        assert_eq!(source["result"]["versions"][0]["locallyAuthored"], true);
+        let reference = json!({"draftId":fork["result"]["draftId"],"draftRevision":fork["result"]["draftRevision"]});
+        assert_eq!(
+            call(
+                &service,
+                request("fork-save", "wallpaper.draft.save", reference.clone()),
+                41
+            )["ok"],
+            true
+        );
+        let published_copy = call(
+            &service,
+            request("fork-publish", "wallpaper.draft.publish", reference),
+            41,
+        );
+        assert_eq!(published_copy["ok"], true, "{published_copy}");
+        let hash = published_copy["result"]["packageHash"].as_str().unwrap();
+        let output = tempfileish::temp_dir("service-fork-export");
+        let destination = output.path().join("my-copy.hwpkg");
+        let ticket = service
+            .state
+            .output_tokens
+            .issue(
+                41,
+                hash.into(),
+                super::super::output_tokens::SelectedOutput::open(&destination).unwrap(),
+                Instant::now(),
+            )
+            .unwrap();
+        let accepted = call(
+            &service,
+            request(
+                "fork-export",
+                "wallpaper.export.begin",
+                json!({"packageHash":hash,"outputToken":ticket.output_token}),
+            ),
+            41,
+        );
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        let mut terminal = Value::Null;
+        for attempt in 0..100 {
+            terminal = call(
+                &service,
+                request(
+                    &format!("fork-export-poll-{attempt}"),
+                    "wallpaper.jobs.get",
+                    json!({"jobId":accepted["jobId"]}),
+                ),
+                41,
+            );
+            if terminal["result"]["state"] == "done" || terminal["result"]["state"] == "failed" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(terminal["result"]["state"], "done", "{terminal}");
+        let bytes = std::fs::read(destination).unwrap();
+        assert_eq!(
+            bytes,
+            std::fs::read(
+                root.path()
+                    .join("packages")
+                    .join(hash)
+                    .join("original.hwpkg")
+            )
+            .unwrap()
+        );
+        let package = hertz_wallpaper::validate_package(std::io::Cursor::new(bytes)).unwrap();
+        assert!(package
+            .manifest
+            .license
+            .attribution
+            .starts_with("Attribution and asset licenses: "));
+        assert_eq!(package.manifest.license.assets, "none");
     }
 
     #[test]

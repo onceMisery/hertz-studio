@@ -79,7 +79,7 @@ impl Policy {
              img-src 'self' data: blob: http: https:; \
              media-src 'self' data: blob: http: https:; font-src 'self' data: blob:; \
              connect-src 'self' {} blob: data:; worker-src 'self' blob:; \
-             object-src 'none'; frame-src 'none'; frame-ancestors 'none'; \
+             object-src 'none'; frame-src 'self'; frame-ancestors 'none'; \
              base-uri 'none'; form-action 'self'",
             self.websocket
         ))
@@ -87,10 +87,19 @@ impl Policy {
     }
 }
 
-fn protect_headers(response: &mut Response) {
+fn protect_headers(response: &mut Response, same_origin_frameable: bool) {
     let headers = response.headers_mut();
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // 开屏动画是同源 iframe：只有它能被同源页面内嵌。其它页面保持 DENY，
+    // 外部站点无论同源还是跨源都嵌不进来。
+    headers.insert(
+        "x-frame-options",
+        HeaderValue::from_static(if same_origin_frameable {
+            "SAMEORIGIN"
+        } else {
+            "DENY"
+        }),
+    );
     headers.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
@@ -101,6 +110,8 @@ pub async fn guard(State(policy): State<Option<Policy>>, request: Request, next:
     let Some(policy) = policy else {
         return next.run(request).await;
     };
+    // 开屏动画是唯一允许被同源页面内嵌的资源；其余响应维持 DENY。
+    let splash = request.uri().path().starts_with("/splash/");
     let mut response = match policy.check(request.headers(), request.uri()) {
         Ok(()) => next.run(request).await,
         Err(StatusCode::MISDIRECTED_REQUEST) => (
@@ -110,7 +121,7 @@ pub async fn guard(State(policy): State<Option<Policy>>, request: Request, next:
             .into_response(),
         Err(_) => (StatusCode::FORBIDDEN, "native HTTP origin rejected").into_response(),
     };
-    protect_headers(&mut response);
+    protect_headers(&mut response, splash);
     response
 }
 
@@ -148,7 +159,7 @@ pub fn html_response(policy: Option<&Policy>, status: StatusCode, html: String) 
     response
         .headers_mut()
         .insert("content-security-policy", policy.csp(&nonce));
-    protect_headers(&mut response);
+    protect_headers(&mut response, false);
     response
 }
 
@@ -343,8 +354,45 @@ mod tests {
         assert_eq!(second.headers()["referrer-policy"], "no-referrer");
         assert_eq!(second.headers()["x-frame-options"], "DENY");
         assert!(csp.contains("connect-src 'self' ws://127.0.0.1:41817"));
+        // 开屏动画是同源 iframe；CSP 必须放行同源 frame，但别的页面仍然不许被嵌。
+        assert!(csp.contains("frame-src 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
         let browser = html_response(None, StatusCode::OK, template.to_owned());
         assert_eq!(browser.headers()[header::CACHE_CONTROL], "no-cache");
         assert!(!browser.headers().contains_key("content-security-policy"));
+    }
+
+    #[tokio::test]
+    async fn splash_asset_is_frameable_only_by_the_native_origin() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new()
+            .route(
+                "/splash/hertzstudio-splash.html",
+                axum::routing::get(|| async { StatusCode::OK }),
+            )
+            .route("/", axum::routing::get(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                Some(Policy::new(port)),
+                guard,
+            ));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let splash = client
+            .get(format!(
+                "http://127.0.0.1:{port}/splash/hertzstudio-splash.html"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(splash.headers()["x-frame-options"], "SAMEORIGIN");
+        let page = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.headers()["x-frame-options"], "DENY");
+        task.abort();
+        let _ = task.await;
     }
 }

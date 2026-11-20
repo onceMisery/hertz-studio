@@ -173,7 +173,7 @@ async function browserContract() {
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelectorAll('.sh-panel-body .sh-track').length === 2);
     assert.equal(await page.evaluate(() => document.activeElement.classList.contains('sh-panel-body')),
-      'successful retry returns focus to the loaded panel');
+      true, 'successful retry returns focus to the loaded panel');
     console.log('SpaceHome generic retry restores keyboard focus after failure and success');
     await page.getByRole('button', { name: '歌单', exact: true }).click(); await page.waitForSelector('.sh-playlist');
     await page.locator('.sh-playlist').click(); await page.waitForSelector('.sh-playlist-summary');

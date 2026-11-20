@@ -184,7 +184,7 @@ async function swipe(page, from, to, cancel = false) {
     assert.equal(await page.locator('.hz-queue-row').count(), 8); await capture('hertz-desktop-queue');
     await page.locator('.hz-queue-head .hz-icon').click();
     assert.deepEqual(await page.locator('#rail > .rail-item').evaluateAll(nodes => nodes.map(node => node.dataset.view)),
-      ['home', 'library', 'online', 'playlists', 'settings'], 'Online and playlists remain in the primary navigation');
+      ['home', 'library', 'online', 'daily', 'playlists', 'queue', 'favorites', 'settings'], 'Daily, queue and favorites remain in the primary navigation');
     assert.equal(await page.locator('#rail > [data-view="online"]').isVisible(), true);
     assert.equal(await page.locator('#rail > [data-view="playlists"]').isVisible(), true);
     assert.equal(await page.locator('.hz-rail-playlists .hz-nav-caption').count(), 0);

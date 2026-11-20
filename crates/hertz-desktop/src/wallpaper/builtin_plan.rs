@@ -402,12 +402,6 @@ fn admit_source(
             "model、3D group 或显式 canvas.scene3d camera 尚未支持",
         ));
     }
-    if !compiled.document().effects.is_empty()
-        || !compiled.ir().tracks().is_empty()
-        || !compiled.ir().bindings().is_empty()
-    {
-        return Err(reject("效果、轨道或绑定 adapter 尚未支持"));
-    }
     let definition = catalog
         .scene(scene_id)
         .ok_or_else(|| reject("registry scene 缺失"))?;

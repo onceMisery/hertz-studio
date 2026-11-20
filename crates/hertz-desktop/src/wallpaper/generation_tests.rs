@@ -2,7 +2,7 @@
 use super::*;
 use std::io::{Read, Write};
 
-fn connection() -> Connection {
+pub(super) fn connection() -> Connection {
     let root = std::env::temp_dir().join(format!("hertz-native-pairing-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     let profile = crate::config::Profile::Standalone {
@@ -263,7 +263,7 @@ fn invalidating_displayed_quote_retains_confirmed_task_and_replay_authority() {
     assert_eq!(status["submissionPending"], true);
 }
 
-fn listener(response: Vec<u8>) -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+pub(super) fn listener(response: Vec<u8>) -> (u16, std::thread::JoinHandle<Vec<u8>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let worker = std::thread::spawn(move || {
@@ -539,8 +539,9 @@ async fn composition_confirmation_does_not_hold_native_state_while_waiting_for_s
     // the quote's longer deadline. No request may consume that expired session.
     let profile = {
         let mut state = lock(&service.state);
-        state.connection.as_mut().unwrap().expires =
-            Some(Instant::now() + Duration::from_millis(150));
+        // Keep the session valid through fixture SQL and thread dispatch. Expire
+        // it only after the second confirmation has reached the actual SQL wait.
+        state.connection.as_mut().unwrap().expires = Some(Instant::now() + Duration::from_secs(60));
         state.quote = Some(Quote {
             owner: 9,
             token: "confirmation".into(),
@@ -589,16 +590,7 @@ async fn composition_confirmation_does_not_hold_native_state_while_waiting_for_s
     })
     .await
     .unwrap();
-    while lock(&service.state)
-        .connection
-        .as_ref()
-        .unwrap()
-        .expires
-        .unwrap()
-        > Instant::now()
-    {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    lock(&service.state).connection.as_mut().unwrap().expires = Some(Instant::now());
     transaction.rollback().await.unwrap();
     assert_eq!(worker.join().unwrap().unwrap_err().code, "ai_superseded");
     assert!(lock(&service.state).submission.is_none());

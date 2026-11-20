@@ -60,6 +60,9 @@ html[data-skin="hertz"] #rail .rail-item > span { display: inline; }
 html[data-skin="hertz"] .rail-item.active { color: var(--text); background: var(--panel-2); box-shadow: none; }
 html[data-skin="hertz"] .rail-item::before { display: none; }
 html[data-skin="hertz"] .rail-item:hover { color: var(--text); background: var(--hover); }
+/* 收藏是导航里的固定语义：心形常红，不跟随选中/悬停的文字色。 */
+html[data-skin="hertz"] .rail-item[data-view="favorites"] > svg,
+html[data-skin="hertz"] .hz-menu-entry[data-view="favorites"] svg { color: #ff4d6d; }
 html[data-skin="hertz"] .rail-spacer { min-height: 12px; }
 .hz-nav-caption { font-size: 11px; color: var(--muted); padding: 0 13px; margin: 22px 0 10px; }
 .hz-listening-modes { margin-top: 16px; }

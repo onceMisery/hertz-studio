@@ -168,7 +168,7 @@ async function main() {
     assert.equal(originalJoin.invitation, invitation, 'full-invite join submits the verified token');
     assert.equal(f.button('加入房间').disabled, true, 'unknown join disables the original write');
     assert.match(f.root.textContent, /加入结果尚未确认/);
-    await walk(dialog).find(node => node.tagName === 'button' && node.textContent === '关闭').onclick();
+    await walk(dialog).find(node => node.tagName === 'button' && node.className.includes('room-entry-dialog-close')).onclick();
     assert.equal(dialog.open, false);
     await f.button('使用邀请加入').onclick();
     assert.equal(f.field('邀请或 8 位查找码', dialog).value, invitation, 'closing and reopening keeps the uncertain invitation draft');

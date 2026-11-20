@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 //! Restricted native WebView2 owner. No host initialization, trusted resource bridge or IPC.
 use super::protocol::*;
+use super::renderer_probe::{NativeDenials, NetworkTargets, RendererReceipt};
 use super::sandbox::{self, Handle};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -272,6 +273,23 @@ struct ProbeReady {
     height: u32,
     marker: String,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProbeStarted {
+    #[serde(rename = "type")]
+    kind: String,
+    marker: String,
+    mode: ProbeMode,
+    allocated_bytes: u64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RendererCompleted {
+    #[serde(rename = "type")]
+    kind: String,
+    marker: String,
+    receipt: RendererReceipt,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticReadback<T> {
@@ -476,6 +494,10 @@ pub struct RestrictedView {
     ready: Rc<RefCell<bool>>,
     navigation: Rc<RefCell<bool>>,
     fatal: Rc<RefCell<Option<String>>>,
+    probe_armed: Rc<Cell<bool>>,
+    probe_started: Rc<RefCell<Option<u64>>>,
+    renderer_completed: Rc<RefCell<Option<RendererReceipt>>>,
+    denials: Rc<RefCell<NativeDenials>>,
     closed: bool,
 }
 impl RestrictedView {
@@ -616,6 +638,10 @@ impl RestrictedView {
         let ready = Rc::new(RefCell::new(false));
         let navigation = Rc::new(RefCell::new(false));
         let fatal = Rc::new(RefCell::new(None));
+        let probe_armed = Rc::new(Cell::new(false));
+        let probe_started = Rc::new(RefCell::new(None));
+        let renderer_completed = Rc::new(RefCell::new(None));
+        let denials = Rc::new(RefCell::new(NativeDenials::default()));
         let mut token = 0;
         let identity = bootstrap.identity.clone();
         let origin = bootstrap.origin();
@@ -623,6 +649,7 @@ impl RestrictedView {
         let requests = pending.clone();
         let env = environment.clone();
         let mut next = 1u64;
+        let denied = denials.clone();
         let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
                 return Ok(());
@@ -650,6 +677,8 @@ impl RestrictedView {
             if request.validate(&identity).is_err()
                 || requests.borrow().len() >= RESOURCE_CONCURRENCY
             {
+                let mut counts = denied.borrow_mut();
+                counts.resource = counts.resource.saturating_add(1);
                 unsafe { respond(&env, &args, 403, "text/plain", b"") }?;
                 return Ok(());
             }
@@ -669,6 +698,7 @@ impl RestrictedView {
         }));
         unsafe { core.add_WebResourceRequested(&handler, &mut token) }?;
         let entry = bootstrap.entry_url();
+        let denied = denials.clone();
         let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 unsafe { args.SetCancel(true) }?;
@@ -677,21 +707,30 @@ impl RestrictedView {
                 let uri = bounded_string(uri, CONTROL_LIMIT)?;
                 if uri == entry {
                     unsafe { args.SetCancel(false) }?;
+                } else {
+                    let mut counts = denied.borrow_mut();
+                    counts.navigation = counts.navigation.saturating_add(1);
                 }
             }
             Ok(())
         }));
         unsafe { core.add_NavigationStarting(&handler, &mut token) }?;
-        let handler = NewWindowRequestedEventHandler::create(Box::new(|_, args| {
+        let denied = denials.clone();
+        let handler = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 unsafe { args.SetHandled(true) }?;
+                let mut counts = denied.borrow_mut();
+                counts.new_window = counts.new_window.saturating_add(1);
             }
             Ok(())
         }));
         unsafe { core.add_NewWindowRequested(&handler, &mut token) }?;
-        let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
+        let denied = denials.clone();
+        let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 unsafe { args.SetCancel(true) }?;
+                let mut counts = denied.borrow_mut();
+                counts.external_uri = counts.external_uri.saturating_add(1);
             }
             Ok(())
         }));
@@ -699,19 +738,25 @@ impl RestrictedView {
             core.cast::<ICoreWebView2_18>()?
                 .add_LaunchingExternalUriScheme(&handler, &mut token)
         }?;
-        let handler = PermissionRequestedEventHandler::create(Box::new(|_, args| {
+        let denied = denials.clone();
+        let handler = PermissionRequestedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) }?;
+                let mut counts = denied.borrow_mut();
+                counts.permission = counts.permission.saturating_add(1);
             }
             Ok(())
         }));
         unsafe { core.add_PermissionRequested(&handler, &mut token) }?;
-        let handler = DownloadStartingEventHandler::create(Box::new(|_, args| {
+        let denied = denials.clone();
+        let handler = DownloadStartingEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 unsafe {
                     args.SetCancel(true)?;
                     args.SetHandled(true)?;
                 }
+                let mut counts = denied.borrow_mut();
+                counts.download = counts.download.saturating_add(1);
             }
             Ok(())
         }));
@@ -721,6 +766,9 @@ impl RestrictedView {
         }?;
         let gate = navigation.clone();
         let failure = fatal.clone();
+        let armed = probe_armed.clone();
+        let denied = denials.clone();
+        let network_probe = bootstrap.probe_mode == ProbeMode::RendererNetwork;
         let handler = NavigationCompletedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 let mut success = BOOL::default();
@@ -728,7 +776,17 @@ impl RestrictedView {
                 if success.as_bool() {
                     *gate.borrow_mut() = true;
                 } else {
-                    *failure.borrow_mut() = Some("fixed probe navigation failed".into());
+                    let mut status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                    unsafe { args.WebErrorStatus(&mut status) }?;
+                    // An armed network workload deliberately exercises canceled
+                    // navigation after first-frame admission. Other failures stay fatal.
+                    if !(network_probe
+                        && armed.get()
+                        && denied.borrow().navigation > 0
+                        && status == COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED)
+                    {
+                        *failure.borrow_mut() = Some("fixed probe navigation failed".into());
+                    }
                 }
             }
             Ok(())
@@ -741,6 +799,12 @@ impl RestrictedView {
         let height = bootstrap.viewport.height;
         let diagnostic_controller = controller.clone();
         let diagnostic_hwnd = window.hwnd;
+        let armed = probe_armed.clone();
+        let started = probe_started.clone();
+        let completed = renderer_completed.clone();
+        let probe_mode = bootstrap.probe_mode;
+        let mut start_received = false;
+        let mut completion_received = false;
         let handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 let mut raw = PWSTR::null();
@@ -754,6 +818,45 @@ impl RestrictedView {
                 };
                 if raw.len() > CONTROL_LIMIT || !rate.admit() {
                     *failure.borrow_mut() = Some("worker page protocol limit".into());
+                    return Ok(());
+                }
+                if let Ok(message) = serde_json::from_str::<ProbeStarted>(&raw) {
+                    if armed.get()
+                        && !start_received
+                        && message.kind == "probeStarted"
+                        && message.marker == "hertz-g3s-adversarial-v1"
+                        && message.mode == probe_mode
+                        && probe_mode.has_workload()
+                        && message.allocated_bytes
+                            == if probe_mode == ProbeMode::BoundedMemory {
+                                PROBE_MEMORY_BYTES
+                            } else {
+                                0
+                            }
+                    {
+                        start_received = true;
+                        *started.borrow_mut() = Some(message.allocated_bytes);
+                    } else {
+                        *failure.borrow_mut() =
+                            Some("invalid fixed workload acknowledgement".into());
+                    }
+                    return Ok(());
+                }
+                if let Ok(message) = serde_json::from_str::<RendererCompleted>(&raw) {
+                    if armed.get()
+                        && start_received
+                        && !completion_received
+                        && message.kind == "rendererCompleted"
+                        && message.marker == "hertz-g3s-renderer-v1"
+                        && message.receipt.mode() == probe_mode
+                        && message.receipt.validate().is_ok()
+                    {
+                        completion_received = true;
+                        *completed.borrow_mut() = Some(message.receipt);
+                    } else {
+                        *failure.borrow_mut() =
+                            Some("invalid renderer workload acknowledgement".into());
+                    }
                     return Ok(());
                 }
                 match serde_json::from_str::<ProbeReady>(&raw) {
@@ -795,6 +898,10 @@ impl RestrictedView {
             ready,
             navigation,
             fatal,
+            probe_armed,
+            probe_started,
+            renderer_completed,
+            denials,
             closed: false,
         })
     }
@@ -826,6 +933,41 @@ impl RestrictedView {
     }
     pub fn ready(&self) -> bool {
         *self.ready.borrow() && *self.navigation.borrow()
+    }
+    fn start_probe(&self, mode: ProbeMode, targets: Option<&NetworkTargets>) -> Result<()> {
+        if !mode.has_workload() || self.probe_armed.replace(true) {
+            bail!("unexpected fixed workload request");
+        }
+        let source = if mode.is_renderer() {
+            include_str!("../../assets/wallpaper-sandbox-renderer-probes.js")
+        } else {
+            include_str!("../../assets/wallpaper-sandbox-adversarial.js")
+        };
+        let script = format!(
+            "({source})({},{})",
+            serde_json::to_string(&mode)?,
+            serde_json::to_string(&targets)?
+        );
+        let failure = self.fatal.clone();
+        let handler = ExecuteScriptCompletedHandler::create(Box::new(move |result, _| {
+            if result.is_err() {
+                *failure.borrow_mut() = Some("fixed workload execution failed".into());
+            }
+            Ok(())
+        }));
+        unsafe { self.core.ExecuteScript(&HSTRING::from(script), &handler) }?;
+        Ok(())
+    }
+    fn suspend_probe(&self) -> Result<Receiver<bool>> {
+        unsafe { self.controller.SetIsVisible(false) }?;
+        let core = self.core.cast::<ICoreWebView2_3>()?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let handler = TrySuspendCompletedHandler::create(Box::new(move |result, suspended| {
+            let _ = sender.try_send(result.is_ok() && suspended);
+            Ok(())
+        }));
+        unsafe { core.TrySuspend(&handler) }?;
+        Ok(receiver)
     }
     pub fn processes(&self) -> Result<(u32, Vec<ProcessIdentity>)> {
         let mut browser = 0;
@@ -960,6 +1102,25 @@ pub fn run(
         },
     )?;
     let result = (|| -> Result<()> {
+        if bootstrap.probe_mode == ProbeMode::OsBoundaries {
+            let receipt = sandbox::probe_boundaries(&bootstrap, parent.0, |stage| {
+                write_json(
+                    &mut control_write,
+                    &WorkerControl::Stage {
+                        identity: bootstrap.identity.clone(),
+                        stage: stage.into(),
+                    },
+                )
+                .map_err(Into::into)
+            })?;
+            write_json(
+                &mut control_write,
+                &WorkerControl::Boundaries {
+                    identity: bootstrap.identity.clone(),
+                    receipt,
+                },
+            )?;
+        }
         write_json(
             &mut control_write,
             &WorkerControl::Stage {
@@ -1010,14 +1171,87 @@ pub fn run(
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let mut frame = false;
         let mut last_processes = Instant::now() - Duration::from_secs(1);
+        let mut probe_running = false;
+        let mut probe_rejected = false;
+        let mut suspend = None::<Receiver<bool>>;
         loop {
             if let Ok(message) = control_rx.try_recv() {
                 match message? {
                     ParentControl::Stop { identity } if identity == bootstrap.identity => break,
+                    ParentControl::RunProbe { identity }
+                        if identity == bootstrap.identity && frame && !probe_running =>
+                    {
+                        view.start_probe(bootstrap.probe_mode, bootstrap.network_targets.as_ref())?;
+                        probe_running = true;
+                    }
+                    ParentControl::SuspendProbe { identity }
+                        if identity == bootstrap.identity
+                            && bootstrap.probe_mode == ProbeMode::BusySuspend
+                            && probe_running
+                            && suspend.is_none() =>
+                    {
+                        suspend = Some(view.suspend_probe()?);
+                        write_json(
+                            &mut control_write,
+                            &WorkerControl::SuspendRequested {
+                                identity: bootstrap.identity.clone(),
+                            },
+                        )?;
+                    }
                     _ => bail!("unexpected or stale parent frame"),
                 }
             }
-            view.tick()?;
+            if !probe_rejected {
+                let tick = view.tick();
+                if let Some(allocated_bytes) = view.probe_started.borrow_mut().take() {
+                    write_json(
+                        &mut control_write,
+                        &WorkerControl::ProbeStarted {
+                            identity: bootstrap.identity.clone(),
+                            mode: bootstrap.probe_mode,
+                            allocated_bytes,
+                        },
+                    )?;
+                }
+                if let Some(receipt) = view.renderer_completed.borrow_mut().take() {
+                    write_json(
+                        &mut control_write,
+                        &WorkerControl::RendererCompleted {
+                            identity: bootstrap.identity.clone(),
+                            receipt,
+                            denials: view.denials.borrow().clone(),
+                        },
+                    )?;
+                }
+                if let Err(error) = tick {
+                    if bootstrap.probe_mode == ProbeMode::MessageFlood
+                        && probe_running
+                        && error.to_string() == "worker page protocol limit"
+                    {
+                        probe_rejected = true;
+                        write_json(
+                            &mut control_write,
+                            &WorkerControl::ProbeRejected {
+                                identity: bootstrap.identity.clone(),
+                                reason: "worker page protocol limit".into(),
+                            },
+                        )?;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+            if let Some(receiver) = &suspend {
+                if let Ok(succeeded) = receiver.try_recv() {
+                    write_json(
+                        &mut control_write,
+                        &WorkerControl::SuspendResult {
+                            identity: bootstrap.identity.clone(),
+                            succeeded,
+                        },
+                    )?;
+                }
+            }
             if last_processes.elapsed() >= Duration::from_millis(500) {
                 let (browser, processes) = view.processes()?;
                 write_json(

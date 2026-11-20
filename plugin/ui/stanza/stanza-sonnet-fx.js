@@ -27,6 +27,16 @@
     node.removeChildren().forEach(destroyDisplayTree);
     node.destroy();
   }
+  function resourceBoundary(Director) {
+    ['resize','buildShot','update'].forEach(function (key) {
+      var original = Director.prototype[key];
+      Director.prototype[key] = function () {
+        var self = this, args = arguments;
+        return self.resources ? self.resources.run(function () { return original.apply(self,args); })
+          : original.apply(self,args);
+      };
+    });
+  }
   function ease(v) { var t = clamp(v, 0, 1); return t * t * (3 - 2 * t); }
   function expo(v) { var t = clamp(v, 0, 1); return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
 
@@ -832,8 +842,15 @@
   // 音频：谱通量起音检测（非节拍栅格 —— 瞬态只加冲击，绝不参与布景/镜头决策）
   // ------------------------------------------------------------------
 
-  function createOnsetDetector() {
-    var bins = new Float32Array(48);
+  function createOnsetDetector(options) {
+    var bins = null, binsTicket = null;
+    function history() {
+      if (bins) return;
+      var owner = options && options.resources;
+      if (owner) binsTicket = owner.reserve({ownedCpuBytes:48 * 4}, 'Stanza onset Float32 history');
+      bins = new Float32Array(48);
+      if (binsTicket) binsTicket.commit();
+    }
     var lastTime = null, track = null, source = null, playing = false;
     var baseline = 0.02, energy = 0, hitAt = -Infinity, hitStrength = 0, hits = 0;
     var state = { impact: 0, energy: 0, time: 0, reset: true, onsets: 0 };
@@ -842,6 +859,7 @@
     };
     return {
       update: function (frame) {
+        history();
         var time = num(frame.playbackTime, 0);
         var identity = (frame.track && (frame.track.path || frame.track.title)) || '';
         var dt = lastTime === null ? 0 : time - lastTime;
@@ -885,8 +903,14 @@
         playing = Boolean(frame.isPlaying);
         return state;
       },
-      snapshot: function () { return Object.assign({}, state, { historyBins: bins.length }); },
-      reset: function () { lastTime = null; hitAt = -Infinity; bins.fill(0); }
+      snapshot: function () { return Object.assign({}, state, { historyBins: bins ? bins.length : 0 }); },
+      reset: function () { lastTime = null; hitAt = -Infinity; if (bins) bins.fill(0); },
+      setResources: function (resources) { options = {resources:resources}; },
+      destroy: function () {
+        bins = null;
+        source = track = null;
+        if (binsTicket) { options.resources.free(binsTicket); binsTicket = null; }
+      }
     };
   }
 
@@ -932,7 +956,9 @@
       snapshot: function () {
         return Object.assign({}, state, onset.snapshot());
       },
-      reset: function () { onset.reset(); }
+      reset: function () { onset.reset(); },
+      setResources: function (resources) { onset.setResources(resources); },
+      destroy: function () { onset.destroy(); }
     };
   }
 
@@ -1122,7 +1148,8 @@
     '}'
   ].join('\n');
 
-  function createHalation(PIXI, stage) {
+  function createHalation(PIXI, stage, resources) {
+    var ticket = resources && resources.reserve({ownedCpuBytes:3 * 4}, 'halation Float32 tint');
     var descriptors = {
       uThreshold: { value: 0.62, type: 'f32' },
       uSpread: { value: 2.4, type: 'f32' },
@@ -1130,6 +1157,7 @@
       uTint: { value: new Float32Array([1, 0.82, 0.72]), type: 'vec3<f32>' }
     };
     var uniforms = new PIXI.UniformGroup(descriptors);
+    if (ticket) ticket.commit();
     var filter = new PIXI.Filter({
       glProgram: PIXI.GlProgram.from({ vertex: OPTICAL_VS, fragment: HALATION_FS, name: 'hertz-stanza-halation' }),
       resources: { halationUniforms: uniforms },
@@ -1165,17 +1193,20 @@
         uniforms.uniforms.uThreshold = amount(tuning.halationThreshold, 0.62, 1);
         uniforms.uniforms.uSpread = amount(tuning.halationSpread, 2.4, 6);
       },
-      destroy: function () { stage.filters = null; filter.destroy(); }
+      destroy: function () { stage.filters = null; filter.destroy(); uniforms.uniforms.uTint = null;
+        descriptors.uTint.value = null; if (ticket) { resources.free(ticket); ticket = null; } }
     };
   }
 
 
-  function createPostProcess(PIXI, stage) {
+  function createPostProcess(PIXI, stage, resources) {
+    var ticket = resources && resources.reserve({ownedCpuBytes:3 * 4}, 'optical Float32 paper tint');
     var descriptors = {};
     ['Distortion', 'Dispersion', 'Grain', 'Contrast', 'Halftone', 'Vignette', 'Time']
       .forEach(function (key) { descriptors['u' + key] = { value: 0, type: 'f32' }; });
     descriptors.uPaper = { value: new Float32Array([0, 0, 0]), type: 'vec3<f32>' };
     var uniforms = new PIXI.UniformGroup(descriptors);
+    if (ticket) ticket.commit();
     var filter = new PIXI.Filter({
       glProgram: PIXI.GlProgram.from({ vertex: OPTICAL_VS, fragment: OPTICAL_FS, name: 'hertz-sonnet-optical-print' }),
       resources: { opticalUniforms: uniforms },
@@ -1218,7 +1249,8 @@
         var n = parseInt(paper.slice(1), 16) || 0;
         uniforms.uniforms.uPaper.set([(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]);
       },
-      destroy: function () { stage.filters = null; filter.destroy(); }
+      destroy: function () { stage.filters = null; filter.destroy(); uniforms.uniforms.uPaper = null;
+        descriptors.uPaper.value = null; if (ticket) { resources.free(ticket); ticket = null; } }
     };
   }
 
@@ -1227,9 +1259,11 @@
   // 两个渲染器共用 —— 顺序与开关判定只有这一处，避免各写一遍后各自漂移。
   // ------------------------------------------------------------------
 
-  function createOpticalChain(PIXI, stage) {
-    var print = createPostProcess(PIXI, stage);
-    var halation = createHalation(PIXI, stage);
+  function createOpticalChain(PIXI, stage, resources) {
+    var print = createPostProcess(PIXI, stage, resources);
+    var halation;
+    try { halation = createHalation(PIXI, stage, resources); }
+    catch (error) { print.destroy(); throw error; }
     function sync() {
       // 印相在前、光晕在后。印相被关掉时（节能模式 / 全部参数为 0）光晕单独生效，
       // 不能因为「前置 pass 没了」就一起消失。
@@ -1271,10 +1305,11 @@
   function createRetirement(PIXI, stage) {
     var duration = 0.6;
     var layer = null, born = 0, lastFrame = null, lastTuning = null, outgoingLine = null;
-    var lyricLayer = null, lyricY = 0, lyricTravel = 0;
+    var lyricLayer = null, lyricY = 0, lyricTravel = 0, releaseFrameData = null;
     function release() {
       if (layer) { layer.removeFromParent(); destroyDisplayTree(layer); layer = null; }
       if (lyricLayer) { lyricLayer.removeFromParent(); destroyDisplayTree(lyricLayer); lyricLayer = null; }
+      outgoingLine = null;
     }
     return {
       capture: function (containers, scene, nextLine, words) {
@@ -1358,13 +1393,18 @@
             }
           }
         }
+        if (!lastFrame || lastFrame.lines !== frame.lines) {
+          if (releaseFrameData) releaseFrameData();
+          releaseFrameData = frame.retainLines && frame.retainLines();
+        }
         lastFrame = frame;
         lastTuning = tuning;
         return incoming;
       },
       snapshot: function () { return { outgoingLayers: layer ? 1 : 0,
         outgoingGlyphs: lyricLayer ? lyricLayer.children.length : 0 }; },
-      destroy: function () { release(); lastFrame = lastTuning = outgoingLine = null; }
+      destroy: function () { release(); lastFrame = lastTuning = outgoingLine = null;
+        if (releaseFrameData) { releaseFrameData(); releaseFrameData = null; } }
     };
   }
 
@@ -1558,6 +1598,7 @@
     cameraPose: cameraPose, releaseOf: releaseOf, resolveAudioBands: resolveAudioBands,
     // PIXI 注入式构建/驱动
     destroyDisplayTree: destroyDisplayTree,
+    resourceBoundary: resourceBoundary,
     buildLyrics: buildLyrics, animateLyrics: animateLyrics,
     buildPhraseStage: buildPhraseStage, animatePhraseStage: animatePhraseStage,
     createAccentTrail: createAccentTrail,

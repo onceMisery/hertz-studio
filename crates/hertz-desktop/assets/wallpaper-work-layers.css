@@ -1,0 +1,19 @@
+/* SPDX-License-Identifier: MIT */
+.work-composition-plan { display: block; width: 100%; height: auto; max-height: 240px; box-sizing: border-box; }
+.work-composition-fields { min-width: 0; }
+.work-composition-fields h4 { overflow-wrap: anywhere; }
+.work-composition-fields input, .work-composition-fields textarea, .work-composition-fields select { box-sizing: border-box; min-width: 0; max-width: 100%; }
+.work-layer-fields { min-width: 0; margin-block: 18px; display: grid; gap: 12px; }
+.work-layer-fields[hidden], .work-layer-fields [hidden] { display: none; }
+.work-layer-fields h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.work-layer-fields .hint { margin: 0; line-height: 1.7; overflow-wrap: anywhere; }
+.work-layer-fields .field { min-width: 0; display: grid; gap: 8px; }
+.work-layer-fields select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 38px; }
+.work-layer-list { margin: 0; padding: 4px 4px 4px 30px; max-block-size: 360px; overflow: auto; overscroll-behavior: contain; }
+.work-layer-list li { padding-inline-start: calc(var(--layer-depth, 0) * 12px); margin-block: 4px; color: var(--muted); }
+.work-layer-select { width: 100%; min-height: 38px; text-align: start; white-space: normal; overflow-wrap: anywhere; }
+.work-layer-select[aria-pressed="true"] { color: var(--text); border-color: var(--accent); background: var(--control); }
+.work-layer-fields button:focus-visible, .work-layer-fields select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.work-layer-order { flex-wrap: wrap; }
+.work-layer-order button[aria-disabled="true"] { color: var(--muted); cursor: default; }
+@media (pointer: coarse) { .work-layer-fields button, .work-layer-fields select { min-height: 44px; } }

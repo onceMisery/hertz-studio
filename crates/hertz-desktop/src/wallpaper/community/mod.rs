@@ -2,6 +2,9 @@
 //! Native community transport, trust and subscriptions. Installation and Config
 //! remain with ImportJobs/AssetStore/Library and the original ApplyTransaction.
 pub(crate) mod auth;
+pub(crate) mod author;
+mod author_model;
+mod author_transport;
 pub(crate) mod credentials;
 mod database;
 pub(crate) mod gate;

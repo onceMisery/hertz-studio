@@ -20,6 +20,10 @@
       try { await window.hertzWallpaperWork.flush(); }
       catch (error) { status('作品尚未保存：' + error.message, true); return; }
     }
+    if (window.hertzWallpaperPlaylist) {
+      try { await window.hertzWallpaperPlaylist.flush(); }
+      catch (error) { status('轮播列表尚未保存：' + error.message, true); return; }
+    }
     if (dirty || pending) { $('close-confirm').hidden = false; $('continue-editing').focus(); return; }
     send('close');
   }
@@ -192,7 +196,7 @@
     managementRequests.delete(receipt.requestId); clearTimeout(waiting.timer);
     if (receipt.ok) {
       waiting.resolve(receipt);
-      if (['wallpaper.playlist.save', 'wallpaper.library.deleteVersion', 'wallpaper.library.deleteWork'].includes(waiting.command)
+      if (['wallpaper.playlist.save', 'wallpaper.playlist.update', 'wallpaper.library.deleteVersion', 'wallpaper.library.deleteWork'].includes(waiting.command)
         || waiting.command === 'wallpaper.library.list' && waiting.firstPage
         || waiting.command === 'wallpaper.jobs.get' && receipt.result && receipt.result.kind === 'import' && receipt.result.state === 'done') { invalidateGroupLayouts(); invalidatePublicProperties(); }
     }
@@ -285,10 +289,13 @@
     (Array.isArray(groups) ? groups.slice(0, 4) : []).forEach(function (group) {
       if (!group || typeof group.id !== 'string' || next.has(group.id)) return;
       var members = Array.isArray(group.displays) ? group.displays.length : 0;
-      var key = JSON.stringify([group.selection, members]), entry = layoutEntries.get(group.id);
+      var properties = group.properties || {};
+      var key = JSON.stringify([group.selection, members, Object.keys(properties).sort().map(function (id) { return [id, properties[id]]; })]);
+      var entry = layoutEntries.get(group.id);
       if (!entry || entry.key !== key) {
         var cached = layoutCache.get(key);
         entry = { key: key, epoch: layoutEpoch, groupId: group.id, selection: clone(group.selection || null), members: members,
+          properties: clone(properties),
           attempts: 0, retryAt: 0, state: cached ? 'ready' : 'pending', result: cached || null,
           reason: cached ? cached.reason : '正在检查当前内容的镜像支持…' };
         if (!group.selection || members < 1 || members > 4) {
@@ -329,7 +336,7 @@
     if (polling) { entry = polling.retryAt <= now ? polling : null; nextAt = polling.retryAt; }
     if (!entry) { if (Number.isFinite(nextAt)) scheduleGroupLayoutCheck(Math.max(0, nextAt - now)); return; }
     layoutRequest = entry;
-    requestManagement('wallpaper.layout.inspect', { selection: entry.selection, members: entry.members }).then(function (receipt) {
+    requestManagement('wallpaper.layout.inspect', { selection: entry.selection, members: entry.members, properties: entry.properties }).then(function (receipt) {
       if (!currentLayoutEntry(entry)) return;
       if (receipt.result && receipt.result.pending === true) {
         entry.inspecting = true; entry.attempts = 0; entry.retryAt = performance.now() + 500;
@@ -977,11 +984,11 @@
     var runtime = payload.runtime || {}, globalWallpaper = runtime.wallpaper || {}, target = selectedRuntime(payload), wallpaper = target || {}, policy = runtime.policy || {};
     var diagnostics = wallpaper.diagnostics || (!Array.isArray(globalWallpaper.targets) ? runtime.diagnostics : null) || {};
     var reasons = diagnostics.pauseReasons || [];
-    var reasonText = { fullscreen:'前台应用处于全屏', maximized:'前台应用已最大化', applicationRule:'指定应用正在前台', sessionUnavailable:'Windows 已锁屏或会话不可用', displayOff:'显示器已关闭', displayMissing:'目标显示器未连接', manualPause:'已从托盘隐藏', battery:'使用电池供电', noSurface:'壁纸尚未挂载', pageNotReady:'渲染页面正在准备' };
+    var reasonText = { fullscreen:'前台应用处于全屏', maximized:'前台应用已最大化', applicationRule:'指定应用正在前台', aiGeneration:'本地生成期间暂停', sessionUnavailable:'Windows 已锁屏或会话不可用', displayOff:'显示器已关闭', displayMissing:'目标显示器未连接', manualPause:'已从托盘隐藏', battery:'使用电池供电', noSurface:'壁纸尚未挂载', pageNotReady:'渲染页面正在准备' };
     function targetStopped(item) { return item.enabled && item.applicationRule === 'stop'; }
     function targetPaused(item) {
       return item.enabled && !targetStopped(item) && (item.applicationRule === 'pause'
-        || (item.diagnostics && item.diagnostics.pauseReasons || []).some(function (reason) { return ['fullscreen','maximized','applicationRule','sessionUnavailable','displayOff','battery'].includes(reason); }));
+        || (item.diagnostics && item.diagnostics.pauseReasons || []).some(function (reason) { return ['fullscreen','maximized','applicationRule','aiGeneration','sessionUnavailable','displayOff','battery'].includes(reason); }));
     }
     var stopped = targetStopped(wallpaper), retained = wallpaper.staticFrameRetained || wallpaper.handoff && wallpaper.handoff.pauseRetained;
     var paused = targetPaused(wallpaper) || wallpaper.enabled && !stopped && reasons.some(function (reason) { return ['fullscreen','maximized','applicationRule','sessionUnavailable','displayOff','battery'].includes(reason); });

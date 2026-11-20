@@ -316,6 +316,28 @@ impl Fixture {
         (&*self.library.trust().pool).close().await;
         self.root
     }
+
+    pub fn into_jobs(
+        self,
+    ) -> (
+        crate::wallpaper::jobs::ImportJobs,
+        Authority,
+        tempfileish::TempDir,
+    ) {
+        let Self {
+            root,
+            library,
+            assets,
+            authority,
+        } = self;
+        let probe =
+            crate::wallpaper::decode_probe::ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+        (
+            crate::wallpaper::jobs::ImportJobs::start(library, assets, probe),
+            authority,
+            root,
+        )
+    }
 }
 
 pub(super) fn binding(revision: i64, previous: Option<FixedVersion>) -> Binding {

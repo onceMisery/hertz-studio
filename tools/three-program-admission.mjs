@@ -53,5 +53,11 @@ export function withProgramAdmission(source) {
 \t\ttry { gl.deleteShader(shader); } catch (_) { error.hertzProgramCleanupFailed = true; }
 \t\tthrow error;
 \t}`);
+  // Whole-renderer teardown is the last owner of programs whose internal
+  // material (for example a shadow pass) is not exposed to application scopes.
+  source = replaceOnce(source, '\t\t_customShaders.dispose();', `\t\t_customShaders.dispose();
+\t\tfor (const program of programs) program.destroy();
+\t\tprograms.length = 0;
+\t\tprogramsMap.clear();`);
   return source;
 }

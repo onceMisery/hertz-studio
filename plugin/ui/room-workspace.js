@@ -145,7 +145,9 @@
             });
           }
         };
-        const close = button('关闭', () => dialog.close(), 'room-entry-dialog-close'); close.setAttribute('aria-label', '关闭' + title);
+        const close = h('button', 'iconbtn room-entry-dialog-close'); close.type = 'button';
+        close.title = '关闭'; close.setAttribute('aria-label', '关闭' + title);
+        close.append(icon('close')); close.onclick = () => dialog.close();
         head.append(heading, close); body.append(notice); node.append(head, body, verification); root.append(node);
         node.oncancel = event => { event.preventDefault(); dialog.close(); };
         node.onkeydown = event => {

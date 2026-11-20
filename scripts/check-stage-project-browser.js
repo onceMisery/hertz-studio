@@ -98,7 +98,10 @@ async function main(){
     await seek(1500,.5);await seek(0,0);await seek(1500,.5);
     await page.waitForTimeout(300);assert.equal(await page.evaluate(()=>CreativeStage.runtime()['look.bloom']),.5,'Paused song clock freezes absolute cue');
     await page.evaluate(()=>CreativeStage.setParam('look.grain',.137));
-    await page.reload();await page.waitForFunction(()=>window.CreativeProject && CreativeStage.preset().project);
+    await page.reload();
+    await page.waitForFunction(()=>window.HertzStartup && HertzStartup.state.appReady && HertzStartup.state.dismissed);
+    await page.evaluate(()=>CreativeStage.hydrated());
+    await page.waitForFunction(()=>window.CreativeProject && CreativeStage.preset()?.project);
     assert.equal(await page.evaluate(()=>CreativeStage.preset().look.grain),.137,'pagehide flushes an edit made inside the autosave delay');
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('io');});
     await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
@@ -228,8 +231,15 @@ async function main(){
     assert.equal(await page.evaluate(()=>CreativeStage.preset().cues[1].at),1.1,
       'Reopening the saved project restores the cue edit after the share-code import');
     await seek(1350,.3);
-    await page.evaluate(()=>{window.videoDone=VideoExport.begin({preset:{id:'720p'},format:'webm',systemAudio:false});});
-    await page.waitForFunction(()=>VideoExport.status().phase==='recording');await page.waitForTimeout(1100);
+    await page.evaluate(()=>{window.videoError=null;window.videoDone=VideoExport.begin({preset:{id:'720p'},format:'webm',systemAudio:false})
+      .catch(error=>{window.videoError=error.message;return null;});});
+    await page.waitForFunction(()=>VideoExport.status().phase==='recording'||window.videoError,null,{timeout:16000});
+    assert.equal(await page.evaluate(()=>window.videoError),null,'Recording startup must succeed under the page resource policy');
+    const recording=await page.evaluate(()=>({status:VideoExport.status(),resources:Stage.resources().snapshot()}));
+    assert.equal(recording.resources.caps.ownedCpuBytes,128*1024*1024);
+    assert.equal(recording.status.maxBytes,32*1024*1024);
+    assert.ok(recording.resources.held.ownedCpuBytes<=recording.resources.caps.ownedCpuBytes);
+    await page.waitForTimeout(1100);
     const videoEvent=page.waitForEvent('download');await page.evaluate(()=>{window.videoStopped=VideoExport.stop();});
     const videoDownload=await videoEvent;await page.evaluate(()=>Promise.all([videoDone,videoStopped]).then(()=>null));
     const videoBytes=fs.readFileSync(await videoDownload.path());assert.ok(videoBytes.length>1000);

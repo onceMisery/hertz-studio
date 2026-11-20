@@ -25,10 +25,83 @@
 
   // ------------------------------------------------------------------
   // Stage → 帧适配：把毫秒制歌词文档整形成引擎的秒制帧对象。
-  // 归一化结果按行数组身份缓存（Stage.lyrics() 稳定返回 doc.lines）。
+  // 归一化结果按行数组身份共享；帧、退场层和社论轨借用，最后用途退出即淘汰。
   // ------------------------------------------------------------------
 
-  var lineCache = new WeakMap();
+  var lineCaches = new WeakMap(), frameOwners = new WeakMap();
+  function releaseData(entry) {
+    if (!entry || --entry.users) return;
+    entry.cache.delete(entry.raw);
+    entry.lines = null;
+    entry.ticket.release({apiReleased:true, allocationEnded:true});
+  }
+  function retainData(entry) {
+    if (!entry.lines) throw new Error('resource-unavailable: normalized-lyrics');
+    entry.users++;
+    var released = false;
+    return function () { if (!released) { released = true; releaseData(entry); } };
+  }
+  function finishFrame(host) {
+    var owner = frameOwners.get(host);
+    if (!owner) return;
+    owner.previous.forEach(releaseData); owner.previous.length = 0;
+  }
+  function releaseFrame(host) {
+    var owner = frameOwners.get(host);
+    if (!owner) return;
+    finishFrame(host); releaseData(owner.current); frameOwners.delete(host);
+  }
+  function stringSize(value) {
+    if (value == null) return 0;
+    if (typeof value !== 'string') throw new Error('estimate-unavailable: lyric-text');
+    return value.length;
+  }
+  function normalizationPlan(rawLines) {
+    // Per line: 5 numeric line/hint values; 4 section numbers; 2 booleans;
+    // longest transition/glyph/section enum strings. Word: 3 numeric values.
+    // UTF16 strings are declared payload even when the engine internally shares
+    // them. Object headers, reference slots and GC capacity are not byte claims.
+    var bytes = 0;
+    for (var i = 0; i < rawLines.length; i++) {
+      var raw = rawLines[i], chars = stringSize(raw.text);
+      var tokens = raw._tokens || (raw.words && raw.words.length ? raw.words : null);
+      var count = tokens ? tokens.length : chars, tokenChars = tokens ? 0 : chars;
+      if (tokens) for (var j = 0; j < tokens.length; j++) tokenChars += stringSize(tokens[j].text);
+      bytes += 9 * 8 + 2 + ('normal'.length + 'rise'.length + 'chorus'.length) * 2
+        + count * 3 * 8 + (chars + tokenChars) * 2;
+      if (!Number.isSafeInteger(bytes)) throw new Error('estimate-unavailable: lyric-payload');
+    }
+    return bytes;
+  }
+  function acquireLines(host, rawLines) {
+    var ledger = global.Stage && Stage.resources && Stage.resources();
+    if (!ledger || ledger.contractVersion !== 1) throw new Error('resource-port-required');
+    var owner = frameOwners.get(host);
+    if (owner && owner.ledger !== ledger) { releaseFrame(host); owner = null; }
+    if (!owner) { owner = {ledger:ledger,current:null,previous:[]}; frameOwners.set(host,owner); }
+    if (owner.current && owner.current.raw === rawLines) return owner.current;
+    if (!rawLines) {
+      if (owner.current) owner.previous.push(owner.current);
+      owner.current = null; return null;
+    }
+    var cache = lineCaches.get(ledger);
+    if (!cache) { cache = new WeakMap(); lineCaches.set(ledger,cache); }
+    var entry = cache.get(rawLines);
+    if (!entry) {
+      var port = ledger.port('stanza-lyrics-normalized');
+      var plannedBytes = normalizationPlan(rawLines);
+      var ticket = port.require({ownedCpuBytes:plannedBytes},
+        'normalized lyrics: Float64 line/word/section values, boolean and UTF16 payload upper bound',1,'bounded-estimate');
+      try {
+        var lines = normalizeLines(rawLines, plannedBytes);
+        ticket.commit(); entry = {raw:rawLines,lines:lines,ticket:ticket,cache:cache,users:0}; cache.set(rawLines,entry);
+        entry.retain = function () { return retainData(entry); };
+      } catch (error) { ticket.release({apiReleased:true,allocationEnded:true}); throw error; }
+    }
+    if (owner.current) owner.previous.push(owner.current);
+    owner.current = entry; entry.users++;
+    return entry;
+  }
 
   function hintsFor(line) {
     var h = U.renderHints(line);
@@ -61,9 +134,8 @@
     };
   }
 
-  function normalizeLines(rawLines) {
-    var cached = lineCache.get(rawLines);
-    if (cached) return cached;
+  function normalizeLines(rawLines, plannedBytes) {
+    var payload = 0;
     var form = (global.StanzaSongForm && global.Stage && Stage.lyricTokens)
       ? global.StanzaSongForm.forDoc(rawLines, function (l) { return Stage.lyricTokens(l); })
       : null;
@@ -76,6 +148,15 @@
       var endTime = Math.max(startTime + 0.08,
         declaredEnd > startTime ? declaredEnd : (isFinite(nextStart) && nextStart > startTime ? nextStart : startTime + 5));
       var tokens = (global.Stage && Stage.lyricTokens) ? Stage.lyricTokens(raw) : [];
+      var rawTokens = raw._tokens || (raw.words && raw.words.length ? raw.words : null);
+      var tokenBound = rawTokens ? rawTokens.length : stringSize(raw.text);
+      var charsBound = rawTokens ? 0 : stringSize(raw.text), actualChars = 0;
+      if (rawTokens) for (var ti = 0; ti < rawTokens.length; ti++) charsBound += stringSize(rawTokens[ti].text);
+      for (var tj = 0; tj < tokens.length; tj++) actualChars += stringSize(tokens[tj].text);
+      if (tokens.length > tokenBound || actualChars > charsBound) throw new Error('estimate-unavailable: lyric-token-payload');
+      payload += 9 * 8 + 2 + ('normal'.length + 'rise'.length + 'chorus'.length) * 2
+        + tokens.length * 3 * 8 + (stringSize(raw.text) + actualChars) * 2;
+      if (payload > plannedBytes) throw new Error('estimate-unavailable: lyric-token-payload');
       var words = tokens.map(function (w, wi) {
         var ws = U.num(w.start_ms, raw.start_ms) / 1000;
         var we = Math.max(ws, U.num(w.end_ms, raw.end_ms != null ? raw.end_ms : raw.start_ms) / 1000);
@@ -96,7 +177,6 @@
       line.vocalEndTime = words.reduce(function (m, w) { return Math.max(m, w.endTime); }, startTime);
       return line;
     });
-    lineCache.set(rawLines, out);
     return out;
   }
 
@@ -114,7 +194,8 @@
     var positionS = (global.Stage && Stage.position ? Stage.position() : 0) / 1000;
     var doc = (global.Stage && Stage.lyrics) ? Stage.lyrics() : null;
     var rawLines = doc && doc.lines ? doc.lines : null;
-    var lines = rawLines ? normalizeLines(rawLines) : [];
+    var data = acquireLines(host, rawLines);
+    var lines = data ? data.lines : [];
     var idx = activeIndexOf(lines, positionS);
     var activeLine = idx >= 0 ? lines[idx] : null;
     var dur = activeLine ? Math.max(0.001, activeLine.endTime - activeLine.startTime) : 1;
@@ -128,6 +209,7 @@
       nextLines: idx >= 0 ? lines.slice(idx + 1, idx + 4) : lines.slice(0, 3),
       lineProgress: activeLine ? U.clamp((positionS - activeLine.startTime) / dur, 0, 1) : 0,
       lines: lines,
+      retainLines: data && data.retain,
       audio: FX.resolveAudioBands(spectrum),
       viewport: {
         width: Math.max(1, host.clientWidth || global.innerWidth || 1),
@@ -136,6 +218,19 @@
       track: pres ? pres.track : null,
       reduced: !!(pres && pres.reduced) || !!(host.closest && host.closest('.s3d-reduced'))
     };
+  }
+
+  function readableFrame(host) {
+    var pres = global.Stage && Stage.presentation ? Stage.presentation() : null;
+    var time = global.Stage && Stage.position ? Stage.position() : 0;
+    var doc = global.Stage && Stage.lyrics ? Stage.lyrics() : null;
+    var lines = doc && doc.lines || [], lo = 0, hi = lines.length - 1, found = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (U.num(lines[mid].start_ms, 0) <= time) { found = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return {activeLine:found >= 0 ? {fullText:String(lines[found].text || '')} : null,
+      lines:lines,track:pres && pres.track,reduced:!!(pres && pres.reduced)};
   }
 
   // ------------------------------------------------------------------
@@ -148,12 +243,13 @@
     // autoDetectRenderer owns cleanup until it assigns Application.renderer.
     // A failed Application still owns its stage, and a settled live one owns
     // both. Keep the original recursive GraphicsContext retirement order.
-    if (application.renderer || !application.stage) {
+    if (application.renderer) {
       if (application.stage) application.stage.removeChildren().forEach(FX.destroyDisplayTree);
       application.destroy({removeView:true, releaseGlobalResources:false}, {children:true});
-    } else {
+    } else if (application.stage) {
       FX.destroyDisplayTree(application.stage); application.stage = null;
     }
+    if (application.hertzResources && !application.hertzRetainUntilRenderer) application.hertzResources.retire();
   }
   function loadPixi() {
     if (global.PIXI) return Promise.resolve(global.PIXI);
@@ -180,6 +276,7 @@
     this.initialized = false;
     this.destroyed = false;
     this.pendingShot = null;
+    this.releaseShotData = null;
     this.width = 1;
     this.height = 1;
     this.accent = { r: 244, g: 244, b: 245 };
@@ -204,6 +301,7 @@
     this.cleanupFailure = null;
     this.failedApplication = null;
     this.failedRenderer = null;
+    this.resources = null;
   }
 
   SonnetDirector.prototype.init = function () {
@@ -218,9 +316,18 @@
     }
     self.initPromise = loadPixi().then(function (PIXI) {
       if (self.destroyed) return;
-      application = new PIXI.Application();
+      if (self.root.hidden || self.root.clientWidth <= 0 || self.root.clientHeight <= 0
+          || (global.Stage && Stage.isDocumentHidden && Stage.isDocumentHidden())) return;
+      var ledger = global.Stage && Stage.resources && Stage.resources();
+      if (!ledger || !PIXI.HertzResourceAdmission) throw new Error('resource-port-required');
+      self.resources = PIXI.HertzResourceAdmission.create(ledger.port('stanza-sonnet'));
+      self.performance.setResources(self.resources);
+      application = self.resources.run(function () { return new PIXI.Application(); });
+      application.hertzResources = self.resources;
       self.app = application;
       return application.init({
+        hertzResourceOwner: self.resources,
+        width: self.root.clientWidth, height: self.root.clientHeight,
         backgroundAlpha: 0,
         preference: 'webgl',
         autoStart: false,
@@ -262,8 +369,8 @@
         self.textContainer.zIndex = 40;
         self.trackContainer.zIndex = 40;
         application.stage.addChild(self.sceneContainer);
-        self.editorialTrack = createEditorialTrack(PIXI, self.trackContainer, self.fontStack);
-        self.optical = FX.createOpticalChain(PIXI, application.stage);
+        self.editorialTrack = createEditorialTrack(PIXI, self.trackContainer, self.fontStack, self.resources);
+        self.optical = FX.createOpticalChain(PIXI, application.stage, self.resources);
         self.postProcess = self.optical.print;
         self.retirement = FX.createRetirement(PIXI, application.stage);
         self.initialized = true;
@@ -273,6 +380,7 @@
     }).catch(function (error) {
       // The local application remains owned until actual init settlement,
       // including rejection. destroy() may already have cleared self.app.
+      if (application && error.pixiPartialRenderer) application.hertzRetainUntilRenderer = true;
       try { retire(); } catch (_) { /* Keep the original init failure and retained cleanup obligation. */ }
       if (self.app === application) self.app = null;
       self.initialized = false;
@@ -284,8 +392,9 @@
 
   SonnetDirector.prototype.resize = function () {
     if (!this.initialized || !this.app) return;
-    var width = Math.max(1, this.root.clientWidth);
-    var height = Math.max(1, this.root.clientHeight);
+    var width = this.root.clientWidth;
+    var height = this.root.clientHeight;
+    if (width <= 0 || height <= 0 || this.root.hidden || (global.Stage && Stage.isDocumentHidden && Stage.isDocumentHidden())) return;
     if (width === this.width && height === this.height) return;
     this.width = width;
     this.height = height;
@@ -629,6 +738,7 @@
   SonnetDirector.prototype.getDebugSnapshot = function () {
     return {
       initialized: this.initialized, initializing:!!this.initPromise, cleanupFailure:this.cleanupFailure,
+      resources: this.resources && this.resources.snapshot(),
       camera: this.activeKind, composition: this.backgroundKind,
       glyphs: this.words.length, phrases: this.phrases.length, orbits: this.orbits.length,
       performance: this.performance.snapshot(),
@@ -648,8 +758,11 @@
   SonnetDirector.prototype.destroy = function () {
     if (this.destroyed && !this.app && !this.failedApplication && !this.failedRenderer) return;
     this.destroyed = true;
+    if (this.resources) this.resources.cancel();
     this.pendingShot = null;
+    if (this.releaseShotData) { this.releaseShotData(); this.releaseShotData = null; }
     this.performance.reset();
+    this.performance.destroy();
     this.words = [];
     this.phrases = [];
     this.orbits = [];
@@ -676,7 +789,8 @@
       catch (_) { /* Keep the unresolved original application for a later explicit retirement attempt. */ }
     }
     if (this.failedRenderer) {
-      try { this.failedRenderer.destroy({removeView:true, releaseGlobalResources:false}); this.failedRenderer = null; }
+      try { this.failedRenderer.destroy({removeView:true, releaseGlobalResources:false}); this.failedRenderer = null;
+        if (this.resources) this.resources.retire(); }
       catch (_) { /* The original partial renderer still owes API retirement. */ }
     }
     if (!this.failedApplication && !this.failedRenderer) this.cleanupFailure = null;
@@ -687,7 +801,9 @@
   // 镜头沿路线推进；只有活动行附近的一小窗持有显示对象。
   // ------------------------------------------------------------------
 
-  function createEditorialTrack(PIXI, parent, fontStack) {
+  FX.resourceBoundary(SonnetDirector);
+
+  function createEditorialTrack(PIXI, parent, fontStack, resources) {
     var root = new PIXI.Container();
     var decor = new PIXI.Container();
     var text = new PIXI.Container();
@@ -697,6 +813,7 @@
     var entries = [], glyphs = [], layout = [];
     var source = null, signature = '';
     var activeIndex = -1, width = 1, height = 1, color = 0xffffff;
+    var layoutTicket = null, releaseSource = null;
 
     function release() {
       decor.removeChildren().forEach(FX.destroyDisplayTree);
@@ -707,6 +824,14 @@
 
     // 路线编译：每行掷种子决定横排/竖排，三连同向后强制转弯，保证路线蜿蜒。
     function compileLayout(lines, seed, w, h, tuning) {
+      var ticket = resources.reserve({ownedCpuBytes:lines.length * (5 * 8 + 1)},
+        'editorial route: five Float64 coordinates/scales/label values and one boolean per line');
+      var longest = 0;
+      for (var li = 0; li < lines.length; li++) longest = Math.max(longest,lines[li].fullText.length);
+      var scratch;
+      try {
+      scratch = resources.reserve({ownedCpuBytes:('editorial-track:'.length + seed.length + 2
+        + String(Math.max(0,lines.length - 1)).length + longest) * 2}, 'editorial route transient UTF16 random seed');
       var result = [];
       var x = w * 0.5, y = h * 0.48;
       var verticalChance = FX.amount(tuning.trackVerticalChance, 0.42, 0.9);
@@ -738,7 +863,10 @@
           labelSide: random() > 0.5 ? 1 : -1
         });
       });
-      return result;
+      ticket.commit(); scratch.commit();
+      return {points:result,ticket:ticket};
+      } catch (error) { resources.free(ticket); throw error; }
+      finally { resources.free(scratch); }
     }
 
     // 逗号/空格错栏：前后都够保底字数才断段，段间沿交叉轴错开。
@@ -934,11 +1062,15 @@
           tuning.trackJunction, tuning.trackMinSegment, tuning.quality, nextColor,
           JSON.stringify(tuning.palette), frame.emotion ? frame.emotion.revision : 0].join(':');
         if (source !== frame.lines || signature !== nextSignature) {
+          var nextLayout = compileLayout(frame.lines, seed, width, height, tuning);
           release();
+          layout = []; resources.free(layoutTicket);
+          if (releaseSource) releaseSource();
+          releaseSource = frame.retainLines && frame.retainLines();
           source = frame.lines;
           color = nextColor;
           signature = nextSignature;
-          layout = compileLayout(frame.lines, seed, width, height, tuning);
+          layout = nextLayout.points; layoutTicket = nextLayout.ticket;
           syncWindow(frame, tuning);
         } else if (activeIndex !== frame.currentLineIndex) {
           syncWindow(frame, tuning);
@@ -1062,6 +1194,8 @@
         FX.destroyDisplayTree(root);
         source = null;
         layout = [];
+        resources.free(layoutTicket); layoutTicket = null;
+        if (releaseSource) { releaseSource(); releaseSource = null; }
       },
       snapshot: function () {
         return { trackEntries: entries.length, trackGlyphs: glyphs.length, trackActive: activeIndex };
@@ -1262,8 +1396,14 @@
     }
 
     function frame() {
-      if (destroyed || !visible || !global.Stage) return;
-      var f = buildFrame(root);
+      if (destroyed || !visible || !global.Stage || (Stage.isDocumentHidden && Stage.isDocumentHidden())
+          || root.clientWidth <= 0 || root.clientHeight <= 0) return;
+      var f;
+      try { f = initFailed ? readableFrame(root) : buildFrame(root); }
+      catch (error) {
+        director.destroy(); releaseFrame(root); initFailed = true; f = readableFrame(root);
+        console.warn('[stanza-sonnet] 歌词数据不可用：', error);
+      }
       reduced = f.reduced;
       syncEmpty(f);
       if (initFailed) {
@@ -1274,23 +1414,32 @@
       if (!director.initialized) {
         if (!initStarted && !initFailed) {
           initStarted = true;
-          director.init().catch(function (err) {
+          var releaseInitializing = f.retainLines && f.retainLines();
+          director.init().then(function () {
+            if (!destroyed && !director.initialized) initStarted = false;
+          }).catch(function (err) {
             if (destroyed) return;
+            releaseFrame(root);
             initFailed = true;
             fallback.hidden = false;
             fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
             console.warn('[stanza-sonnet] 图形引擎不可用：', err);
             syncEmpty(f);
-          });
+          }).finally(function () { if (releaseInitializing) releaseInitializing(); });
         }
+        finishFrame(root);
         return;
       }
       if (initFailed) return;
+      try {
+      if (director.app.renderer.hertzResourceFailure) throw new Error(director.app.renderer.hertzResourceFailure);
       director.resize();
       var key = shotKey(f);
       if (key !== renderedKey) {
         renderedKey = key;
         if (f.activeLine) {
+          if (director.releaseShotData) director.releaseShotData();
+          director.releaseShotData = f.retainLines && f.retainLines();
           var seed = ((f.track && (f.track.id || f.track.title)) || 'sonnet') + ':' + f.activeLine.startTime;
           director.buildShot(f.activeLine, seed, accentRgb(), engineTuning(f));
         }
@@ -1314,10 +1463,19 @@
         nextEl.textContent = nextText;
         nextEl.hidden = !nextText;
       }
+      finishFrame(root);
+      } catch (error) {
+        director.destroy(); initFailed = true; renderedKey = '';
+        releaseFrame(root);
+        fallback.hidden = false;
+        fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
+        syncEmpty(f);
+        console.warn('[stanza-sonnet] 图形引擎不可用：', error);
+      }
     }
 
     if (typeof ResizeObserver === 'function') {
-      ro = new ResizeObserver(function () { director.resize(); });
+      ro = new ResizeObserver(function () { if (global.Stage && Stage.kick) Stage.kick(); });
       ro.observe(root);
     }
 
@@ -1386,13 +1544,14 @@
       setReactivity: function (v) { reactivity = U.clamp(U.num(v, 1.35), 0, 2); },
       setBgMode: function (m) { bgMode = m; },
       setVignette: function (b) { vignette = !!b; },
-      resize: function () { director.resize(); },
+      resize: function () { if (global.Stage && Stage.kick) Stage.kick(); },
       isReady: function () { return !destroyed && (initFailed || !!renderedKey); },
       getDebugSnapshot: function () { return director.getDebugSnapshot(); },
       destroy: function () {
         destroyed = true;
         if (ro) { ro.disconnect(); ro = null; }
         director.destroy();
+        releaseFrame(root);
         root.remove();
       }
     };
@@ -1400,5 +1559,6 @@
 
   // loadPixi / buildFrame 对外只读暴露：凝彩 tempera 与商籁共用同一份 Pixi
   // 惰性加载（全页只注入一次 <script>）与同一套 Stage → 帧适配（含行缓存）。
-  global.StanzaSonnet = { init: init, loadPixi: loadPixi, buildFrame: buildFrame, retireApplication: retireApplication };
+  global.StanzaSonnet = { init: init, loadPixi: loadPixi, buildFrame: buildFrame, readableFrame:readableFrame,
+    finishFrame:finishFrame, releaseFrame:releaseFrame, retireApplication: retireApplication };
 })(window);

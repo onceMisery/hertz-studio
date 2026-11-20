@@ -1,5 +1,6 @@
 {
-  "tools/build-stanza-pixi.mjs": "4a632ef2c2024749c21d9722924bb518e068b7cd6e337e859172a492156ea78e",
+  "tools/build-stanza-pixi.mjs": "c273dbb2fb65269c53a4574b5f2e17cbac7a083459f4bf7b2361af59d40d61b9",
+  "tools/stanza-pixi/admission-runtime.js": "174ae6d8eb53ac34072ec9eb78835eba61ccbfedbcebc35ff9966c42d3a2d1b9",
   "tools/stanza-pixi/pixi-8.20.1.min.js": "9948591083793305468d73915a3ea85032dcf8e32eee7a1328585050d7a14d53",
-  "plugin/ui/vendor/pixi.min.js": "751e3612ec840d7b3506e7ba6c29800a935857f2b47137e4e8005918e60d9add"
+  "plugin/ui/vendor/pixi.min.js": "ff4a0817a03670c1c3444f3ef0151fd598ac28b3a1087ae1f7efe989db43344c"
 }

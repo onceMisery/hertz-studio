@@ -294,6 +294,7 @@
     this.initialized = false;
     this.destroyed = false;
     this.pendingShot = null;
+    this.releaseShotData = null;
     this.width = 1;
     this.height = 1;
     this.kind = 'split-duo';
@@ -314,6 +315,7 @@
     this.cleanupFailure = null;
     this.failedApplication = null;
     this.failedRenderer = null;
+    this.resources = null;
   }
 
   TemperaDirector.prototype.init = function () {
@@ -332,9 +334,19 @@
     }
     self.initPromise = this.loadPixi().then(function (PIXI) {
       if (self.destroyed) return;
-      application = new PIXI.Application();
+      var G = typeof globalThis !== 'undefined' ? globalThis : window;
+      if (self.root.hidden || self.root.clientWidth <= 0 || self.root.clientHeight <= 0
+          || (G.Stage && G.Stage.isDocumentHidden && G.Stage.isDocumentHidden())) return;
+      var ledger = G.Stage && G.Stage.resources && G.Stage.resources();
+      if (!ledger || !PIXI.HertzResourceAdmission) throw new Error('resource-port-required');
+      self.resources = PIXI.HertzResourceAdmission.create(ledger.port('stanza-tempera'));
+      self.performance.setResources(self.resources);
+      application = self.resources.run(function () { return new PIXI.Application(); });
+      application.hertzResources = self.resources;
       self.app = application;
       return application.init({
+        hertzResourceOwner: self.resources,
+        width: self.root.clientWidth, height: self.root.clientHeight,
         backgroundAlpha: 0,
         preference: 'webgl',
         autoStart: false,
@@ -371,7 +383,7 @@
         application.stage.addChild(self.scene, self.flash);
         // 凝彩复用商籁同一条后期链（印相 + 光晕）：两个舞台的胶片质感必须一致，
         // 各写一套后期迟早漂移成两种「肤色」。闪白层在 scene 之上，故光晕能吃到它。
-        self.optical = FX.createOpticalChain(PIXI, application.stage);
+        self.optical = FX.createOpticalChain(PIXI, application.stage, self.resources);
         self.postProcess = self.optical.print;
         self.retirement = FX.createRetirement(PIXI, application.stage);
         self.initialized = true;
@@ -379,6 +391,7 @@
         if (self.pendingShot) self.buildShot.apply(self, self.pendingShot);
       });
     }).catch(function (error) {
+      if (application && error.pixiPartialRenderer) application.hertzRetainUntilRenderer = true;
       try { retire(); } catch (_) { /* Keep the original failure and retained cleanup obligation. */ }
       if (self.app === application) self.app = null;
       self.initialized = false;
@@ -390,8 +403,10 @@
 
   TemperaDirector.prototype.resize = function () {
     if (!this.initialized || !this.app) return;
-    var width = Math.max(1, this.root.clientWidth);
-    var height = Math.max(1, this.root.clientHeight);
+    var G = typeof globalThis !== 'undefined' ? globalThis : window;
+    var width = this.root.clientWidth;
+    var height = this.root.clientHeight;
+    if (width <= 0 || height <= 0 || this.root.hidden || (G.Stage && G.Stage.isDocumentHidden && G.Stage.isDocumentHidden())) return;
     if (width === this.width && height === this.height) return;
     this.width = width;
     this.height = height;
@@ -813,6 +828,7 @@
   TemperaDirector.prototype.getDebugSnapshot = function () {
     return {
       initialized: this.initialized, initializing:!!this.initPromise, cleanupFailure:this.cleanupFailure,
+      resources: this.resources && this.resources.snapshot(),
       composition: this.kind, camera: this.cameraKind,
       panels: this.blocks ? this.blocks.children.length : 0,
       seams: this.blocks ? this.blocks.children.filter(function (block) { return block.dataset.seam; }).length : 0,
@@ -833,8 +849,11 @@
     if (this.destroyed && !this.app && !this.failedApplication && !this.failedRenderer) return;
     var G = typeof globalThis !== 'undefined' ? globalThis : window;
     this.destroyed = true;
+    if (this.resources) this.resources.cancel();
     this.pendingShot = null;
+    if (this.releaseShotData) { this.releaseShotData(); this.releaseShotData = null; }
     this.performance.reset();
+    this.performance.destroy();
     this.words = [];
     this.clones = [];
     this.rows = [];
@@ -859,7 +878,8 @@
       catch (_) { /* Retain an unresolved original owner rather than discard the cleanup obligation. */ }
     }
     if (this.failedRenderer) {
-      try { this.failedRenderer.destroy({removeView:true, releaseGlobalResources:false}); this.failedRenderer = null; }
+      try { this.failedRenderer.destroy({removeView:true, releaseGlobalResources:false}); this.failedRenderer = null;
+        if (this.resources) this.resources.retire(); }
       catch (_) { /* Keep the original partial renderer retirement obligation. */ }
     }
     if (!this.failedApplication && !this.failedRenderer) this.cleanupFailure = null;
@@ -881,6 +901,8 @@
 
   // 取景框只作视觉：凝彩热区若接点击，舞台中央整块都会把「点一下/拖机位」
   // 变成跳回当前句首——播放位置被反复打回，观感即一点舞台就停。
+  FX.resourceBoundary(TemperaDirector);
+
   function init(host) {
     var G = typeof globalThis !== 'undefined' ? globalThis : window;
     var root = document.createElement('div');
@@ -982,8 +1004,15 @@
     }
 
     function frame() {
-      if (destroyed || !visible || !G.Stage) return;
-      var f = sonnet.buildFrame(root);
+      if (destroyed || !visible || !G.Stage || (G.Stage.isDocumentHidden && G.Stage.isDocumentHidden())
+          || root.clientWidth <= 0 || root.clientHeight <= 0) return;
+      var f;
+      try { f = initFailed ? sonnet.readableFrame(root) : sonnet.buildFrame(root); }
+      catch (error) {
+        director.destroy(); sonnet.releaseFrame(root); initFailed = true; f = sonnet.readableFrame(root);
+        note.hidden = false; note.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
+        console.warn('[stanza-tempera] 歌词数据不可用：', error);
+      }
       reduced = f.reduced;
       if (initFailed) {
         fallback.hidden = false; fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
@@ -992,23 +1021,32 @@
       if (!director.initialized) {
         if (!initStarted && !initFailed) {
           initStarted = true;
-          director.init().catch(function (err) {
+          var releaseInitializing = f.retainLines && f.retainLines();
+          director.init().then(function () {
+            if (!destroyed && !director.initialized) initStarted = false;
+          }).catch(function (err) {
             if (destroyed) return;
+            sonnet.releaseFrame(root);
             initFailed = true;
             fallback.hidden = false; fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
             console.warn('[stanza-tempera] 图形引擎不可用：', err);
             note.hidden = false;
             note.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
-          });
+          }).finally(function () { if (releaseInitializing) releaseInitializing(); });
         }
+        sonnet.finishFrame(root);
         return;
       }
       if (initFailed) return;
+      try {
+      if (director.app.renderer.hertzResourceFailure) throw new Error(director.app.renderer.hertzResourceFailure);
       director.resize();
       var line = f.activeLine || titleCard(f.track);
       var key = shotKey(f, line);
       if (key !== renderedKey) {
         renderedKey = key;
+        if (director.releaseShotData) director.releaseShotData();
+        director.releaseShotData = f.retainLines && f.retainLines();
         var seed = ((f.track && (f.track.id || f.track.title)) || 'tempera') + ':' + line.startTime;
         var colors = palette(theme, tuning.colorMode);
         if (bgMode === 'spatial' && tuning.colorMode === 'vivid') colors.ink = U.mixHex(colors.ink, colors.accent, 0.35);
@@ -1019,10 +1057,18 @@
       updateHot(f, camera);
       var msg = f.activeLine ? '' : (f.track && !f.lines.length ? '暂无歌词 · 让旋律继续' : '');
       if (msg !== lastNote) { lastNote = msg; note.textContent = msg; note.hidden = !msg; }
+      sonnet.finishFrame(root);
+      } catch (error) {
+        director.destroy(); initFailed = true; renderedKey = '';
+        sonnet.releaseFrame(root);
+        fallback.hidden = false; fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
+        note.hidden = false; note.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
+        console.warn('[stanza-tempera] 图形引擎不可用：', error);
+      }
     }
 
     if (typeof ResizeObserver === 'function') {
-      ro = new ResizeObserver(function () { director.resize(); });
+      ro = new ResizeObserver(function () { if (G.Stage && G.Stage.kick) G.Stage.kick(); });
       ro.observe(root);
     }
 
@@ -1079,12 +1125,13 @@
       setReactivity: function (v) { reactivity = U.clamp(U.num(v, 1.35), 0, 2); },
       setBgMode: function (m) { if (m !== bgMode) { bgMode = m; renderedKey = ''; } },
       setVignette: function (b) { vignette = !!b; },
-      resize: function () { director.resize(); },
+      resize: function () { if (G.Stage && G.Stage.kick) G.Stage.kick(); },
       getDebugSnapshot: function () { return director.getDebugSnapshot(); },
       destroy: function () {
         destroyed = true;
         if (ro) { ro.disconnect(); ro = null; }
         director.destroy();
+        sonnet.releaseFrame(root);
         root.remove();
       }
     };
