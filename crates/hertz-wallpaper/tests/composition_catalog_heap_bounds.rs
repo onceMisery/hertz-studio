@@ -281,7 +281,7 @@ fn original_public_parser_preserves_literal_null_default_and_hash_error() {
     let original = parse_catalog(BYTES).unwrap();
     assert_eq!(
         original.registry_hash,
-        "9ececd7e227a6392b3ec1b077fcba7a9bb16bfbffa1bfbe0b32d2fc7f8926d67"
+        "4802d1d501db55fb4ee915aee1cc22799051db9501ac754dabc57da6ccc370cd"
     );
     let mut source: serde_json::Value = serde_json::from_slice(BYTES).unwrap();
     source["registryHash"] = serde_json::Value::String("0".repeat(64));

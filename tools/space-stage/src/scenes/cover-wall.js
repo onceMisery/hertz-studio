@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 曲面封面墙：真正的展墙纵深、地台反射与卡片倒角；指针抬升/倾斜卡片，
 // 点击卡片播放对应曲目，悬停队列行时整面墙会预览那一首。
@@ -39,12 +41,13 @@ void main(){
 export function createCoverWall(ctx) {
   const T = ctx.THREE, group = root(ctx), world = new T.Group(); group.add(world);
   const resources = ctx.services.spatialResources || createSpatialResources(T), local = !ctx.services.spatialResources;
-  const geometry = own(ctx, new T.PlaneGeometry(3, 3, 24, 1)), count = 9;
+  const geometry = own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [3, 3, 24, 1])), count = 9;
   const positions = geometry.attributes.position;
   for (let i = 0; i < positions.count; i++) {
     const x = positions.getX(i); positions.setXYZ(i, Math.sin(x / 11) * 11, positions.getY(i), (Math.cos(x / 11) - 1) * 11);
   }
   geometry.computeVertexNormals();
+  declaredArrayPayload(ctx.scope, count, 'Cover wall hover backing');
   const cards = [], reflections = [], entries = [], keys = [], hoverAmounts = new Float32Array(count);
   const backCards = [], backEntries = [], backKeys = [], backCount = 7;
   const makeMaterial = reflection => own(ctx, new T.ShaderMaterial({
@@ -60,7 +63,7 @@ export function createCoverWall(ctx) {
     backCards.push(card); backEntries.push(null); backKeys.push('');
   }
 
-  const floor = new T.Mesh(own(ctx, new T.PlaneGeometry(26, 16)), own(ctx, new T.ShaderMaterial({
+  const floor = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [26, 16])), own(ctx, new T.ShaderMaterial({
     uniforms: { uColor: { value: new T.Color(0x2b6f8f) }, uOpacity: { value: .8 } },
     vertexShader: floorVertex, fragmentShader: floorFragment, transparent: true, depthWrite: false, blending: T.AdditiveBlending
   })));
@@ -191,3 +194,6 @@ export function createCoverWall(ctx) {
       triangles: 864 + backCount * 48, textTextures: 0 })
   });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createCoverWall.resourcePlan = () => sourcePlan(30).geometry('PlaneGeometry',[3,3,24,1]).geometry('PlaneGeometry',[26,16]).array(9).stars(700).glows(2).shock(6).result();

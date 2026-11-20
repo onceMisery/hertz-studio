@@ -13,7 +13,10 @@ async function boot(browser, mode, layout) {
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', message => { if (/shader.*error|GL_INVALID|failed to compile/i.test(message.text())) errors.push(message.text()); });
   await page.setContent('<style>html,body,#host,.fl-sonnet,.fl-tempera{margin:0;position:absolute;inset:0;overflow:hidden}</style><div id="host"></div>');
-  await page.addScriptTag({ path: path.join(web, 'vendor/pixi.min.js') });
+  for (const file of ['stage-resource-budget.js','stage-resource-policy.js','vendor/pixi.min.js']) {
+    if (file === 'vendor/pixi.min.js') await page.evaluate(() => { window.Stage = {resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy))}; });
+    await page.addScriptTag({ path: path.join(web, file) });
+  }
   await page.evaluate(() => {
     window.probe = { texts: [], contexts: [], time: 0, playing: true, reduced: false, ordinaryBuilds: 0 };
     window.ProbedText = class extends PIXI.Text {
@@ -33,7 +36,7 @@ async function boot(browser, mode, layout) {
     probe.lines = Array.from({ length: 100 }, (_, i) => ({ start_ms: i * 3000, end_ms: (i + 1) * 3000,
       text: '晚风送来一句轻轻的问候' + i }));
     probe.track = { id: 'transitions', path: 'transitions', title: 'transitions' };
-    window.Stage = { presentation: () => ({ playing: probe.playing, reduced: probe.reduced, track: probe.track }),
+    window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)), presentation: () => ({ playing: probe.playing, reduced: probe.reduced, track: probe.track }),
       position: () => probe.time, lyrics: () => ({ lines: probe.lines }),
       lyricTokens: l => [{ text: l.text, start_ms: l.start_ms, end_ms: l.end_ms }], spectrum: () => [], kick() {} };
     const build = StanzaSonnetFx.buildLyrics;
@@ -250,13 +253,14 @@ async function initializationFailure(browser) {
       return route.fulfill({ contentType: 'text/html', body: '<style>html,body,#host{margin:0;position:absolute;inset:0}</style><div id="host"></div>' });
     });
     await page.goto('http://stanza-fixture.test/');
+    for (const file of ['stage-resource-budget.js','stage-resource-policy.js']) await page.addScriptTag({path:path.join(web,file)});
     await page.addStyleTag({ path: path.join(web, 'stanza/stanza.css') });
     for (const file of ['stanza-util.js', 'stanza-theme.js', 'stanza-sonnet-fx.js', 'stanza-sonnet.js']) {
       await page.addScriptTag({ path: path.join(web, 'stanza', file) });
     }
     const before = await page.evaluate(() => {
       const lines = [{ text: '有歌词时也必须显示加载错误', start_ms: 0, end_ms: 3000 }];
-      window.Stage = { presentation: () => ({ playing: false, track: { id: 'failed-pixi' } }), position: () => 1200,
+      window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)), presentation: () => ({ playing: false, track: { id: 'failed-pixi' } }), position: () => 1200,
         lyrics: () => ({ lines }), lyricTokens: l => [{ text: l.text, start_ms: l.start_ms, end_ms: l.end_ms }], spectrum: () => [], kick() {} };
       window.failedRenderer = StanzaSonnet.init(document.getElementById('host'));
       failedRenderer.setTuning({ decor: false }); failedRenderer.setVisible(true);

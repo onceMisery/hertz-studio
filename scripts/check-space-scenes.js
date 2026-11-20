@@ -9,6 +9,61 @@ const base = path.resolve(__dirname, '..'), stage = path.join(base, 'tools/space
 const read = relative => fs.readFileSync(path.join(base, relative), 'utf8');
 const load = relative => import(pathToFileURL(path.join(stage, relative)).href);
 
+async function sourceAdmissionContract(THREE, createScope) {
+  const vm = require('node:vm'), box = { window: {} };
+  vm.runInNewContext(read('plugin/ui/stage-resource-budget.js'), box);
+  vm.runInNewContext(read('plugin/ui/stage-resource-policy.js'), box);
+  const { geometrySourcePlan, geometryBackingBytes, constructedGeometry, declaredArrayPayload,
+    declaredTexturePayload } = await load('src/source-resources.js');
+  const cases = [
+    ['PlaneGeometry', []], ['PlaneGeometry', [2, 3, 255, 255]],
+    ['BoxGeometry', []], ['BoxGeometry', [2, 4, 6, 3, 4, 5]],
+    ['SphereGeometry', []], ['SphereGeometry', [2, 7, 4, .2, 4, .3, 1]],
+    ['SphereGeometry', [2, 7, 4, 0, 6, .3, Math.PI]],
+    ['CylinderGeometry', []], ['CylinderGeometry', [0, 1, 3, 8, 2]],
+    ['CylinderGeometry', [1, 0, 3, 8, 2]], ['CylinderGeometry', [0, 0, 3, 8, 2]],
+    ['CylinderGeometry', [1, 2, 3, 8, 2, true]],
+    ['ConeGeometry', []], ['ConeGeometry', [1, 3, 8, 2, true]],
+    ['TorusGeometry', []], ['TorusGeometry', [3, .3, 7, 13, 4]],
+    ['RingGeometry', []], ['RingGeometry', [1, 2, 7, 3]],
+    ['CircleGeometry', []], ['CircleGeometry', [2, 11, .2, 4]],
+    ...['TetrahedronGeometry', 'OctahedronGeometry', 'IcosahedronGeometry', 'DodecahedronGeometry']
+      .flatMap(kind => [[kind, [1, 0]], [kind, [2, 2]]])
+  ];
+  const policy = box.window.StageResourcePolicy;
+  for (const [kind, args] of cases) {
+    const ledger = box.window.StageResourceBudget.create(policy), scope = createScope({ resources: ledger.port('source-test') });
+    const geometry = constructedGeometry(THREE, scope, kind, args), plan = geometrySourcePlan(kind, args);
+    assert.equal(plan.bufferBytes, geometryBackingBytes(geometry), kind + ' matches actual pinned Three backing bytes');
+    assert.equal(ledger.snapshot().held.ownedCpuBytes, plan.bufferBytes, kind + ' releases construction scratch at readiness');
+    assert.equal(ledger.snapshot().held.bufferDeclaredBytes, plan.bufferBytes);
+    scope.dispose();
+    assert.equal(ledger.snapshot().resources, 0, kind + ' retires all CPU and pending uploads');
+  }
+  for (const dimension of ['ownedCpuBytes', 'bufferDeclaredBytes']) {
+    const ledger = box.window.StageResourceBudget.create({ ...policy, caps: { ...policy.caps, [dimension]: 0 } });
+    const scope = createScope({ resources: ledger.port('refusal-test') });
+    let constructions = 0;
+    assert.throws(() => constructedGeometry({ PlaneGeometry: class { constructor() { constructions++; } } },
+      scope, 'PlaneGeometry'), /budget/);
+    assert.equal(constructions, 0, dimension + ' refuses before the original constructor');
+    scope.dispose(); assert.equal(ledger.snapshot().resources, 0, 'partial reservation rolls back');
+  }
+  const ledger = box.window.StageResourceBudget.create(policy), scope = createScope({ resources: ledger.port('payload-test') });
+  declaredArrayPayload(scope, 40, 'retained arrays', 4, 1);
+  assert.equal(ledger.snapshot().held.ownedCpuBytes, 480);
+  declaredTexturePayload(scope, 3, 5, 'non-square mip chain');
+  assert.equal(ledger.snapshot().held.textureDeclaredBytes, (15 + 2 + 1) * 4);
+  for (const edge of [0, -1, NaN, Infinity, 1.5, 16385])
+    assert.throws(() => declaredTexturePayload(scope, edge, 4, 'invalid'), /unavailable/);
+  for (const args of [[-1], [1.5], [Infinity], [1, 'bad', -4], [1, 'bad', 4, -1]])
+    assert.throws(() => declaredArrayPayload(scope, ...args), /unavailable/);
+  assert.throws(() => geometrySourcePlan('PlaneGeometry', [1, 1, Infinity]), /unavailable/);
+  assert.throws(() => geometrySourcePlan('IcosahedronGeometry', [1, 33]), /unavailable/);
+  scope.dispose(); assert.equal(ledger.snapshot().resources, 0);
+  console.log(cases.length + ' pinned geometry formulas, refusal-before-construction, mip and payload boundaries passed');
+}
+
 async function reactorArtworkContract(THREE, registry, createScope, PROFILES) {
   const documentBefore = global.document, imageBefore = global.Image, requested = [], delayed = [];
   const pixels = color => new Uint8ClampedArray(Array.from({ length: 24 * 24 }, () => [...color, 255]).flat());
@@ -192,6 +247,7 @@ async function reactorContract(THREE, registry, createScope, PROFILES) {
 (async () => {
   const THREE = await load('node_modules/three/build/three.module.js');
   const { createRegistry } = await load('src/registry.js'), { createScope } = await load('src/scope.js');
+  await sourceAdmissionContract(THREE, createScope);
   const { registerScenes } = await load('src/scenes/index.js'), { registerEffects, createPostChain } = await load('src/effects/index.js');
   const { createSpatialResources } = await load('src/scenes/resources.js'), { PROFILES } = await load('src/quality.js');
   const registry = createRegistry(), effects = createRegistry(); registerScenes(registry); registerEffects(effects);
@@ -251,11 +307,17 @@ async function reactorContract(THREE, registry, createScope, PROFILES) {
   for (let i = 0; i < 100; i++) { const entry = shared.text.acquire('rapid ' + i); shared.text.release(entry); }
   assert.equal(shared.stats().queued, 0, 'switching without frames cannot grow task queue'); shared.dispose();
   let created = 0;
+  const resourceBox = { window: {} };
+  require('node:vm').runInNewContext(read('plugin/ui/stage-resource-budget.js'), resourceBox);
+  require('node:vm').runInNewContext(read('plugin/ui/stage-resource-policy.js'), resourceBox);
   for (const definition of registry.catalog()) {
     for (const mode of ['high', 'medium', 'low']) {
-      const scope = createScope(), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(58, 16 / 9, .05, 900), resources = createSpatialResources(THREE);
+      const ledger = resourceBox.window.StageResourceBudget.create(resourceBox.window.StageResourcePolicy);
+      const scope = createScope({ resources: ledger.port('source-factory') }), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(58, 16 / 9, .05, 900), resources = createSpatialResources(THREE);
       const params = registry.normalizeState(definition.id).params;
       const ctx = { THREE, scene, camera, scope, signal: scope.signal, params, quality: PROFILES[mode], services: { spatialResources: resources } };
+      const planned = registry.get(definition.id).resourcePlan({ params, quality: PROFILES[mode], width: 1280, height: 720, services: ctx.services });
+      assert.equal(ledger.port('preflight').preflight(planned, []).ok, true, definition.id + ' finite plan uses only supported dimensions');
       const instance = registry.get(definition.id).create(ctx); created++;
       const frame = { now: 1000, time: 1, dt: .016, playing: true, bands: { bass: .7, mid: .4, treble: .2 }, onset: 1,
         spectrum: new Float32Array(64).fill(.5), lyrics: { index: 1, progress: .4, lines: [{ text: 'Before', start: 0, end: 1 }, { text: 'Current spatial words', start: 1, end: 2, tokens: [{ text: 'Current', start: 1, end: 1.5 }, { text: 'words', start: 1.5, end: 2 }] }, { text: 'After', start: 2, end: 3 }] } };
@@ -303,8 +365,12 @@ async function reactorContract(THREE, registry, createScope, PROFILES) {
       instance.update({ ...frozenFrame, now: 3000, time: 3, bands: { bass: .1, mid: .9, treble: .8 }, spectrum: new Float32Array(64).fill(.9), onset: 0 });
       const still = snapshot();
       assert.deepEqual(still, frozen, definition.id + ' reduced scene clock/spectrum preserve geometry');
+      const observed = ledger.snapshot();
+      for (const key of ['ownedCpuBytes', 'bufferDeclaredBytes', 'textureDeclaredBytes'])
+        assert.ok(observed.peak[key] <= (planned[key] || 0), definition.id + ' source preflight covers ' + key + ': ' + observed.peak[key] + ' <= ' + planned[key]);
       instance.dispose(); instance.dispose(); scope.dispose(); scope.dispose(); resources.dispose();
       assert.equal(scene.children.length, 0, definition.id + ' scene cleanup'); assert.equal(scope.stats().resources, 0);
+      assert.equal(ledger.snapshot().resources, 0, definition.id + ' source admissions retire');
     }
   }
   const scope = createScope(), ctx = { THREE, scope, signal: scope.signal, params: {}, camera: new THREE.PerspectiveCamera(), quality: PROFILES.low, services: {} };

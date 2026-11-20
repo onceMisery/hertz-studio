@@ -99,11 +99,12 @@ async function checkManagedCli(corpus,harness) {
 
 async function main() {
   const corpus = loadCorpus();
-  assert.equal(corpus.version,'v3','Current evaluation corpus must follow the active contract');
-  assert.equal(loadCorpus('v3').manifest.schemaHash,corpus.contract.schemaHash);
-  const historicalCases = fs.readFileSync(path.join(__dirname,'../evals/stage-intent/v2/cases.jsonl'));
-  const activeCases = fs.readFileSync(path.join(__dirname,'../evals/stage-intent/v3/cases.jsonl'));
-  assert.equal(historicalCases.compare(activeCases),0,'v3 must preserve the frozen v2 sample lines byte-for-byte');
+  assert.equal(corpus.version,'v4','Current evaluation corpus must follow the active contract');
+  assert.equal(loadCorpus('v4').manifest.schemaHash,corpus.contract.schemaHash);
+  const historicalCases = fs.readFileSync(path.join(__dirname,'../evals/stage-intent/v3/cases.jsonl'));
+  const activeCases = fs.readFileSync(path.join(__dirname,'../evals/stage-intent/v4/cases.jsonl'));
+  assert.equal(historicalCases.compare(activeCases.subarray(0,historicalCases.length)),0,'v4 preserves frozen v3 lines as an unchanged prefix');
+  assert.throws(()=>loadCorpus('v3'),/Corpus contract version changed/,'historical runs keep their original contract');
   assert.equal(crypto.createHash('sha256').update(activeCases).digest('hex'),corpus.manifest.corpusSha256);
   assert.throws(()=>loadCorpus('v2'),/Unsupported stage-intent corpus version/,
     'Frozen v2 evidence must not be silently loaded under the current contract');
@@ -137,6 +138,18 @@ async function main() {
   assert.equal(candidateLabelsChecked,corpus.manifest.mechanicalAudit.candidateLabelsChecked);
   assert.equal(candidateLabelsMaterialized,corpus.manifest.mechanicalAudit.candidateLabelsMaterialized);
   assert.equal(refusalLabelsStructurallyConflicted,corpus.manifest.mechanicalAudit.refusalLabelsStructurallyConflicted);
+  // Exercise the full artifact limit through the actual prepare/share codec.
+  // Long JSON whitespace is valid transport input, not a new semantic field.
+  const maximalIntent={version:1,scene:'towers-flat',patch:{},director:false,hand:{on:false}};
+  for(const parameter of corpus.contract.commonParams)maximalIntent.patch[parameter.name]=parameter.default;
+  for(const parameter of corpus.contract.scenes.find(scene=>scene.id==='towers-flat').params)
+    maximalIntent.patch['sc.'+parameter.name]=parameter.default;
+  const fullArtifact=harness.draft.artifact(maximalIntent),artifactJson=JSON.stringify(fullArtifact);
+  const nearLimit=artifactJson+' '.repeat(16384-Buffer.byteLength(artifactJson));
+  assert.equal(Buffer.byteLength(nearLimit),16384);
+  const preparedAtLimit=await harness.draft.prepare(nearLimit);
+  assert.equal(preparedAtLimit.preset.scene,'towers-flat');assert(preparedAtLimit.diagnostics.every(item=>!item.clamped));
+  await assert.rejects(()=>harness.draft.prepare(nearLimit+' '),/16 KiB/);
   const positive = corpus.cases.find(c=>c.id==='dev-common-01');
   const negative = corpus.cases.find(c=>c.id==='dev-neg-01');
   const unsupported = corpus.cases.find(c=>c.id==='dev-inject-01');
@@ -188,7 +201,7 @@ async function main() {
     'Transport failure cannot replace an explicit refusal in the structure gate');
   assert.throws(()=>summarize(cases,[candidate,candidate],[],meta,harness),/duplicate/);
   assert.throws(()=>summarize(cases,rows,[...reviews,reviews[0]],meta,harness),/duplicate/);
-  assert.equal(corpus.cases.filter(c=>c.split==='holdout').length,40);
+  assert.equal(corpus.cases.filter(c=>c.split==='holdout').length,corpus.manifest.splits.holdout);
   const savedDir = fs.mkdtempSync(path.join(os.tmpdir(),'hertz-eval-report-'));
   const valid = { ...candidate,evaluationVersion:1,caseId:corpus.cases[0].id,provider:'offline-rules',model:'offline-rules',
     schemaHash:corpus.contract.schemaHash,protocolFingerprint:harness.fingerprint,requestHash:harness.fingerprint,

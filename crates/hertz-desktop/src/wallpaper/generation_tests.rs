@@ -2,7 +2,7 @@
 use super::*;
 use std::io::{Read, Write};
 
-fn connection() -> Connection {
+pub(super) fn connection() -> Connection {
     let root = std::env::temp_dir().join(format!("hertz-native-pairing-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     let profile = crate::config::Profile::Standalone {
@@ -263,7 +263,7 @@ fn invalidating_displayed_quote_retains_confirmed_task_and_replay_authority() {
     assert_eq!(status["submissionPending"], true);
 }
 
-fn listener(response: Vec<u8>) -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+pub(super) fn listener(response: Vec<u8>) -> (u16, std::thread::JoinHandle<Vec<u8>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let worker = std::thread::spawn(move || {

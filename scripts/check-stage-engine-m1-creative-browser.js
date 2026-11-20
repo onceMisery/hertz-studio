@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..'), web = path.join(root, 'plugin/ui');
 const sources = ['stage-resource-budget.js', 'stage-resource-policy.js','stage-json-source.js', 'stage-image-source.js', 'stage.js', 'onset.js',
-  'lyric3d.js', 'creative-gl.js', 'creative-anime.js', 'stage-media.js', 'bgwall.js', 'backgrounds.js', 'handdrawn.js', 'creative-stage.js'];
+  'lyric3d.js', 'creative-gl.js', 'creative-anime.js', 'stage-media.js', 'bgwall.js', 'backgrounds.js', 'handdrawn.js', 'creative-stage.js', 'creative-share-code.js'];
 const digest = () => Object.fromEntries([...sources, 'stage-persistence.js', 'workshop.js'].map(name => [name, crypto.createHash('sha256').update(fs.readFileSync(path.join(web, name))).digest('hex')]));
 const out = path.join(root, 'output/a09-m1-20261108/creative-' + new Date().toISOString().replace(/[:.]/g, '-'));
 fs.mkdirSync(out, { recursive: true });
@@ -49,7 +49,7 @@ async function pageFor(caps = {}) {
       const render = engine.render;
       engine.render = state => {
         const result = render(state); harness.renders.push({ t: state.t, dt: state.dt, scene: state.scene,
-          index: state.lyric && state.lyric.index, energy: state.energy, ok: result.ok, reason: result.reason }); return result;
+          index: state.lyric && state.lyric.index, energy: state.energy, seed: state.seed, ok: result.ok, reason: result.reason }); return result;
       }; harness.lastEngine = engine; return engine;
     };
     Stage.init(); Stage.setTrack({ id: 'm1-creative', duration_ms: 200000 });
@@ -191,6 +191,81 @@ async function main() {
         assert.equal(result.resumed[0].dt, 0); assert.ok(result.resumed.every(frame => frame.dt <= 100));
         assert.equal(result.reduced, result.reducedEnd); assert.equal(result.stageVisible, false); return result;
       } finally { await close(page); }
+    });
+    await check('spectrum family switches real planar/perspective renderers with shared parameters, phase and portable presets', async () => {
+      const page = await pageFor();
+      try {
+        await mount(page);
+        const moving=await page.evaluate(async()=>{
+          CreativeStage.setPreset({scene:'towers',director:false,bindings:[],stage:{seed:.73},sc:{height:9,span:30,width:.5,depth:.6,mirror:.25}});
+          harness.snapshot(true,0);Stage.setSpectrum(new Float32Array(64).fill(.65));await harness.advance(30);
+          harness.snapshot(false);await harness.advance(12);
+          return {phase:CreativeStage.stats().sceneTimeMs,preset:CreativeStage.preset(),contexts:harness.contexts};
+        });
+        assert(moving.phase>0);
+        const evidence=await page.evaluate(async()=>{
+          const phases=[],copies=[];
+          for(const scene of ['towers-flat','towers','towers-flat']){
+            CreativeStage.setScene(scene);await harness.advance(12);
+            phases.push({phase:CreativeStage.stats().sceneTimeMs,preset:CreativeStage.preset(),frame:harness.renders.at(-1)});
+            const code=await CreativeShareCode.encode(undefined,{compress:false});
+            copies.push(await CreativeShareCode.decode(code));
+          }
+          const before=Stage.resources().snapshot();
+          for(let i=0;i<100;i++){CreativeStage.setScene(i%2?'towers-flat':'towers');await harness.advance(2);}
+          const after=Stage.resources().snapshot();
+          harness.snapshot(false,95000,true);await harness.advance(12);
+          const seekPhase=CreativeStage.stats().sceneTimeMs;
+          harness.hide(true);harness.time+=60000;await harness.advance(12);harness.hide(false);await harness.advance(12);
+          const hiddenPhase=CreativeStage.stats().sceneTimeMs;
+          Stage.setReducedMotion(true);harness.snapshot(true);CreativeStage.setScene('towers');await harness.advance(30);
+          const reducedPhase=CreativeStage.stats().sceneTimeMs;
+          const dimensions=['towers','towers-flat'].map(id=>({id,depth:CreativeGL.sceneById(id).depth,presentation:CreativeGL.sceneById(id).presentation}));
+          return {phases,copies,before,after,seekPhase,hiddenPhase,reducedPhase,dimensions,contexts:harness.contexts};
+        });
+        for(let i=0;i<evidence.phases.length;i++){
+          const state=evidence.phases[i];assert.equal(state.phase,moving.phase);
+          assert.deepEqual(state.preset.sc,moving.preset.sc);assert.deepEqual(state.preset.cam,moving.preset.cam);
+          assert.equal(state.preset.stage.seed,.73);assert.equal(state.frame.seed,.73);assert(state.frame.ok);
+          assert.equal(evidence.copies[i].scene,state.preset.scene);assert.deepEqual(evidence.copies[i].sc,state.preset.sc);
+        }
+        assert.equal(evidence.contexts,moving.contexts);assert.equal(evidence.seekPhase,moving.phase);
+        assert.equal(evidence.hiddenPhase,moving.phase);assert.equal(evidence.reducedPhase,moving.phase);
+        assert.deepEqual(evidence.after.held,evidence.before.held);assert.equal(evidence.after.violations.length,0);
+        assert.deepEqual(evidence.dimensions.map(value=>[value.depth,value.presentation.dimension]),[[true,'3d'],[false,'2d']]);
+        for(const scene of ['towers-flat','towers']){
+          await page.evaluate(async scene=>{CreativeStage.setScene(scene);await harness.advance(12);},scene);
+          await page.screenshot({path:path.join(out,scene+'.png')});
+        }
+        await page.evaluate(()=>{CreativeStage.destroy();Backgrounds.destroy();HandDrawn.destroy();});
+        const retired=await page.evaluate(()=>Stage.resources().snapshot());
+        assert.equal(retired.resources,0);assert.equal(retired.listeners,0);
+        return {moving,evidence,retired};
+      } finally { await close(page); }
+    });
+    await check('both family authoring paths preserve active animations and an unrelated scene retires them', async () => {
+      const page=await pageFor();
+      try{
+        await mount(page);
+        const evidence=await page.evaluate(async()=>{
+          const cases=[];
+          for(const method of ['setScene','applyIntent']){
+            CreativeStage.setPreset({scene:'towers',director:false,bindings:[],look:{bloom:.2}});
+            harness.snapshot(true);Stage.setSpectrum(new Float32Array(64).fill(.4));await harness.advance(12);
+            if(!CreativeStage.fire({every:1,set:{'look.bloom':2},len:4000,ease:'linear'}))throw new Error('cue fixture rejected');await harness.advance(36);
+            const before=CreativeStage.runtime()['look.bloom'];
+            if(method==='setScene')CreativeStage.setScene('towers-flat');
+            else CreativeStage.applyIntent({version:1,scene:'towers-flat',patch:{}});
+            const after=CreativeStage.runtime()['look.bloom'];await harness.advance(6);
+            const progressed=CreativeStage.runtime()['look.bloom'];
+            CreativeStage.applyIntent({version:1,scene:'orb',patch:{}});
+            cases.push({method,before,after,progressed,remaining:CreativeStage.stats().animations});
+          }
+          return cases;
+        });
+        for(const item of evidence){assert(item.before>.2);assert.equal(item.after,item.before);assert(item.progressed>item.after);assert.equal(item.remaining,0);}
+        return evidence;
+      }finally{await close(page);}
     });
     await check('failed candidate keeps the committed old scene and never recompiles every frame', async () => {
       const page = await pageFor();
@@ -579,7 +654,7 @@ async function main() {
           CreativeStage.setPreset({ scene: 'towers' }); const replacedCurrent = source();
           CreativeStage.attachStage(null); const rendererRetired = ledger.snapshot(true);
           const retained = source();
-          CreativeStage.library().forEach(item => CreativeStage.removePreset(item.id)); const empty = ledger.snapshot();
+          CreativeStage.library().forEach(item => CreativeStage.removePreset(item.id)); const empty = ledger.snapshot(true);
           CreativeStage.destroy(); const destroyed = ledger.snapshot();
           return { saved, loaded, libraryIds: library.map(item => item.id), firstId: first.id, full, expectedBytes,
             removedCurrent, replacedCurrent, rendererRetired, retained, empty, destroyed };
@@ -590,7 +665,10 @@ async function main() {
         assert.equal(result.full.reduce((sum, entry) => sum + entry.live.ownedCpuBytes, 0), result.expectedBytes);
         assert.equal(result.removedCurrent.length, 40); assert.equal(result.replacedCurrent.length, 39);
         assert.equal(result.rendererRetired.live.gpuContexts, 0); assert.deepEqual(result.retained, result.replacedCurrent);
-        assert.equal(result.empty.live.ownedCpuBytes, 2832); assert.equal(result.destroyed.resources, 0); return result;
+        const normalized = result.empty.entries.filter(entry => entry.owner === 'creative-preset');
+        assert.equal(normalized.length, 1); assert.ok(normalized[0].live.ownedCpuBytes > 0);
+        assert.equal(result.empty.live.ownedCpuBytes, 2832 + normalized[0].live.ownedCpuBytes);
+        assert.equal(result.destroyed.resources, 0); return result;
       } finally { await close(page); }
     });
     await check('snapshot library slots are independent and thumbnail-free metadata survives removal while current uses it', async () => {

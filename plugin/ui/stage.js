@@ -55,6 +55,7 @@
     document.dispatchEvent(new CustomEvent('stage:track-changed'));
   }
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
+  var lastCoverBorrow = null;
   var coverFollow = false;
   var paletteEpoch = 0;
   var lastPalette = null;
@@ -1295,6 +1296,9 @@
   // 子模块各自的 GL/DOM 资源由自己的 destroy 释放。
   function destroy() {
     stageDestroyed = true;
+    if (lastCoverBorrow) lastCoverBorrow.release(); lastCoverBorrow = null; lastCover = null;
+    if (window.HertzCovers && HertzCovers.release) HertzCovers.release(el.disc);
+    if (el.disc) el.disc.style.backgroundImage = '';
     if (window.StagePersistence && StagePersistence.destroy) StagePersistence.destroy();
     if (resourceLedger) resourceLedger.close();
     notifyFrameState(true);
@@ -1861,6 +1865,11 @@
       track = t || null;
       if (trackChanged) changedMedia();
       if (!durMs && t) durMs = t.duration_ms || 0;
+      var nextCoverBorrow = null;
+      try { if (window.HertzCovers && HertzCovers.borrow) nextCoverBorrow = HertzCovers.borrow(coverUrl); }
+      catch (_) { coverUrl = null; }
+      if (nextCoverBorrow) coverUrl = nextCoverBorrow.url;
+      if (lastCoverBorrow) lastCoverBorrow.release(); lastCoverBorrow = nextCoverBorrow;
       lastCover = coverUrl || null;
       if (el.disc) {
         applyBg(el.disc, coverUrl);

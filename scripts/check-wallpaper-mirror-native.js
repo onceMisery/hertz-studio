@@ -16,6 +16,7 @@ const { buildZip } = require('./check-wallpaper-media-native');
 const requestManagement = require('./desktop-native-management-client');
 
 const root = path.resolve(__dirname, '..');
+const compositionOnly = process.argv.includes('--composition-only');
 const binary = path.resolve(process.env.HERTZ_DESKTOP_BIN || path.join(root, 'target/debug/hertz-desktop.exe'));
 const output = path.join(root, 'output/playwright/wallpaper-mirror-native-' + Date.now());
 const configFile = path.join(output, 'config.json');
@@ -39,6 +40,7 @@ const domain = config => config.activeProfile
 const reference = draft => ({ draftId: draft.draftId, draftRevision: draft.draftRevision });
 const fixed = selection => ({ workKey: selection.workKey, packageHash: selection.packageHash });
 let child, browser, settings, spawnError, activeDraft = null, sequence = 0, importNonce = 0, cleanupDone = false;
+let retainedCatalogBytes = null;
 
 async function until(check, label, timeout = 30000) {
   const deadline = Date.now() + timeout;
@@ -232,11 +234,13 @@ async function mirrorRunning(selection, kind, index, label, playlistRevision = n
     assert.ok(Number.isSafeInteger(target.mirror.memberGeneration) && target.mirror.memberGeneration > 0);
     const monitor = hardware.monitors.find(monitor => monitor.displayId === target.displayId);
     for (const key of ['left', 'top', 'width', 'height']) assert.equal(target.diagnostics.monitor[key], monitor[key], 'Mirror keeps the member physical ' + key);
-    assert.equal(target.mediaAllocation.active, 2, 'decode and presentation hold separate native child allocations');
-    assert.equal(target.mediaAllocation.releasePending, 0);
+    if (kind !== 'gl') {
+      assert.equal(target.mediaAllocation.active, 2, 'decode and presentation hold separate native child allocations');
+      assert.equal(target.mediaAllocation.releasePending, 0);
+    }
   }
   assert.equal(current.wallpaper.budget.targets, active.length);
-  assert.equal(current.wallpaper.budget.contexts, 0, 'image/video Mirror uses the media backend');
+  assert.equal(current.wallpaper.budget.contexts, kind === 'gl' ? active.length : 0, 'each GL member owns one context');
   assert.equal(current.wallpaper.budget.decoderSlots, kind === 'video' ? active.length : 0);
   return current;
 }
@@ -844,11 +848,16 @@ async function disableAndDrain(label = 'disable-owned-mirror') {
   const state = await until(async () => {
     const state = await status(), budget = state.wallpaper.budget;
     const amounts = ['targets', 'contexts', 'decoderSlots', 'previewInstances', 'decodePixelRate', 'outputPixelRate',
-      'cpuBytes', 'prepareCpuBytes', 'assetCpuBytes', 'gpuBytes', 'prepareTasks', 'releasePending',
+      'cpuBytes', 'gpuBytes', 'prepareTasks', 'releasePending',
       'sessionReservations', 'resourceAllocations', 'resourceReleasePending'];
     return drained(state) && !state.wallpaper.mediaPreview
       && targets(state).every(target => !target.session && !target.handoff && !target.candidateLoading && !target.selectionPreparing)
-      && amounts.every(key => budget[key] === 0) ? state : null;
+      && amounts.every(key => budget[key] === 0)
+      // Process catalog and live management/control owners survive disabling
+      // wallpaper. Check their original diagnostic components rather than
+      // demanding their destruction while settings are still open.
+      && budget.assetCpuBytes === retainedCatalogBytes
+      && budget.prepareCpuBytes === budget.controlPrepareCpuBytes ? state : null;
   }, 'all owned Mirror controllers, decoders, allocations and exit queues drain', 30000);
   await until(() => !pages().some(page => /\/(?:wallpaper|wallpaper-probe)\.html/.test(page.url())), 'real media WebViews close after disable', 10000);
   const resources = ok(await api('wallpaper.status'), 'final resource owner status');
@@ -869,12 +878,15 @@ async function main() {
   const lyrics = { enabled: false, locked: false, layout: 'double', secondary: 'next', fontFamily: 'Segoe UI', fontSize: 32,
     fontWeight: 600, sungColor: '#ffffff', unsungColor: '#ffffff', outlineColor: '#000000', outlineWidth: 1,
     opacity: 1, width: 550, anchorX: 0.5, anchorY: 0.5, monitor: null };
-  const wallpaper = { enabled: true, audioInput: { kind: 'none' }, batteryPolicy: 'pause', pauseOnFullscreen: false,
+  const wallpaper = { enabled: !compositionOnly, audioInput: { kind: 'none' }, batteryPolicy: 'pause', pauseOnFullscreen: false,
     pauseOnMaximized: false, applicationRules: [], groups: [group({ kind: 'builtin', sceneId: 'coast', stateVersion: 1, params: {} }, [{ kind: 'primary' }], 'single', 'native-bootstrap')] };
   fs.writeFileSync(configFile, JSON.stringify({ schemaVersion: 5, revision: 1, launchAtLogin: false,
     activeProfile: null, profiles: [], unboundDomain: { wallpaper, lyrics }, lastCommit: null }, null, 2));
   await start();
   const initial = await settingsSnapshot();
+  const initialBudget = (await status()).wallpaper.budget;
+  retainedCatalogBytes = initialBudget.assetCpuBytes;
+  snapshot('initial-budget', initialBudget);
   hardware.monitors = initial.monitors; hardware.monitorCount = hardware.monitors.length;
   assert.ok(hardware.monitorCount > 0, 'at least one connected real monitor is required');
   assert.equal(hardware.monitors.filter(monitor => monitor.primary).length, 1, 'one unambiguous primary monitor');
@@ -897,14 +909,90 @@ async function main() {
   for (const key of ['mirrorBuiltin', 'mirrorPackages', 'mirrorPlaylists']) assert.equal(capabilities[key], false, 'generic type flags do not certify actual content');
   snapshot('hardware', { ...hardware, configuredDisplays: displays, capabilities });
   console.log('Real monitor count: ' + hardware.monitorCount + '; active members: ' + hardware.exercisedDisplayIds.length + '; output: ' + output);
-  await seedFixtures();
-  await imageAndPlaylistChecks(displays);
-  await videoChecks(displays);
+  if (compositionOnly) await compositionChecks(displays);
+  else {
+    await seedFixtures();
+    await imageAndPlaylistChecks(displays);
+    await videoChecks(displays);
+  }
   const ordered = monitors => [...monitors].sort((a, b) => a.displayId.localeCompare(b.displayId));
   assert.deepEqual(ordered((await settingsSnapshot()).monitors), ordered(hardware.monitors), 'OS monitor topology stays unchanged');
   await capture(settings, 'settings');
   await disableAndDrain();
   assert.deepEqual(pageErrors, []);
+}
+
+async function compositionChecks(displays) {
+  const composition = { documentVersion: 1,
+    canvas: { width: 640, height: 360, colorSpace: 'srgb', background: '#102630' },
+    nodes: [{ id: 'particles', type: 'particles', stateVersion: 1,
+      properties: { x: 320, y: 180, width: 640, height: 360, count: 32, seed: 42, speed: 20, spread: 180 } }],
+    timeline: { durationSeconds: 8, loop: true, tracks: [] }, bindings: [], effects: [] };
+  const selections = [];
+  for (let index = 0; index < 2; index++) {
+    const document = structuredClone(composition); document.nodes[0].properties.seed += index;
+    const draft = ok(await api('wallpaper.draft.create', { kind: 'work', document: {
+      title: 'Absolute mirror composition ' + index, description: 'offline absolute particles', composition: document,
+    } }), 'create composition work');
+    const saved = ok(await api('wallpaper.draft.save', reference(draft)), 'save composition work');
+    const published = ok(await api('wallpaper.draft.publish', reference(saved)), 'publish composition work');
+    selections.push({ kind: 'package', ...fixed(published) });
+  }
+  await inspect(selections[0], 4, true, 4, 'absolute composition inspected at four members');
+  const wallpaper = structuredClone(domain(stored()).wallpaper);
+  wallpaper.enabled = true;
+  wallpaper.groups = [group(selections[0], displays)];
+  await commit(wallpaper, 'apply-absolute-composition-mirror');
+  let state = await mirrorRunning(selections[0], 'gl', 0, 'absolute composition first frame and typed group reveal');
+  const observed = [];
+  for (const target of targets(state)) {
+    const page = await renderer(binding(target));
+    await delay(400);
+    const first = await page.evaluate(() => hertzWallpaper.debug());
+    assert.equal(first.compositionClock.held, false);
+    assert.equal(first.compositionClock.token, target.mirror.clockToken);
+    await delay(250);
+    const second = await page.evaluate(() => hertzWallpaper.debug());
+    assert.ok(second.sceneTime > first.sceneTime, 'absolute group time advances');
+    observed.push({ targetId: target.targetId, first, second });
+  }
+  snapshot('composition-running', { state, observed });
+  mark('published absolute composition passes installed layout inspection and real native GL group reveal');
+  const before = stored().revision;
+  await native({ command: 'wallpaper-hide' });
+  await until(async () => targets(await status()).every(target => !target.visible), 'composition group pause');
+  const pausedPages = await Promise.all(targets(state).map(target => renderer(binding(target))));
+  const phases = await Promise.all(pausedPages.map(page => page.evaluate(() => hertzWallpaper.debug().sceneTime)));
+  await delay(500);
+  assert.deepEqual(await Promise.all(pausedPages.map(page => page.evaluate(() => hertzWallpaper.debug().sceneTime))), phases);
+  await native({ command: 'wallpaper-show' });
+  state = await mirrorRunning(selections[0], 'gl', 0, 'composition resume with new member clock');
+  assert.equal(stored().revision, before);
+  mark('composition group pause freezes scene time and resume completes a fresh native clock ticket without configuration write');
+  const list = await savePlaylist('Absolute composition list', selections, 86400);
+  const nextWallpaper = structuredClone(domain(stored()).wallpaper);
+  nextWallpaper.groups = [group(list, displays)];
+  await commit(nextWallpaper, 'apply-composition-playlist');
+  const initial = await mirrorRunning(list, 'gl', 0, 'composition playlist initial item');
+  const initialPages = await Promise.all(targets(initial).map(target => renderer(binding(target))));
+  const beforeNext = await until(async () => {
+    const samples = await Promise.all(initialPages.map(page => page.evaluate(() => hertzWallpaper.debug().sceneTime)));
+    return samples.every(time => time >= 3000) ? samples : null;
+  }, 'first composition accumulates a distinguishable content phase');
+  const nextRequestedAt = Date.now();
+  ok(await api('wallpaper.playlist.next', { playlistId: list.playlistId, groupId }), 'next composition item');
+  state = await mirrorRunning(list, 'gl', 1, 'composition playlist next item');
+  const afterNext = [];
+  for (const target of targets(state)) {
+    const page = await renderer(binding(target));
+    const sample = await page.evaluate(() => ({ time: hertzWallpaper.debug().sceneTime, at: Date.now() }));
+    assert.ok(sample.time >= 0 && sample.time <= sample.at - nextRequestedAt + 250,
+      'new composition phase excludes all content time accumulated by its predecessor');
+    assert.notEqual(target.mirror.token, targets(initial).find(old => old.targetId === target.targetId).mirror.token);
+    afterNext.push({ targetId: target.targetId, ...sample });
+  }
+  snapshot('composition-playlist', { state, beforeNext, nextRequestedAt, afterNext });
+  mark('shared playlist next resets the second composition content phase and commits real member receipts');
 }
 
 function report(passed, extra = {}) {

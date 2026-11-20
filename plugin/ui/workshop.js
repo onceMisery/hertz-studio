@@ -38,6 +38,67 @@
   var target = 'immersive', returnFocus = null, home = null;
   var past = [], future = [], gesture = null;
   var shareViewRevision = 0, shareEditRevision = 0;
+  var payloadViews = [];
+  function releasePayloadView() {
+    payloadViews.forEach(function (binding) { binding.clear(); }); payloadViews = [];
+  }
+  function payloadText(control) {
+    var held = null;
+    function clear() { control.value = ''; if (held) held.release(); held = null; }
+    var binding = { clear: clear, set: function (source) {
+      var value = source.value;
+      var work = StageJsonSource.reserve('workshop-payload-view', value.length * 2,
+        'application-assigned textarea UTF16 payload retained while its DOM value exists');
+      var next;
+      try {
+        next = work.finish(null, value.length * 2);
+        control.value = value;
+        if (held) held.release(); held = next; next = null;
+      } finally { if (next) next.release(); work.release(); }
+    } };
+    // User editing belongs to the native editor. An explicitly generated copy
+    // ends when replaced; reading/retaining it below obtains its own lease.
+    control.addEventListener('input', function () { if (held) held.release(); held = null; });
+    payloadViews.push(binding); return binding;
+  }
+  function readPayload(control, limit) {
+    var work = StageJsonSource.reserve('workshop-payload-input', control.textLength * 2,
+      'explicit application copy read from native text editor');
+    try {
+      var value = control.value;
+      if (limit && StageJsonSource.utf8Length(value, limit) > limit) throw new Error('输入内容过大');
+      return work.finish(value, value.length * 2);
+    } finally { work.release(); }
+  }
+  function clearPrepared(state) {
+    state.prepared = null;
+    if (state.sourceLease) state.sourceLease.release(); state.sourceLease = null;
+  }
+  function clearArrangement() {
+    arrangementState.plan = null;
+    if (arrangementState.sourceLease) arrangementState.sourceLease.release(); arrangementState.sourceLease = null;
+  }
+  function downloadPayload(source, name) {
+    var blob = StageJsonSource.blob(source.value, 'application/json'), url, a = h('a');
+    try {
+      url = URL.createObjectURL(blob.value); a.href = url; a.download = name;
+      document.body.appendChild(a); a.click();
+      // The object URL owns the Blob until revocation, including after close.
+      setTimeout(function () { URL.revokeObjectURL(url); blob.release(); }, 30000);
+    } catch (error) { if (url) URL.revokeObjectURL(url); blob.release(); throw error; }
+    finally { a.remove(); }
+  }
+  async function copyPayload(control) {
+    var source = readPayload(control);
+    try {
+      control.focus(); control.select();
+      var done = false;
+      try { done = document.execCommand('copy'); } catch (_) { /* Host channel below. */ }
+      if (!done && window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) { await window.dbxPlugin.copy(source.value); done = true; }
+      else if (!done && navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(source.value); done = true; }
+      return done;
+    } finally { source.release(); }
+  }
   var resetting = false;
   var renderedPage = null;
   var mediaPickerOpen = false, mediaPage = 0, mediaNotice = '';
@@ -593,10 +654,12 @@
     return typeof formatted === 'string' ? formatted : String(value);
   }
   function prepareDraftSource(input, source) {
-    return isTemplateSource(source) ? CreativeTemplates.prepare(source.slice(9)) : CreativeDraft.prepare(input);
+    return isTemplateSource(source) ? CreativeTemplates.prepareLease(source.slice(9)) : CreativeDraft.prepareLease(input);
   }
   function discardDraft() {
-    draftState.serial += 1; draftState.prepared = null; draftState.token = null;
+    draftState.serial += 1; clearPrepared(draftState); draftState.token = null;
+    draftState.diff = null;
+    if (draftState.diffLease) draftState.diffLease.release(); draftState.diffLease = null;
     draftState.busy = false; draftState.error = '';
     var CS = stage_api(); if (CS && CS.cancelPreview) CS.cancelPreview();
   }
@@ -610,14 +673,16 @@
       if (draftState.undo !== previous) return;
       if (previous.revision !== CS.revision()) {
         draftState.undo = null;
+        previous.source.release();
         undo.hidden = true;
         flash('舞台已修改，本次撤销已失效');
         return;
       }
       draftState.undo = null;
-      try { CS.setPreset(previous.preset); render(); flash('已撤销本次应用'); }
+      try { CS.setPreset(previous.preset, { payloadSource:previous.source, returnPreset:false }); previous.source.release(); render(); flash('已撤销本次应用'); }
       catch (e) {
         if (CS.revision() === previous.revision) draftState.undo = previous;
+        else previous.source.release();
         flash('撤销失败：' + String(e && e.message || e));
       }
     });
@@ -627,17 +692,28 @@
     discardDraft(); draftState.source = source; draftState.busy = true;
     var serial = draftState.serial, page = target + ':' + tab, CS = stage_api(), revision = CS.revision();
     render();
+    var sourceLease, currentSource, diffWork;
     try {
-      var prepared = await prepareDraftSource(input,source);
+      sourceLease = await prepareDraftSource(input,source);
+      var prepared = sourceLease.value;
       if (serial !== draftState.serial || !isOpen() || document.hidden || page !== target + ':' + tab) return;
       if (revision !== CS.revision()) throw new Error('舞台已修改，请重新预览');
-      var current = CS.preset();
-      prepared.diff = [];
-      collectDraftDiff(current, prepared.preset, '', prepared.diff);
+      currentSource = CS.presetLease();
+      var current = currentSource.value;
+      diffWork = StageJsonSource.reserve('workshop-draft-diff',
+        (StageJsonSource.measure(current).bytes + StageJsonSource.measure(prepared.preset).bytes) * 4 + 4096,
+        'draft comparison scalar/string paths and retained difference rows');
+      draftState.diff = [];
+      collectDraftDiff(current, prepared.preset, '', draftState.diff);
+      draftState.diffLease = diffWork.finish(draftState.diff, StageJsonSource.measure(draftState.diff).bytes);
       draftState.prepared = prepared;
+      draftState.sourceLease = sourceLease; sourceLease = null;
       draftState.token = CS.beginPreview(prepared.preset, prepared.proposalHash);
     } catch (e) { if (serial === draftState.serial) draftState.error = String(e.message || e); }
-    finally { if (serial === draftState.serial) { draftState.busy = false; render(); } }
+    finally {
+      if (currentSource) currentSource.release(); if (diffWork) diffWork.release();
+      if (sourceLease) sourceLease.release(); if (serial === draftState.serial) { draftState.busy = false; render(); }
+    }
   }
   function renderDraftControls(body, source) {
     if (draftState.source !== source) return;
@@ -652,7 +728,7 @@
       body.appendChild(h('p','sc-note','该草稿按场景规范默认值创建。应用会替换整份当前预置；未指定参数按候选默认值写入，当前 cue、绑定和工程上下文会被替换。原曲目不会自动播放或切换。'));
     }
     body.appendChild(h('div', 'sc-note', '正在临时预览。确认应用后才会保存；切页、关闭或取消会恢复已提交的舞台。'));
-    (prepared.diff || []).filter(function (d) { return d.before !== d.after; }).forEach(function (d) {
+    (draftState.diff || []).filter(function (d) { return d.before !== d.after; }).forEach(function (d) {
       body.appendChild(h('div', 'ws-kv', d.path + '：当前 ' + formatDraftDiffValue(d.before)
         + ' → 候选 ' + formatDraftDiffValue(d.after)));
     });
@@ -661,9 +737,17 @@
         d.path + '：' + d.requested + ' → ' + d.normalized + (d.clamped ? '（已调整到支持范围）' : '')));
     });
     var detail = h('details'), title = h('summary', null, '查看完整候选与分享码');
-    var code = h('textarea', 'ws-json'); code.readOnly = true; code.value = prepared.shareCode;
+    var code = h('textarea', 'ws-json'); code.readOnly = true;
+    payloadText(code).set({value:prepared.shareCode});
     code.setAttribute('aria-label', '草稿分享码');
-    var json = h('pre', 'sc-note', JSON.stringify(prepared.preset, null, 2));
+    var json = h('pre', 'sc-note'), jsonSource = StageJsonSource.stringify(prepared.preset, { owner:'workshop-draft-view', space:2 });
+    var jsonWork, jsonView;
+    try {
+      jsonWork = StageJsonSource.reserve('workshop-draft-view', jsonSource.value.length * 2,
+        'application-assigned preformatted JSON DOM text');
+      json.textContent = jsonSource.value; jsonView = jsonWork.finish(null, jsonSource.value.length * 2);
+    } finally { jsonSource.release(); if (jsonWork) jsonWork.release(); }
+    payloadViews.push({clear:function () { json.textContent = ''; jsonView.release(); }});
     detail.append(title, code, json); body.appendChild(detail);
     var row = h('div', 'ws-prompt-actions');
     var apply = h('button', 'btn primary', '应用到当前舞台'); apply.type = 'button';
@@ -671,8 +755,10 @@
       if (draftState.busy) return;
       var serial = draftState.serial;
       draftState.busy = true; apply.disabled = true;
+      var checkedSource, previousSource, borrow = draftState.sourceLease.borrow();
       try {
-        var checked = await prepareDraftSource(prepared.artifact,source);
+        checkedSource = await prepareDraftSource(prepared.artifact,source);
+        var checked = checkedSource.value;
         if (isAiDraftSource(source)) {
           var latest = await VMusicTransport.get('/v1/ai/proposals/' + source);
           if (latest.state !== 'pending' || latest.expiresAt <= Date.now()
@@ -682,14 +768,16 @@
         }
         if (serial !== draftState.serial) return;
         if (!isOpen() || document.hidden || checked.proposalHash !== token.proposalHash) throw new Error('预览已失效');
-        var previous = CS.preset();
-        var result = CS.applyPreview(token.previewId, checked.proposalHash);
+        previousSource = CS.presetLease();
+        var result = CS.applyPreview(token.previewId, checked.proposalHash, { returnPreset:false });
         if (!result.ok) throw new Error(result.message);
-        draftState.undo = { preset: previous, revision: CS.revision() };
+        if (draftState.undo) draftState.undo.source.release();
+        draftState.undo = { preset: previousSource.value, source:previousSource, revision: CS.revision() }; previousSource = null;
         discardDraft(); flash('已应用到本页面；收藏请使用原收藏入口');
       } catch (e) {
         if (serial === draftState.serial) { draftState.error = String(e.message || e); }
       } finally {
+        if (checkedSource) checkedSource.release(); if (previousSource) previousSource.release(); borrow.release();
         if (serial === draftState.serial) draftState.busy = false;
         render();
       }
@@ -702,10 +790,16 @@
     body.appendChild(h('h2', 'sc-group-title', '导入舞台意图草稿'));
     body.appendChild(h('div', 'sc-note', '粘贴带版本信息的草稿 JSON（最多 16 KiB）。本地校验并临时预览，无需开启生成或外部连接。'));
     var ta = h('textarea', 'ws-json'); ta.id = 'ws-draft-json'; ta.spellcheck = false;
-    ta.value = draftState.text; ta.setAttribute('aria-label', '舞台意图草稿 JSON');
+    ta.maxLength = 16384; var draftTextBinding = payloadText(ta);
+    if (draftState.textLease) draftTextBinding.set(draftState.textLease);
+    ta.setAttribute('aria-label', '舞台意图草稿 JSON');
     ta.addEventListener('input', function () {
       var active = draftState.token || draftState.busy || draftState.error;
-      draftState.text = ta.value; discardDraft(); if (active) render();
+      try {
+        var next = readPayload(ta, 16384), previous = draftState.textLease;
+        draftState.text = next.value; draftState.textLease = next; if (previous) previous.release();
+        discardDraft(); if (active) render();
+      } catch (error) { flash(error.message); }
     });
     var preview = h('button', 'btn primary', draftState.busy ? '正在校验…' : '校验并预览草稿');
     preview.type = 'button'; preview.id = 'ws-draft-preview'; preview.disabled = draftState.busy;
@@ -1591,19 +1685,20 @@
         : '。存进工坊会另建收藏；模板与草稿须先预览、确认应用，才会替换当前编排。')));
     renderCreativeTemplates(body);
 
-    body.appendChild(h('h2', 'sc-group-title', '三维场景'));
+    body.appendChild(h('h2', 'sc-group-title', '舞台场景'));
     // 场景、参数和编排使用同一份创意预置，直接交给大舞台的渲染器。
     var grid = h('div', 'ws-scene-grid');
     if (CS.scenes) {
       CS.scenes().forEach(function (s) {
         if (s.presentation && s.presentation.family === 'anime') return;
+        if (s.presentation && s.presentation.family === 'spectrum-towers' && s.presentation.dimension === '2d') return;
         var card = h('button', 'ws-scene-card');
         card.type = 'button';
         card.dataset.scene = s.id;
         card.innerHTML = sceneArt(s.id);
         card.appendChild(h('strong', null, s.label));
         card.appendChild(h('small', null, SCENE_DESCRIPTIONS[s.id] || '镜头与光影跟随你的编排'));
-        var on = cur.scene === s.id;
+        var on = cur.scene === s.id || s.id === 'towers' && cur.scene === 'towers-flat';
         card.classList.toggle('on', on);
         card.setAttribute('aria-pressed', String(on));
         card.addEventListener('click', function () {
@@ -1614,6 +1709,23 @@
         grid.appendChild(card);
       });
       body.appendChild(grid);
+      if (cur.scene === 'towers' || cur.scene === 'towers-flat') {
+        var modes = h('div', 'sc-grid'); modes.setAttribute('role', 'group'); modes.setAttribute('aria-label', '频谱构图');
+        [['towers-flat', '二维平面'], ['towers', '三维塔林']].forEach(function (mode) {
+          var button = h('button', 'btn', mode[1]); button.type = 'button';
+          button.id = 'ws-stage-mode-' + mode[0];
+          button.dataset.stageMode = mode[0];
+          button.setAttribute('aria-pressed', String(cur.scene === mode[0]));
+          button.addEventListener('click', function () {
+            CS.setScene(mode[0]); render();
+            var current = document.querySelector('[data-stage-mode="' + mode[0] + '"]');
+            if (current) current.focus();
+          });
+          modes.appendChild(button);
+        });
+        body.appendChild(modes);
+        body.appendChild(h('p', 'sc-note', '两种构图共享频谱参数与种子；切换保留动画相位。二维模式保持平面构图，三维模式支持透视镜头。'));
+      }
       body.appendChild(h('div', 'sc-note',
         '场景、镜头、编排与电影风格直接呈现在大舞台，关闭工坊后继续演出。切换场景会移除不适用的 cue 和绑定目标。'));
     }
@@ -1827,7 +1939,7 @@
     if (!window.CreativeArrangement || !window.CreativeProject) return;
     var A = CreativeArrangement, state = arrangementState;
     if (state.plan && state.plan.revision !== stage_api().revision()) {
-      state.plan = null; state.message = '舞台已改变，请重新检查分段。';
+      clearArrangement(); state.message = '舞台已改变，请重新检查分段。';
     }
     var box = h('details','ws-arrangement');
     box.appendChild(h('summary',null,'按分段生成编排'));
@@ -1844,7 +1956,7 @@
         + state.plan.replacedCueCount + ' 条 cue；自动导演关闭，保留 ' + state.plan.bindingCount + ' 条音频绑定。'
         + state.plan.prepared.warnings.join(' ') : '';
     }
-    function invalidate() { state.plan = null; state.message = ''; message.textContent = ''; showPlan(); }
+    function invalidate() { clearArrangement(); state.message = ''; message.textContent = ''; showPlan(); }
     var add = h('button','btn','增加分段'); add.dataset.arrangement = 'add';
     function paintRows() {
       list.replaceChildren(); add.disabled = state.sections.length >= 32;
@@ -1875,15 +1987,18 @@
       invalidate(); paintRows();
     });
     check.addEventListener('click',function () {
-      try { state.plan = A.prepare(state.sections); state.message = '检查通过，请核对替换范围后应用。'; }
-      catch (e) { state.plan = null; state.message = e.message; }
+      try {
+        var next = A.prepareLease(state.sections); clearArrangement();
+        state.sourceLease = next; state.plan = next.value; state.message = '检查通过，请核对替换范围后应用。';
+      }
+      catch (e) { clearArrangement(); state.message = e.message; }
       message.textContent = state.message; showPlan();
     });
     apply.addEventListener('click',function () {
-      var plan = state.plan; state.plan = null;
+      var plan = state.plan;
       try {
         state.message = '已生成工程 cue，可在下方继续编辑；请到“导出”确认媒体并保存工程。';
-        A.apply(plan); render();
+        var applied = CreativeProject.applyLease(plan.prepared,plan.revision); applied.release(); clearArrangement(); render();
       } catch (e) { state.message = e.message; message.textContent = e.message; showPlan(); }
     });
     var project = h('button','btn','媒体确认与工程保存');
@@ -2521,6 +2636,7 @@
       + '不包含沉浸舞台设置、媒体文件、文件指纹或账户信息；工程 cue 会保留版本并在确认当前媒体前停用。媒体背景会改为跟随主题。'));
     var label = h('label', 'sc-note', '分享码'); label.htmlFor = 'ws-share-code'; body.appendChild(label);
     var code = h('textarea', 'ws-json'); code.id = 'ws-share-code'; code.spellcheck = false;
+    var codeBinding = payloadText(code);
     code.placeholder = '粘贴收到的分享码，或生成当前预置的分享码'; code.maxLength = 180000;
     body.appendChild(code);
     var compatibility = h('label', 'ws-row');
@@ -2540,38 +2656,38 @@
     code.addEventListener('input', function () { serial += 1; status.textContent = ''; });
     plain.addEventListener('change', function () { serial += 1; });
     async function copyCode(alive) {
-      code.focus(); code.select();
       var copied = false;
-      try { copied = document.execCommand('copy'); } catch (e) { /* try the available host channel */ }
-      if (!copied) {
-        try {
-          if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) await window.dbxPlugin.copy(code.value);
-          else if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(code.value);
-          else throw new Error('clipboard unavailable');
-          copied = true;
-        } catch (e) { /* selected text remains available for manual copy */ }
-      }
+      try { copied = await copyPayload(code); } catch (e) { /* Selected text remains available. */ }
       if (alive()) status.textContent = copied ? '分享码已复制' : '自动复制失败，文本已选中；请按 Ctrl+C 或手动复制';
     }
     var generate = h('button', 'btn', '生成并复制分享码'); generate.id = 'ws-share-copy';
     generate.addEventListener('click', async function () {
+      if (generate.disabled) return;
+      generate.disabled = true;
       var alive = ticket(); status.textContent = '正在生成分享码…';
+      var encoded;
       try {
         if (!window.CreativeShareCode) throw new Error('分享码模块尚未就绪，请刷新应用');
-        var encoded = await CreativeShareCode.encode(CS.shareSnapshot({ includeProjectContext: true }), { compress: !plain.checked });
+        encoded = await CreativeShareCode.encodeLease(undefined, { compress: !plain.checked });
         if (!alive()) return;
-        code.value = encoded;
+        codeBinding.set(encoded);
         await copyCode(alive);
       } catch (e) { if (alive()) status.textContent = e.message || String(e); }
+      finally { if (encoded) encoded.release(); generate.disabled = false; }
     });
     var load = h('button', 'btn primary', '载入分享码'); load.id = 'ws-share-import';
     load.addEventListener('click', async function () {
+      if (load.disabled) return;
+      load.disabled = true;
       var alive = ticket(); status.textContent = '正在读取分享码…';
+      var input, decodedSource;
       try {
         if (!window.CreativeShareCode) throw new Error('分享码模块尚未就绪，请刷新应用');
-        var decoded = await CreativeShareCode.decode(code.value);
+        input = readPayload(code);
+        decodedSource = await CreativeShareCode.decodeLease(input.value);
+        var decoded = decodedSource.value;
         if (!alive()) return;
-        CS.setPreset(decoded);
+        CS.setPreset(decoded, { payloadSource: decodedSource, returnPreset:false });
         var needsMediaConfirmation = !!(decoded.project && decoded.cues.some(function (cue) {
           return Object.prototype.hasOwnProperty.call(cue, 'at') || Object.prototype.hasOwnProperty.call(cue, 'every');
         }));
@@ -2581,6 +2697,7 @@
         status.textContent = message;
         flash(message);
       } catch (e) { if (alive()) status.textContent = e.message || String(e); }
+      finally { if (input) input.release(); if (decodedSource) decodedSource.release(); load.disabled = false; }
     });
     row.append(generate, load); body.append(row, status);
   }
@@ -2598,35 +2715,47 @@
     var status = h('p','sc-note',P.status()); status.dataset.projectStatus = '';
     body.appendChild(status);
     var ta = h('textarea','ws-json'); ta.id = 'ws-project-json'; ta.setAttribute('aria-label','舞台工程 JSON');
-    ta.spellcheck = false; ta.value = projectState.text;
+    ta.spellcheck = false; ta.maxLength = 256 * 1024;
+    var textBinding = payloadText(ta);
+    if (projectState.textLease) textBinding.set(projectState.textLease);
     var message = h('p','sc-note',projectState.message); message.setAttribute('role','status');
     message.dataset.projectMessage = '';
     var row = h('div','ws-row');
     var check = h('button','btn','检查工程'), apply = h('button','btn primary','应用已检查工程');
     check.dataset.project = 'check'; apply.dataset.project = 'apply';
     if (projectState.prepared && projectState.revision !== CS.revision()) {
-      projectState.prepared = null;
+      clearPrepared(projectState);
       projectState.message = '舞台已修改，请重新检查工程';
     }
     apply.disabled = !projectState.prepared;
     function valid() { return check.isConnected && isOpen() && target === 'advanced' && tab === 'io' && !document.hidden; }
     function say(text) { projectState.message = text; message.textContent = text; }
-    ta.addEventListener('input',function () { projectState.text = ta.value; projectState.prepared = null; apply.disabled = true; say(''); });
+    ta.addEventListener('input',function () {
+      clearPrepared(projectState); apply.disabled = true;
+      try {
+        var next = readPayload(ta, 256 * 1024), previous = projectState.textLease;
+        projectState.textLease = next; projectState.text = next.value;
+        if (previous) previous.release(); say('');
+      } catch (error) { say(error.message); }
+    });
     check.addEventListener('click',function () {
       try {
-        projectState.prepared = P.prepare(ta.value); projectState.revision = CS.revision();
+        var input = readPayload(ta, 256 * 1024), next;
+        try { next = P.prepareLease(input.value); } finally { input.release(); }
+        clearPrepared(projectState); projectState.sourceLease = next;
+        projectState.prepared = next.value; projectState.revision = CS.revision();
         apply.disabled = false;
         var p = projectState.prepared;
         say('检查通过：' + p.project.preset.scene + ' · ' + p.project.preset.cues.length + ' 条 cue。'
           + (p.project.media ? '包含媒体内容身份。' : '未绑定媒体。') + p.warnings.join(' '));
-      } catch (e) { projectState.prepared = null; apply.disabled = true; say(e.message); }
+      } catch (e) { clearPrepared(projectState); apply.disabled = true; say(e.message); }
     });
     apply.addEventListener('click',function () {
       try {
-        var prepared = projectState.prepared;
-        projectState.prepared = null;
+        var prepared = projectState.prepared, applied;
         projectState.message = '工程已应用，参数与编排可继续编辑；请确认绑定当前曲目后执行 cue。';
-        P.apply(prepared,projectState.revision);
+        applied = P.applyLease(prepared,projectState.revision); applied.release();
+        clearPrepared(projectState);
         render();
       } catch (e) { say(e.message); }
     });
@@ -2642,8 +2771,19 @@
     file.addEventListener('change',async function () {
       var selected = file.files && file.files[0]; if (!selected) return;
       if (selected.size > 256 * 1024) { say('工程超过 256 KiB'); return; }
-      try { var text = await selected.text(); if (valid() && file.files[0] === selected) { ta.value = text; ta.dispatchEvent(new Event('input')); say('文件已读取，请检查后应用。'); } }
-      catch (_) { if (valid()) say('无法读取工程文件'); }
+      var work, textSource;
+      try {
+        work = StageJsonSource.reserve('workshop-project-file', selected.size * 2, 'bounded File.text UTF16 output retained through await');
+        var text = await selected.text(); textSource = work.finish(text, text.length * 2); text = null;
+        if (valid() && file.files[0] === selected) {
+          textBinding.set(textSource);
+          var previous = projectState.textLease;
+          projectState.textLease = textSource; projectState.text = textSource.value; textSource = null;
+          if (previous) previous.release(); clearPrepared(projectState); apply.disabled = true;
+          say('文件已读取，请检查后应用。');
+        }
+      } catch (error) { if (valid()) say(error.resourceFailure ? error.message : '无法读取工程文件'); }
+      finally { if (textSource) textSource.release(); if (work) work.release(); }
     });
     var exportRow = h('div','ws-row');
     var include = h('input'); include.type = 'checkbox'; include.checked = true;
@@ -2651,17 +2791,16 @@
     var save = h('button','btn','下载可编辑工程'); save.dataset.project = 'save';
     save.addEventListener('click',async function () {
       save.disabled = true; say('正在生成工程…');
+      var source, text;
       try {
-        var prepared = await P.capture(include.checked,valid,remoteRead.checked);
+        source = await P.captureLease(include.checked,valid,remoteRead.checked);
+        var prepared = source.value;
         if (!valid()) return;
-        var text = JSON.stringify(prepared.project,null,2), blob = new Blob([text],{type:'application/json'});
-        var url = URL.createObjectURL(blob), a = h('a');
-        a.href = url; a.download = (prepared.project.preset.name || 'stage').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,80) + '.hertz-stage.json';
-        try { document.body.appendChild(a); a.click(); }
-        finally { a.remove(); setTimeout(function () { URL.revokeObjectURL(url); },30000); }
+        text = StageJsonSource.stringify(prepared.project, { owner:'workshop-project-export', space:2 });
+        downloadPayload(text, (prepared.project.preset.name || 'stage').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,80) + '.hertz-stage.json');
         say('工程下载已发起，请确认保存。' + prepared.warnings.join(' '));
       } catch (e) { if (valid()) say(e.message); }
-      finally { if (valid()) save.disabled = false; }
+      finally { if (text) text.release(); if (source) source.release(); if (valid()) save.disabled = false; }
     });
     exportRow.append(label,save); body.append(exportRow,file,ta,row,message);
   }
@@ -2689,8 +2828,12 @@
 
     var ta = h('textarea', 'ws-json');
     ta.spellcheck = false;
+    var jsonBinding = payloadText(ta);
     var exportError = '';
-    try { ta.value = CS.exportJSON(); }
+    try {
+      var exported = CS.exportJSONLease();
+      try { jsonBinding.set(exported); } finally { exported.release(); }
+    }
     catch (e) { exportError = e.message || String(e); ta.value = ''; ta.disabled = true; }
     body.appendChild(ta);
     if (exportError) body.appendChild(h('p','sc-note',exportError));
@@ -2698,40 +2841,29 @@
     var row = h('div', 'ws-row');
     var copy = h('button', 'btn', '复制');
     copy.disabled = !!exportError;
-    copy.addEventListener('click', function () {
-      ta.select();
-      var done = false;
-      try { done = document.execCommand('copy'); } catch (e) { done = false; }
-      // 插件 iframe 是 opaque origin，execCommand 与 navigator.clipboard 都不可用，
-      // 只能走宿主的 copy 通道。独立形态下前两条路照旧。
-      if (!done && window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
-        window.dbxPlugin.copy(ta.value).then(function () { flash('已复制'); },
-          function () { flash('复制失败，请手动选中'); });
-        return;
-      }
-      if (!done && navigator.clipboard) {
-        navigator.clipboard.writeText(ta.value).then(function () { flash('已复制'); },
-          function () { flash('复制失败，请手动选中'); });
-        return;
-      }
-      flash(done ? '已复制' : '复制失败，请手动选中');
+    copy.addEventListener('click', async function () {
+      if (copy.disabled) return; copy.disabled = true;
+      var view = shareViewRevision;
+      try {
+        var done = await copyPayload(ta);
+        if (view === shareViewRevision && isOpen()) flash(done ? '已复制' : '复制失败，请手动选中');
+      } catch (error) { if (view === shareViewRevision && isOpen()) flash(error.message || '复制失败，请手动选中'); }
+      finally { copy.disabled = false; }
     });
     var dl = h('button', 'btn', '下载 .json');
     dl.disabled = !!exportError;
     dl.addEventListener('click', function () {
-      var blob = new Blob([ta.value], { type: 'application/json' });
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = (CS.preset().name || 'stage') + '.json';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+      var source;
+      try { source = readPayload(ta); downloadPayload(source, (CS.projectInfo().name || 'stage') + '.json'); }
+      catch (error) { flash(error.message); }
+      finally { if (source) source.release(); }
     });
     var imp = h('button', 'btn primary', '载入这段 JSON');
     imp.addEventListener('click', function () {
-      var r = CS.importJSON(ta.value);
-      flash(r.message);
-      if (r.ok) render();
+      var source;
+      try { source = readPayload(ta); var r = CS.importJSON(source.value); flash(r.message); if (r.ok) render(); }
+      catch (error) { flash(error.message); }
+      finally { if (source) source.release(); }
     });
     var snap = h('button', 'btn', '抓一张缩略图');
     snap.addEventListener('click', function () {
@@ -3058,6 +3190,7 @@
     refs.targets.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.target === target)); });
     $('ws-tabs').hidden = target !== 'advanced';
     syncStageStatus();
+    releasePayloadView();
     refs.body.textContent = '';
     if (target === 'immersive') {
       renderImmersive(refs.body); refs.body.scrollTop = scroll;
@@ -3120,6 +3253,7 @@
       }
       panel.inert = false;
     } else {
+      releasePayloadView();
       discardDraft();
       releaseSceneArt();
       if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
@@ -3212,12 +3346,13 @@
           if (promptUndo) promptUndo.hidden = true;
         }
         if (draftState.undo && draftState.undo.revision !== CreativeStage.revision()) {
+          draftState.undo.source.release();
           draftState.undo = null;
           var draftUndo = document.getElementById('ws-draft-undo');
           if (draftUndo) draftUndo.hidden = true;
         }
         if (projectState.prepared && projectState.revision !== CreativeStage.revision()) {
-          projectState.prepared = null;
+          clearPrepared(projectState);
           projectState.message = '舞台已修改，请重新检查工程';
           var projectApply = refs.body.querySelector('[data-project="apply"]');
           var projectMessage = refs.body.querySelector('[data-project-message]');
@@ -3225,7 +3360,7 @@
           if (projectMessage) projectMessage.textContent = projectState.message;
         }
         if (arrangementState.plan && arrangementState.plan.revision !== CreativeStage.revision()) {
-          arrangementState.plan = null; arrangementState.message = '舞台已改变，请重新检查分段。';
+          clearArrangement(); arrangementState.message = '舞台已改变，请重新检查分段。';
           var arrangementApply = refs.body.querySelector('[data-arrangement="apply"]');
           var arrangementPreview = refs.body.querySelector('[data-arrangement-preview]');
           var arrangementMessage = refs.body.querySelector('[data-arrangement-status]');

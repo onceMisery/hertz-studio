@@ -1,3 +1,4 @@
+import { constructedGeometry, declaredArrayPayload, sourcePlan } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 import { basicInstance, own, qualityDensity, root, seed } from './factories.js';
 import { createParticlePointer, particleNoiseShader } from './particle-pointer.js';
@@ -34,6 +35,9 @@ function outlines(T, detail) {
 }
 
 function wings(ctx, rings, detail) {
+  // Each original Bezier path has at most 16 curves, two sides and two parts.
+  const maxOutline=16*detail+1,maxVertices=4*(rings+1)*maxOutline,maxIndices=4*rings*(maxOutline-1)*6;
+  declaredArrayPayload(ctx.scope,maxVertices*7+maxIndices,'Butterfly wing scratch and typed arrays',4,1);
   const T = ctx.THREE, positions = [], fan = [], sides = [], parts = [], indices = [];
   for (const [part, outline] of outlines(T, detail).entries()) for (const side of [-1, 1]) {
     const start = positions.length / 3, n = outline.length;
@@ -55,6 +59,17 @@ function wings(ctx, rings, detail) {
   geometry.setIndex(indices);
   return geometry;
 }
+
+function wingResourcePlan(rings, detail) {
+  const outline = 16 * detail + 1, vertices = 4 * (rings + 1) * outline, indices = 4 * rings * (outline - 1) * 6;
+  return sourcePlan(0).array(vertices * 7 + indices, 4, 1).result();
+}
+createButterflyVortex.resourcePlan = () => sourcePlan(24)
+  .add(wingResourcePlan(10, 9)).add(wingResourcePlan(1, 2)).add(wingResourcePlan(1, 1))
+  .array(BUTTERFLIES * (7 + 16 * 2) + 3 * 16 + 32 + 2 * 24 * 6, 4, 1)
+  .geometry('SphereGeometry', [1, 12, 8]).array(DUST * 8, 4, 1).array(1800 * 2 * 8, 4, 1)
+  .geometry('PlaneGeometry', [26, 26]).geometry('PlaneGeometry', [13, 13]).geometry('RingGeometry', [.9, .98, 64])
+  .stars(420).glows(4).sky().shock(4).result();
 
 const motionShader = `
 uniform float uTime,uScatter,uVortex,uBass,uMid,uTreble,uResponse,uCharge,uBurst,uStir;
@@ -294,6 +309,7 @@ export function createButterflyVortex(ctx) {
   const wingMaterial = swarm => own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: wingVertex, fragmentShader: wingFragment,
     defines: swarm ? { SWARM: 1 } : {}, side: T.DoubleSide, transparent: true, depthWrite: false }));
   const hero = new T.Mesh(wings(ctx, 10, 9), wingMaterial(false)); hero.frustumCulled = false; world.add(hero);
+  declaredArrayPayload(ctx.scope,BUTTERFLIES*(7+16*2)+3*16+32+2*24*6,'Butterfly instances, flight/home, ember and antenna arrays',4,1);
   const swarmGeometry = wings(ctx, 1, 2), flights = new Float32Array(BUTTERFLIES * 4), homes = new Float32Array(BUTTERFLIES * 3);
   const borders = outlines(T, 12);
   for (let i = 0; i < BUTTERFLIES; i++) {
@@ -328,7 +344,7 @@ export function createButterflyVortex(ctx) {
 
   const body = new T.Group(); world.add(body);
   const bodyMaterial = own(ctx, new T.MeshBasicMaterial({ color: 0x24111d, transparent: true, depthWrite: false }));
-  const bodyMesh = own(ctx, new T.InstancedMesh(own(ctx, new T.SphereGeometry(1, 12, 8)), bodyMaterial, 3));
+  const bodyMesh = own(ctx, new T.InstancedMesh(own(ctx, constructedGeometry(T, ctx.scope, 'SphereGeometry', [1, 12, 8])), bodyMaterial, 3));
   const dummy = new T.Object3D();
   for (const [i, spec] of [[0, [.1, .48, .09, -.21]], [1, [.145, .23, .13, .26]], [2, [.1, .1, .1, .52]]]) {
     dummy.position.set(0, spec[3], .06); dummy.scale.set(spec[0], spec[1], spec[2]); dummy.updateMatrix(); bodyMesh.setMatrixAt(i, dummy.matrix);
@@ -345,6 +361,7 @@ export function createButterflyVortex(ctx) {
   body.add(new T.LineSegments(antennaGeometry, antennaMaterial));
 
   function dustGeometry(count, trails) {
+    declaredArrayPayload(ctx.scope,count*(trails?2:1)*8,'Butterfly dust scratch and typed arrays',4,1);
     const position = [], data = [], ends = [];
     for (let i = 0; i < count; i++) for (let end = 0; end < (trails ? 2 : 1); end++) {
       position.push((seed(i, 8) - .5) * 37, (seed(i, 9) - .5) * 23, -seed(i, 10) * 30);
@@ -360,11 +377,11 @@ export function createButterflyVortex(ctx) {
     defines: trails ? { TRAILS: 1 } : {}, transparent: true, depthWrite: false, blending: T.AdditiveBlending }));
   const dust = new T.Points(dustGeometry(DUST, false), dustMaterial(false)); dust.frustumCulled = false; world.add(dust);
   const trails = new T.LineSegments(dustGeometry(1800, true), dustMaterial(true)); trails.frustumCulled = false; world.add(trails);
-  const veil = new T.Mesh(own(ctx, new T.PlaneGeometry(26, 26)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const veil = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [26, 26])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}', fragmentShader: veilFragment,
     transparent: true, depthWrite: false, blending: T.AdditiveBlending, side: T.DoubleSide })));
   veil.position.set(0, .8, -4); veil.renderOrder = -4; world.add(veil);
-  const accretion = new T.Mesh(own(ctx, new T.PlaneGeometry(13, 13)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const accretion = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [13, 13])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}', fragmentShader: accretionFragment,
     transparent: true, depthWrite: false, blending: T.AdditiveBlending, side: T.DoubleSide })));
   accretion.position.set(0, .8, -4.06); accretion.renderOrder = 3; world.add(accretion);
@@ -376,7 +393,7 @@ export function createButterflyVortex(ctx) {
   const cursor = createGlow(ctx, world, { color: 0xdda4bf, opacity: 0, size: .85 });
   const cursorRingGroup = new T.Group(); world.add(cursorRingGroup);
   const cursorRingMaterial = own(ctx, new T.MeshBasicMaterial({ color: 0xffb56e, transparent: true, opacity: 0, depthWrite: false, depthTest: false, blending: T.AdditiveBlending, side: T.DoubleSide }));
-  const cursorRing = new T.Mesh(own(ctx, new T.RingGeometry(.9, .98, 64)), cursorRingMaterial);
+  const cursorRing = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'RingGeometry', [.9, .98, 64])), cursorRingMaterial);
   cursorRing.renderOrder = 8; cursorRingGroup.add(cursorRing);
   const shock = createShockPool(ctx, world, { count: 4, duration: 1.05, opacity: .9 }); own(ctx, shock.mesh);
   const spawnQuat = new T.Quaternion(), parentQuat = new T.Quaternion(), cameraQuat = new T.Quaternion();

@@ -29,6 +29,10 @@ import {
   figureBackDepth, transitionStyle, buildRibbonReveal,
 } from './zodiac.js';
 import { clamp, damp, seededRandom } from './util.js';
+import { numericArray, geometry } from '../../coast-stage/src/resource-tools.js';
+import { geometrySourcePlan } from '../../space-stage/src/source-resources.js';
+import { effectsResourcePlan } from '../../space-stage/src/effects/index.js';
+import { FIGURES } from './figures.js';
 
 // 归一化改成「落到 1.78 的设计框」之后，横宽的星座比原来大了约 1.8 倍，
 // 同样的粒子数摊在更大的面积上会显稀 —— 三个池子跟着上调一档。
@@ -50,6 +54,52 @@ const DISC_SLOTS = 18;   // 单座骨架最多 18 个星点（当前最大 15，
 const STAR_SLOTS = DISC_SLOTS + Math.max(...CONSTELLATION.map(s => s.lines.length));
 const HIT_RADIUS = 22;
 
+// Space retains all high-profile buffers and varies draw ranges in place. This
+// pure plan follows the original fixed pools and planar figure source bounds.
+export function resourcePlan() {
+  const count = SHAPE_COUNTS.high, figures = FIGURE_COUNTS.high, vertices = FIGURE_MESH_POINTS;
+  let cpu = 0, gpu = 0;
+  const payload = (bytes, upload = true) => { cpu += bytes; if (upload) gpu += bytes; };
+  for (const [kind, args] of [['SphereGeometry', [140, 64, 40]], ['RingGeometry', [.78, 1, 256, 4]],
+    ['PlaneGeometry', [48, 48, 1, 1]], ['PlaneGeometry', [2, 2]], ['RingGeometry', [.84, 1, 64, 1]]]) {
+    const geometry = geometrySourcePlan(kind, args); cpu += geometry.cpuPeakBytes; gpu += geometry.bufferBytes;
+  }
+  const width = 2048, height = width / 2;
+  payload(width * height * 4, false);
+  let w = width, h = height, textureDeclaredBytes = 0;
+  do { textureDeclaredBytes += Math.max(1, w) * Math.max(1, h) * 4; w = Math.floor(w / 2); h = Math.floor(h / 2); } while (w || h);
+  payload((FIELD_COUNTS.high + NEBULA + DUST_COUNTS.high.near + DUST_COUNTS.high.mid) * 9 * 4);
+  payload(SPARKLE_COUNTS.high * 11 * 4); // pos,size,bright,phase,runner,target,index.
+  payload(METEOR_COUNTS.high * 6 * 17 * 4); payload(ORBIT_COUNTS.high * 9 * 4);
+  payload(count * 2 * 4); payload(figures * 6 * 4); payload(STAR_SLOTS * 2 * 4); payload(vertices * 6 * 4);
+  for (const figure of FIGURES) {
+    const holes = figure.regions.reduce((sum, region) => sum + region.holes.length, 0);
+    const contours = figure.regions.reduce((sum, region) => sum + region.outline.length, 0);
+    const triangles = 2 * vertices + 2 * holes, rims = vertices, edges = 3 * triangles;
+    cpu += (vertices * (3 + 2 + 12) + triangles * 4 + contours * 3) * 8;
+    payload(vertices * 3 * 4, false); // Cached artwork vertex normals.
+    cpu += (vertices * 6 + triangles * 3 * 8) * 8;
+    payload(count * 16 * 4); // shape pos/normal/shine, two clouds, zero position.
+    payload(figures * 3 * 4);
+    payload((triangles * 2 + rims * 2) * 9 * 3 * 4); // Mesh pos,tint,normal.
+    payload(vertices * 2 * 4, false); // Figure px/py.
+    payload(vertices * 3 * 4); // Figure nodes.
+    payload(edges * 18 * 2 * 4, false); // Retained internal edge ribbons.
+    payload(rims * 18 * 2 * 4); // Rendered contour ribbons.
+    payload(figure.nodes.length * 17, false); // x/y/z/m Float32 plus Uint8 links.
+    payload(figure.lines.length * (18 * 2 + 6) * 4);
+    gpu += figure.lines.length * 6 * 4; // Separate core/halo reveal attributes.
+    payload(STAR_SLOTS * 9 * 4); gpu += STAR_SLOTS * 4; // Shared CPU index, distinct attribute per sign.
+  }
+  payload(28 * 9 * 4); payload(24 * 2 * 4, false);
+  const effects = effectsResourcePlan();
+  // One per original material instance (aliases are deduplicated by Three):
+  // sky/field/nebula/sparkle/dust2/meteor/ring3/grid/orbit/shape/mesh,
+  // edge2/node/line2/haze/disc/scanner/pulse/spark = 25, plus three effects.
+  return { ownedCpuBytes: cpu + effects.ownedCpuBytes, bufferDeclaredBytes: gpu + effects.bufferDeclaredBytes,
+    textureDeclaredBytes, programs: 25 + 3 };
+}
+
 // 主体、辉光、冷色与副色；次序与 ZODIAC 一致。上一版是低饱和的粉彩，
 // 在近黑背景上容易读成同一片灰雾；这一版把主色、冷光与副色都推到霓虹档，
 // 同时保留十二座可区分的色相骨架（珊瑚/翡翠/香槟/月银…）。
@@ -70,9 +120,12 @@ const SIGN_COLORS = [
 
 // —— 天空穹顶 ——
 // Bake periodic dust once: no per-frame FBM cost or vertex interpolation facets.
-function galaxyTexture(THREE, width) {
+function galaxyTexture(THREE, width, scope) {
   const height = width / 2;
-  const pixels = new Uint8Array(width * height * 4);
+  let w = width, h = height, bytes = 0;
+  do { bytes += Math.max(1, w) * Math.max(1, h) * 4; w = Math.floor(w / 2); h = Math.floor(h / 2); } while (w || h);
+  const textureTicket = scope?.reserve({ textureDeclaredBytes: bytes }, 'Zodiac original RGBA8 mipmapped galaxy texture');
+  const pixels = numericArray(scope, Uint8Array, width * height * 4, 'Zodiac galaxy RGBA source pixels');
   const hash = (x, y, period) => {
     const wrapped = ((x % period) + period) % period;
     let h = Math.imul(wrapped + 193, 374761393) ^ Math.imul(y + 571, 668265263);
@@ -130,6 +183,8 @@ function galaxyTexture(THREE, width) {
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.generateMipmaps = true;
   texture.needsUpdate = true;
+  scope?.track(texture);
+  if (textureTicket) texture.onUpdate = () => textureTicket.commit();
   return texture;
 }
 
@@ -177,14 +232,14 @@ const SKY_FRAG = [
   '}',
 ].join('\n');
 
-function makeSkyMaterial(THREE, width) {
+function makeSkyMaterial(THREE, width, scope) {
   return new THREE.ShaderMaterial({
     uniforms: {
       // 近黑夜空，层次来自星点和低亮度尘埃。
       uTop: { value: new THREE.Color(0.006,0.007,0.011) },
       uMid: { value: new THREE.Color(0.010,0.011,0.015) },
       uBot: { value: new THREE.Color(0.003,0.004,0.006) },
-      uGalaxy: { value: galaxyTexture(THREE, width) },
+      uGalaxy: { value: galaxyTexture(THREE, width, scope) },
       uNeb: { value: 1.00 },
       uVignette: { value: 0.30 },
       uTime: { value: 0 },
@@ -922,19 +977,20 @@ function softAttrs(THREE, col, size, phase, alpha) {
 }
 
 // 四芒星几何（aPhase 同样可以跨座共享）。
-function glintGeometry(THREE, pos, size, bright, phase, index) {
+function glintGeometry(THREE, pos, size, bright, phase, index, scope) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
   geo.setAttribute('aBright', new THREE.BufferAttribute(bright, 1));
   geo.setAttribute('aPhase', phase);
-  geo.setAttribute('aRunner', new THREE.BufferAttribute(new Float32Array(size.length), 1));
-  geo.setAttribute('aTarget', new THREE.BufferAttribute(new Float32Array(pos.length), 3));
-  geo.setAttribute('aIndex', new THREE.BufferAttribute(index || new Float32Array(size.length).fill(-100), 1));
+  geo.setAttribute('aRunner', new THREE.BufferAttribute(numericArray(scope, Float32Array, size.length, "Zodiac world Float32 source"), 1));
+  geo.setAttribute('aTarget', new THREE.BufferAttribute(numericArray(scope, Float32Array, pos.length, "Zodiac world Float32 source"), 3));
+  geo.setAttribute('aIndex', new THREE.BufferAttribute(index || numericArray(scope, Float32Array, size.length, "Zodiac world Float32 source").fill(-100), 1));
   return geo;
 }
 
 export function createWorld(THREE, scene, opts) {
+  const scope = opts.scope, source = { scope, fitCache: [], artworkCache: [] };
   const quality = SHAPE_COUNTS[opts.quality] ? opts.quality : 'high';
   const count = SHAPE_COUNTS[quality];
   const figureCount = FIGURE_COUNTS[quality];
@@ -982,8 +1038,8 @@ export function createWorld(THREE, scene, opts) {
   // =========================================================================
   // 1) 天空穹顶（常驻，不受星云开关影响）
   // =========================================================================
-  const skyGeo = new THREE.SphereGeometry(140, lowQ ? 40 : 64, lowQ ? 26 : 40);
-  const skyMat = makeSkyMaterial(THREE, lowQ ? 512 : quality === 'medium' ? 1024 : 2048);
+  const skyGeo = geometry(scope, "SphereGeometry", [140, lowQ ? 40 : 64, lowQ ? 26 : 40]);
+  const skyMat = makeSkyMaterial(THREE, lowQ ? 512 : quality === 'medium' ? 1024 : 2048, scope);
   const sky = new THREE.Mesh(skyGeo, skyMat);
   sky.name = 'zodiac-sky';
   sky.frustumCulled = false;
@@ -1004,11 +1060,11 @@ export function createWorld(THREE, scene, opts) {
   const galaxyBitangent = new THREE.Vector3().crossVectors(galaxyNormal, galaxyTangent);
   const galaxyFrame = new THREE.Matrix4().makeBasis(galaxyTangent, galaxyNormal, galaxyBitangent);
   const frnd = seededRandom('zodiac-field-3');
-  const fieldPos = new Float32Array(fieldCount * 3);
-  const fieldCol = new Float32Array(fieldCount * 3);
-  const fieldSize = new Float32Array(fieldCount);
-  const fieldPhase = new Float32Array(fieldCount);
-  const fieldAlpha = new Float32Array(fieldCount);
+  const fieldPos = numericArray(scope, Float32Array, fieldCount * 3, "Zodiac world Float32 source");
+  const fieldCol = numericArray(scope, Float32Array, fieldCount * 3, "Zodiac world Float32 source");
+  const fieldSize = numericArray(scope, Float32Array, fieldCount, "Zodiac world Float32 source");
+  const fieldPhase = numericArray(scope, Float32Array, fieldCount, "Zodiac world Float32 source");
+  const fieldAlpha = numericArray(scope, Float32Array, fieldCount, "Zodiac world Float32 source");
   for (let i = 0; i < fieldCount; i += 1) {
     const inGalaxy = frnd() < .64;
     const u = inGalaxy ? (frnd()+frnd()+frnd()-1.5)*.23-.20 : frnd()*2-1;
@@ -1044,11 +1100,11 @@ export function createWorld(THREE, scene, opts) {
   const nebulaPalette = [
     [0.26, 0.18, 0.29], [0.29, 0.23, 0.25], [0.19, 0.20, 0.27], [0.26, 0.22, 0.29],
   ];
-  const nPos = new Float32Array(NEBULA * 3);
-  const nCol = new Float32Array(NEBULA * 3);
-  const nSize = new Float32Array(NEBULA);
-  const nPhase = new Float32Array(NEBULA);
-  const nAlpha = new Float32Array(NEBULA);
+  const nPos = numericArray(scope, Float32Array, NEBULA * 3, "Zodiac world Float32 source");
+  const nCol = numericArray(scope, Float32Array, NEBULA * 3, "Zodiac world Float32 source");
+  const nSize = numericArray(scope, Float32Array, NEBULA, "Zodiac world Float32 source");
+  const nPhase = numericArray(scope, Float32Array, NEBULA, "Zodiac world Float32 source");
+  const nAlpha = numericArray(scope, Float32Array, NEBULA, "Zodiac world Float32 source");
   for (let i = 0; i < NEBULA; i += 1) {
     const u = (nrnd()+nrnd()+nrnd()-1.5)*.20-.20;
     const t = nrnd() * Math.PI * 2;
@@ -1075,10 +1131,10 @@ export function createWorld(THREE, scene, opts) {
   disposables.push(nebulaGeo, nebulaMat);
 
   const srnd = seededRandom('zodiac-sparkle-3');
-  const sPos = new Float32Array(sparkleCount * 3);
-  const sSize = new Float32Array(sparkleCount);
-  const sBright = new Float32Array(sparkleCount);
-  const sPhase = new Float32Array(sparkleCount);
+  const sPos = numericArray(scope, Float32Array, sparkleCount * 3, "Zodiac world Float32 source");
+  const sSize = numericArray(scope, Float32Array, sparkleCount, "Zodiac world Float32 source");
+  const sBright = numericArray(scope, Float32Array, sparkleCount, "Zodiac world Float32 source");
+  const sPhase = numericArray(scope, Float32Array, sparkleCount, "Zodiac world Float32 source");
   for (let i = 0; i < sparkleCount; i += 1) {
     const u = srnd() * 2 - 1;
     const t = srnd() * Math.PI * 2;
@@ -1093,7 +1149,7 @@ export function createWorld(THREE, scene, opts) {
     sPhase[i] = srnd() * Math.PI * 2;
   }
   const sparkleGeo = glintGeometry(THREE, sPos, sSize, sBright,
-    new THREE.BufferAttribute(sPhase, 1));
+    new THREE.BufferAttribute(sPhase, 1), null, scope);
   const sparkleMat = makeGlintMaterial(THREE, '#f2f0eb');
   sparkleMat.uniforms.uSizeScale.value = 260;
   const sparklePoints = new THREE.Points(sparkleGeo, sparkleMat);
@@ -1108,8 +1164,8 @@ export function createWorld(THREE, scene, opts) {
   scene.add(dustGroup);
   const dustRnd = seededRandom('zodiac-depth-dust-4');
   function depthDust(count, near) {
-    const pos = new Float32Array(count * 3), col = new Float32Array(count * 3);
-    const size = new Float32Array(count), phase = new Float32Array(count), alpha = new Float32Array(count);
+    const pos = numericArray(scope, Float32Array, count * 3, "Zodiac world Float32 source"), col = numericArray(scope, Float32Array, count * 3, "Zodiac world Float32 source");
+    const size = numericArray(scope, Float32Array, count, "Zodiac world Float32 source"), phase = numericArray(scope, Float32Array, count, "Zodiac world Float32 source"), alpha = numericArray(scope, Float32Array, count, "Zodiac world Float32 source");
     for (let i = 0; i < count; i += 1) {
       const u = dustRnd() * 2 - 1, t = dustRnd() * Math.PI * 2;
       const r = near ? 4.2 + dustRnd() * 3.2 : 8.5 + dustRnd() * 7.5;
@@ -1148,16 +1204,16 @@ export function createWorld(THREE, scene, opts) {
   const ambientCount = Math.max(1, meteorCount - 2);
   const ambientPeriod = Math.max(12, 4 + ambientCount * 2.8);
   const mrnd = seededRandom('zodiac-meteors-4');
-  const mPos = new Float32Array(meteorCount * 6 * 3);
-  const mOrigin = new Float32Array(meteorCount * 6 * 3);
-  const mDir = new Float32Array(meteorCount * 6 * 3);
-  const mCorner = new Float32Array(meteorCount * 6 * 2);
-  const mLen = new Float32Array(meteorCount * 6);
-  const mWidth = new Float32Array(meteorCount * 6);
-  const mPhase = new Float32Array(meteorCount * 6);
-  const mPeriod = new Float32Array(meteorCount * 6);
-  const mDuration = new Float32Array(meteorCount * 6);
-  const mBright = new Float32Array(meteorCount * 6);
+  const mPos = numericArray(scope, Float32Array, meteorCount * 6 * 3, "Zodiac world Float32 source");
+  const mOrigin = numericArray(scope, Float32Array, meteorCount * 6 * 3, "Zodiac world Float32 source");
+  const mDir = numericArray(scope, Float32Array, meteorCount * 6 * 3, "Zodiac world Float32 source");
+  const mCorner = numericArray(scope, Float32Array, meteorCount * 6 * 2, "Zodiac world Float32 source");
+  const mLen = numericArray(scope, Float32Array, meteorCount * 6, "Zodiac world Float32 source");
+  const mWidth = numericArray(scope, Float32Array, meteorCount * 6, "Zodiac world Float32 source");
+  const mPhase = numericArray(scope, Float32Array, meteorCount * 6, "Zodiac world Float32 source");
+  const mPeriod = numericArray(scope, Float32Array, meteorCount * 6, "Zodiac world Float32 source");
+  const mDuration = numericArray(scope, Float32Array, meteorCount * 6, "Zodiac world Float32 source");
+  const mBright = numericArray(scope, Float32Array, meteorCount * 6, "Zodiac world Float32 source");
   const CORNERS = [[0, -1], [1, -1], [1, 1], [0, -1], [1, 1], [0, 1]];
   for (let i = 0; i < meteorCount; i += 1) {
     // 前两颗锁在换座时刻，保证每轮汇聚都有肉眼可见的流星。
@@ -1238,7 +1294,7 @@ export function createWorld(THREE, scene, opts) {
   const auraGroup = new THREE.Group();
   auraGroup.name = 'zodiac-aura';
   root.add(auraGroup);
-  const ringGeo = new THREE.RingGeometry(.78, 1, 256, 4);
+  const ringGeo = geometry(scope, "RingGeometry", [.78, 1, 256, 4]);
   const ringPositions = ringGeo.getAttribute('position');
   for (let i = 0; i < ringPositions.count; i++) {
     const radius = Math.hypot(ringPositions.getX(i), ringPositions.getY(i));
@@ -1268,7 +1324,7 @@ export function createWorld(THREE, scene, opts) {
   }
   disposables.push(ringGeo, ...ringMats);
 
-  const gridGeo = new THREE.PlaneGeometry(48, 48, 1, 1);
+  const gridGeo = geometry(scope, "PlaneGeometry", [48, 48, 1, 1]);
   const gridMat = makeAuraGridMaterial(THREE);
   const grid = new THREE.Mesh(gridGeo, gridMat);
   grid.name = 'zodiac-grid';
@@ -1281,13 +1337,13 @@ export function createWorld(THREE, scene, opts) {
 
   const orbitCount = ORBIT_COUNTS[quality] || ORBIT_COUNTS.high;
   const orbitRnd = seededRandom('zodiac-orbit-2');
-  const orbitPos = new Float32Array(orbitCount * 3);
-  const orbitAngle = new Float32Array(orbitCount);
-  const orbitRadius = new Float32Array(orbitCount);
-  const orbitHeight = new Float32Array(orbitCount);
-  const orbitSpeed = new Float32Array(orbitCount);
-  const orbitSize = new Float32Array(orbitCount);
-  const orbitPhase = new Float32Array(orbitCount);
+  const orbitPos = numericArray(scope, Float32Array, orbitCount * 3, "Zodiac world Float32 source");
+  const orbitAngle = numericArray(scope, Float32Array, orbitCount, "Zodiac world Float32 source");
+  const orbitRadius = numericArray(scope, Float32Array, orbitCount, "Zodiac world Float32 source");
+  const orbitHeight = numericArray(scope, Float32Array, orbitCount, "Zodiac world Float32 source");
+  const orbitSpeed = numericArray(scope, Float32Array, orbitCount, "Zodiac world Float32 source");
+  const orbitSize = numericArray(scope, Float32Array, orbitCount, "Zodiac world Float32 source");
+  const orbitPhase = numericArray(scope, Float32Array, orbitCount, "Zodiac world Float32 source");
   for (let i = 0; i < orbitCount; i += 1) {
     orbitAngle[i] = orbitRnd() * Math.PI * 2;
     orbitRadius[i] = 2.6 + Math.pow(orbitRnd(), .72) * 3.9;
@@ -1388,8 +1444,8 @@ export function createWorld(THREE, scene, opts) {
     };
   });
 
-  const seeds = buildSeeds(count);
-  const poolPhase = new Float32Array(count);
+  const seeds = buildSeeds(count, source);
+  const poolPhase = numericArray(scope, Float32Array, count, "Zodiac world Float32 source");
   for (let i = 0; i < count; i += 1) poolPhase[i] = seeds[i] * Math.PI * 2;
   // 与座次无关的 attribute 包一次做好，12 座共用同一批对象。
   const poolPhaseAttr = new THREE.BufferAttribute(poolPhase, 1);
@@ -1399,10 +1455,10 @@ export function createWorld(THREE, scene, opts) {
   // 只有位置各是各的（同一片 buffer 也就只上传一次）。
   const hazeShare = (() => {
     const hr = seededRandom('zodiac-haze-1');
-    const col = new Float32Array(figureCount * 3);
-    const size = new Float32Array(figureCount);
-    const phase = new Float32Array(figureCount);
-    const alpha = new Float32Array(figureCount);
+    const col = numericArray(scope, Float32Array, figureCount * 3, "Zodiac world Float32 source");
+    const size = numericArray(scope, Float32Array, figureCount, "Zodiac world Float32 source");
+    const phase = numericArray(scope, Float32Array, figureCount, "Zodiac world Float32 source");
+    const alpha = numericArray(scope, Float32Array, figureCount, "Zodiac world Float32 source");
     for (let i = 0; i < figureCount; i += 1) {
       const tone = 0.55 + hr() * 0.45;
       col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = tone;
@@ -1415,18 +1471,20 @@ export function createWorld(THREE, scene, opts) {
   })();
   const discPhaseAttr = (() => {
     const dr = seededRandom('zodiac-disc-1');
-    const phase = new Float32Array(STAR_SLOTS);
+    const phase = numericArray(scope, Float32Array, STAR_SLOTS, "Zodiac world Float32 source");
     for (let i = 0; i < STAR_SLOTS; i += 1) phase[i] = dr() * Math.PI * 2;
     return new THREE.BufferAttribute(phase, 1);
   })();
-  const discIndexAttr = new THREE.BufferAttribute(Float32Array.from({ length: STAR_SLOTS }, (_, i) => i), 1);
+  const discIndices = numericArray(scope, Float32Array, STAR_SLOTS, 'Zodiac shared disc indices');
+  for (let i = 0; i < STAR_SLOTS; i++) discIndices[i] = i;
+  const discIndexAttr = new THREE.BufferAttribute(discIndices, 1);
   // 网格顶点亮点的尺寸/亮度：十二座点数固定（FIGURE_MESH_POINTS），跨座共享。
   const nodeShare = (() => {
     const nr = seededRandom('zodiac-node-1');
-    const col = new Float32Array(FIGURE_MESH_POINTS * 3);
-    const size = new Float32Array(FIGURE_MESH_POINTS);
-    const phase = new Float32Array(FIGURE_MESH_POINTS);
-    const alpha = new Float32Array(FIGURE_MESH_POINTS);
+    const col = numericArray(scope, Float32Array, FIGURE_MESH_POINTS * 3, "Zodiac world Float32 source");
+    const size = numericArray(scope, Float32Array, FIGURE_MESH_POINTS, "Zodiac world Float32 source");
+    const phase = numericArray(scope, Float32Array, FIGURE_MESH_POINTS, "Zodiac world Float32 source");
+    const alpha = numericArray(scope, Float32Array, FIGURE_MESH_POINTS, "Zodiac world Float32 source");
     for (let i = 0; i < FIGURE_MESH_POINTS; i += 1) {
       const tone = 0.70 + nr() * 0.30;
       col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = tone;
@@ -1450,13 +1508,13 @@ export function createWorld(THREE, scene, opts) {
   const figures = [];
 
   for (let i = 0; i < SIGN_COUNT; i += 1) {
-    const shape = buildShape(i, count);
+    const shape = buildShape(i, count, source);
     const clouds = [
-      buildCloud(ZODIAC[i].id, count),
-      buildCloud(ZODIAC[(i + 1) % SIGN_COUNT].id, count),
+      buildCloud(ZODIAC[i].id, count, source),
+      buildCloud(ZODIAC[(i + 1) % SIGN_COUNT].id, count, source),
     ];
-    const fig = buildFigureMesh(i, figureCount);
-    const line = buildConstellation(i);
+    const fig = buildFigureMesh(i, figureCount, source);
+    const line = buildConstellation(i, source);
     figures.push(fig);
     lines.push(line);
 
@@ -1465,7 +1523,7 @@ export function createWorld(THREE, scene, opts) {
     // three 的渲染入口要求几何必须带 position 属性（否则 renderBufferDirect
     // 直接跳过这个对象）；真实位置由 aEntry/aShape/aExit 在着色器里插值，这里
     // 放一片零占位移除该门槛。
-    pgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+    pgeo.setAttribute('position', new THREE.BufferAttribute(numericArray(scope, Float32Array, count * 3, "Zodiac world Float32 source"), 3));
     pgeo.setAttribute('aEntry', new THREE.BufferAttribute(clouds[0], 3));
     pgeo.setAttribute('aShape', new THREE.BufferAttribute(shape.pos, 3));
     pgeo.setAttribute('aExit', new THREE.BufferAttribute(clouds[1], 3));
@@ -1485,6 +1543,7 @@ export function createWorld(THREE, scene, opts) {
     const mg = new THREE.BufferGeometry();
     mg.setAttribute('position', new THREE.BufferAttribute(fig.mesh.pos, 3));
     mg.setAttribute('aTint', new THREE.BufferAttribute(fig.mesh.tint, 3));
+    mg.setAttribute('normal', new THREE.BufferAttribute(numericArray(scope, Float32Array, fig.mesh.pos.length, 'Zodiac figure normals'), 3));
     mg.computeVertexNormals();
     meshes.push(mg);
     disposables.push(mg);
@@ -1512,9 +1571,9 @@ export function createWorld(THREE, scene, opts) {
     disposables.push(hgeo, cgeo);
 
     // 星座星点
-    const dpos = new Float32Array(STAR_SLOTS * 3);
-    const dsize = new Float32Array(STAR_SLOTS);
-    const dbright = new Float32Array(STAR_SLOTS);
+    const dpos = numericArray(scope, Float32Array, STAR_SLOTS * 3, "Zodiac world Float32 source");
+    const dsize = numericArray(scope, Float32Array, STAR_SLOTS, "Zodiac world Float32 source");
+    const dbright = numericArray(scope, Float32Array, STAR_SLOTS, "Zodiac world Float32 source");
     const n = Math.min(line.nodes, DISC_SLOTS);
     for (let k = 0; k < n; k += 1) {
       dpos[k * 3] = line.x[k];
@@ -1525,7 +1584,7 @@ export function createWorld(THREE, scene, opts) {
       dsize[k] = 0.55 + line.m[k] * 1.75;
       dbright[k] = 0.55 + line.m[k] * 0.85;
     }
-    const dg = glintGeometry(THREE, dpos, dsize, dbright, discPhaseAttr, discIndexAttr.array);
+    const dg = glintGeometry(THREE, dpos, dsize, dbright, discPhaseAttr, discIndexAttr.array, scope);
     // Link runners share the prebuilt main-star geometry and its render pass.
     CONSTELLATION[i].lines.forEach(([a,b], k) => {
       const slot = DISC_SLOTS + k;
@@ -1583,7 +1642,7 @@ export function createWorld(THREE, scene, opts) {
   discs.renderOrder = 12;
   figureGroup.add(discs);
 
-  const scannerGeo = new THREE.PlaneGeometry(2, 2);
+  const scannerGeo = geometry(scope, "PlaneGeometry", [2, 2]);
   const scannerMat = new THREE.ShaderMaterial({
     uniforms: { uTime: { value: 0 }, uOpacity: { value: 0 }, uLock: { value: 0 },
       uCharge: { value: 0 }, uSurge: { value: 0 } },
@@ -1601,7 +1660,7 @@ export function createWorld(THREE, scene, opts) {
   let scannerMix = 0;
 
   const pulseUniforms = { uLife: { value: 1 }, uPixel: { value: 1 }, uColor: { value: new THREE.Color('#ffffff') } };
-  const pulseGeo = new THREE.RingGeometry(.84, 1, 64, 1);
+  const pulseGeo = geometry(scope, "RingGeometry", [.84, 1, 64, 1]);
   const pulseMat = new THREE.ShaderMaterial({
     uniforms: pulseUniforms,
     vertexShader: `varying float vR;void main(){vR=length(position.xy);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
@@ -1611,8 +1670,8 @@ export function createWorld(THREE, scene, opts) {
   const pulse = new THREE.Mesh(pulseGeo, pulseMat);
   pulse.visible = false; pulse.renderOrder = 14; pulse.frustumCulled = false;
   figureGroup.add(pulse);
-  const sparkCount = 28, sparkPos = new Float32Array(sparkCount * 3), sparkDir = new Float32Array(sparkCount * 3);
-  const sparkSpeed = new Float32Array(sparkCount), sparkSize = new Float32Array(sparkCount), sparkSeed = new Float32Array(sparkCount);
+  const sparkCount = 28, sparkPos = numericArray(scope, Float32Array, sparkCount * 3, "Zodiac world Float32 source"), sparkDir = numericArray(scope, Float32Array, sparkCount * 3, "Zodiac world Float32 source");
+  const sparkSpeed = numericArray(scope, Float32Array, sparkCount, "Zodiac world Float32 source"), sparkSize = numericArray(scope, Float32Array, sparkCount, "Zodiac world Float32 source"), sparkSeed = numericArray(scope, Float32Array, sparkCount, "Zodiac world Float32 source");
   const prnd = seededRandom('zodiac-pulse-sparks-2');
   for (let i = 0; i < sparkCount; i += 1) {
     const angle = prnd() * Math.PI * 2, tilt = (prnd() - .5) * .6;

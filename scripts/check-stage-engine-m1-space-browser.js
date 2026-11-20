@@ -112,6 +112,46 @@ async function check(name, fn) {
 async function main() {
   browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
   try {
+    await check('wireframe source cache admits CPU before construction, counts replacement peaks and retires with geometry', async () => {
+      const page = await pageFor();
+      try {
+        await mount(page);
+        const result = await page.evaluate(async () => {
+          SpaceStagePure.register({ apiVersion: 1, id: 'm1-wireframe-source', stateVersion: 1, label: 'Wireframe source',
+            category: 'world', preview: '/wire.webp', aliases: [], params: {}, camera: { radius: 6 }, capabilities: {}, quality: {},
+            create(ctx) {
+              const geometry = ctx.scope.track(new ctx.THREE.IcosahedronGeometry(1, 2));
+              const material = ctx.scope.track(new ctx.THREE.MeshBasicMaterial({ wireframe: true }));
+              const mesh = new ctx.THREE.Mesh(geometry, material); ctx.scene.add(mesh);
+              harness.wireGeometry = geometry;
+              return { update() {}, dispose() {} };
+            } });
+          const ledger = Stage.resources(), canvas = document.createElement('canvas');
+          const engine = SpaceStagePure.create(canvas, { resources: ledger.port('wireframe-direct'), qualityMode: 'low' });
+          await engine.select('m1-wireframe-source');
+          const before = ledger.snapshot(), port = ledger.port('wireframe-competitor');
+          const blocker = port.require({ ownedCpuBytes: before.caps.ownedCpuBytes - before.held.ownedCpuBytes - 1 }, 'competition', 0);
+          const rejected = engine.frame(harness.frames.at(-1));
+          const refused = ledger.snapshot(true);
+          blocker.release({ apiReleased: true, allocationEnded: true });
+          await engine.select('m1-wireframe-source'); engine.frame(harness.frames.at(-1));
+          const active = ledger.snapshot(true), firstId = harness.wireGeometry.hertzWireframeCpuResourceId;
+          harness.wireGeometry.setIndex(Array.from({ length: harness.wireGeometry.attributes.position.count }, (_, i) => i));
+          harness.wireGeometry.index.version = 1; engine.frame(harness.frames.at(-1));
+          const replaced = ledger.snapshot(true), secondId = harness.wireGeometry.hertzWireframeCpuResourceId;
+          engine.dispose(); Space3D.close(); const closed = ledger.snapshot();
+          return { rejected, refused, active, replaced, firstId, secondId, closed };
+        });
+        assert.equal(result.rejected, false);
+        const wire = value => value.entries.filter(entry => /wireframe cache/.test(entry.basis.source));
+        assert.equal(wire(result.refused).length, 0, 'failed CPU admission never publishes a wireframe backing');
+        assert.equal(wire(result.active).length, 1);
+        assert.equal(wire(result.active)[0].live.ownedCpuBytes, 1080 * 2);
+        assert.notEqual(result.firstId, result.secondId, 'changed source replaces the original cache entry');
+        assert.equal(wire(result.replaced).length, 1, 'old index backing retires after replacement');
+        assert.equal(result.closed.resources, 0); return result;
+      } finally { await close(page); }
+    });
     await check('context refusal precedes getContext and clears caller CPU/canvas resources', async () => {
       const page = await pageFor({ gpuContexts: 0 });
       try {
@@ -482,7 +522,7 @@ async function main() {
       } finally { await close(page); }
     });
     await check('text upload refusal cleans measurement resources and stays settled without per-frame retries', async () => {
-      const page = await pageFor({ textureDeclaredBytes: 0 });
+      const page = await pageFor({ textureDeclaredBytes: 36 });
       try {
         await mount(page);
         const result = await page.evaluate(async () => {

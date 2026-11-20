@@ -41,6 +41,7 @@ function fixture(options = {}) {
     catalog: () => [{ id: 'coast', camera: {} }, { id: 'reactor', camera: {} }],
     create: () => ({
       select: async (id, state) => { selections++; selected.push({ id, params: state.params }); return { id, params: state.params }; },
+      selectComposition: async () => {}, pauseComposition() {},
       setParams(params) { selected.push({ id: selected.at(-1).id, params }); return { params }; },
       frame: frame => { frames.push(frame); return options.submitted ? options.submitted() : true; },
       dispose() {}, setServices() {}, resize() {}, setRig() {}, stats: () => ({}),
@@ -48,6 +49,10 @@ function fixture(options = {}) {
   };
   const window = { HertzStageRuntime: { SpaceStagePure: runtime }, ipc: { postMessage: message => events.push(message) } };
   if (options.binding) window.__hertzWallpaperBinding = options.binding;
+  if (options.composition) {
+    window.__hertzWallpaperGlAllocation = { composition: true, compositionUrl: url };
+    window.HertzGlBudget = { idle: async () => {}, readyForFrame: () => true, resources: {} };
+  }
   window.parent = window;
   const context = {
     window, document: { getElementById: () => host, createElement: element },
@@ -56,6 +61,8 @@ function fixture(options = {}) {
     cancelAnimationFrame: id => rafs.delete(id),
     setTimeout: (callback, delay) => { const id = nextId++; timers.set(id, callback); timerDeadlines.set(id, now + delay); return id; },
     clearTimeout: id => { timers.delete(id); timerDeadlines.delete(id); }, setInterval: () => nextId++, clearInterval() {},
+    HertzGlBudget: window.HertzGlBudget,
+    fetch: async () => ({ ok: true, json: async () => ({ ...options.binding, target: { width: 640, height: 360 } }) }),
   };
   vm.runInNewContext(source, context);
   return {
@@ -70,6 +77,45 @@ function fixture(options = {}) {
 
 async function flush() { await Promise.resolve(); await Promise.resolve(); }
 async function main() {
+  {
+    const binding = { sessionId: 'c'.repeat(32), generation: 17 };
+    let submit = true;
+    const left = fixture({ binding, composition: true, submitted: () => submit });
+    const right = fixture({ binding: { ...binding, generation: 18 }, composition: true });
+    for (const page of [left, right]) {
+      await page.api.applyComposition(url, true); page.api.start(60);
+      page.tick(16); page.tick(32);
+      assert.ok(page.events.some(value => value.includes('firstFrame')));
+      assert.equal(page.api.reveal(), false, 'composition hidden first frame needs the native group release');
+      const count = page.frames.length; page.tick(1000);
+      assert.equal(page.frames.length, count, 'held composition does not advance independently');
+    }
+    const release = { token: 23, timeMs: 5000, pageDispatchMs: 1000, running: true };
+    assert.equal(left.api.applyCompositionClock(release), true);
+    assert.equal(right.api.applyCompositionClock(release), true);
+    left.tick(1016); right.tick(1016);
+    assert.equal(left.frames.at(-1).sceneTime, 5);
+    assert.equal(left.frames.at(-1).dynamicDt, 0);
+    assert.equal(right.frames.at(-1).sceneTime, left.frames.at(-1).sceneTime);
+    left.tick(1032); right.tick(1032); left.tick(1048); right.tick(1048);
+    assert.ok(left.events.some(value => value.includes('mediaClockRevealed') && value.includes('23')));
+    const pausedCount = left.frames.length;
+    left.api.stop(); left.tick(9000);
+    assert.equal(left.frames.length, pausedCount);
+    left.api.start(60); submit = false;
+    assert.equal(left.api.applyCompositionClock({ ...release, token: 22, pageDispatchMs: 9000 }), false, 'old group ticket rejected');
+    assert.equal(left.api.applyCompositionClock({ ...release, token: 24, timeMs: 12000, pageDispatchMs: 9000 }), true);
+    left.tick(9016); left.tick(9032);
+    assert.equal(left.frames.at(-1).sceneTime, 12, 'pending media transaction retains the resumed absolute phase');
+    assert.equal(left.frames.at(-1).dynamicDt, 0, 'resume never integrates the hidden interval');
+    assert.equal(left.api.reveal(), false, 'failed output cannot acknowledge resumed group presentation');
+    submit = true; left.tick(9048); left.tick(9064); left.tick(9080);
+    assert.ok(left.events.some(value => value.includes('mediaClockRevealed') && value.includes('24')));
+    const stoppedReceipts = left.events.filter(value => value.includes('mediaClockRevealed')).length;
+    left.api.stop(); left.tick(9100); left.tick(9120);
+    assert.equal(left.events.filter(value => value.includes('mediaClockRevealed')).length, stoppedReceipts, 'pause fences queued reveal receipts');
+    left.api.unmount(); right.api.unmount();
+  }
   const pointer = fixture();
   pointer.api.applyConfig({ source: 'fixed', scene: 'coast' });
   pointer.api.start(30); await flush();

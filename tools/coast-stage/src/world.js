@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { clamp, smoothstep, lerp, mulberry32, loft, DynamicTube, v3, paint, normalizeForMerge, TAU } from './util.js';
+import { geometry, geometryPlan, finishGeometry, copyGeometry, mergeGeometry, instancedMesh, numericArray, shapeGeometry } from './resource-tools.js';
+import { clamp, smoothstep, lerp, mulberry32, loft as sourceLoft, DynamicTube as SourceTube, v3, paint as sourcePaint, normalizeForMerge as sourceNormalize, TAU } from './util.js';
 import {
   makeDetailTexture,
   makeRoadTextures,
@@ -92,11 +92,20 @@ function terrainZs() {
   return zs;
 }
 
+export function createWorld(scene, opts) {
+  const scope = opts.scope;
+  const paint = (value, color) => sourcePaint(value, color, scope);
+  const normalizeForMerge = value => sourceNormalize(value, scope);
+  const loft = options => sourceLoft(options, scope);
+  const DynamicTube = class extends SourceTube { constructor(tub, rad, radius) { super(tub, rad, radius, scope); } };
+  const mergeGeometries = parts => mergeGeometry(scope, parts);
 function buildTerrainGeometry() {
   const xs = [];
   for (let x = 0; x <= CHUNK; x += 2) xs.push(x);
   const zs = terrainZs();
   const n = xs.length * zs.length;
+  const bytes = n * 11 * 4 + (xs.length - 1) * (zs.length - 1) * 6 * 2;
+  const plan = geometryPlan(scope, bytes + (xs.length - 1) * (zs.length - 1) * 6 * 8, bytes, "Coast terrain source grid");
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
   g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
@@ -113,30 +122,12 @@ function buildTerrainGeometry() {
     }
   }
   g.setIndex(idx);
-  g.userData = { xs, zs };
-  prepareGridLod(g, xs.length, zs.length);
+  finishGeometry(scope, plan, g, bytes);
+  g.userData = { xs, zs, hbuf: numericArray(scope, Float32Array, (xs.length + 2) * zs.length, "Coast terrain height scratch") };
+  prepareGridLod(g, xs.length, zs.length, scope);
   return g;
 }
 
-export function prepareGridLod(geometry, columns, rows) {
-  const indices = Array.from(geometry.index.array), ranges = { high: { start: 0, count: indices.length } };
-  const reverse = indices[1] === indices[0] + 1;
-  for (const [mode, stride] of [['medium', 2], ['low', 3]]) {
-    const start = indices.length;
-    for (let y = 0; y < rows - 1; y += stride) {
-      for (let x = 0; x < columns - 1; x += stride) {
-        const a = y * columns + x, b = Math.min(rows - 1, y + stride) * columns + x;
-        const dx = Math.min(columns - 1, x + stride) - x;
-        // Preserve the original grid winding, including the ocean's reversed Z.
-        if (reverse) indices.push(a, a + dx, b, b, a + dx, b + dx);
-        else indices.push(a, b, a + dx, b, b + dx, a + dx);
-      }
-    }
-    ranges[mode] = { start, count: indices.length - start };
-  }
-  geometry.setIndex(indices); geometry.userData.lodRanges = ranges;
-  geometry.setDrawRange(0, ranges.high.count);
-}
 
 const _n = new THREE.Vector3();
 const _c = new THREE.Color();
@@ -209,7 +200,7 @@ function jitter(geo, amt, seed) {
 }
 
 function roundTreeGeometry() {
-  const trunk = paint(normalizeForMerge(new THREE.CylinderGeometry(0.12, 0.2, 1.8, 7).translate(0, 0.9, 0)), '#6e4a2e');
+  const trunk = paint(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.12, 0.2, 1.8, 7]).translate(0, 0.9, 0)), '#6e4a2e');
   const parts = [trunk];
   const blobs = [
     [0, 2.35, 0, 1.25],
@@ -218,7 +209,7 @@ function roundTreeGeometry() {
     [0.1, 2.95, 0.1, 0.8],
   ];
   blobs.forEach(([x, y, z, r], i) => {
-    const b = jitter(new THREE.IcosahedronGeometry(r, 1), r * 0.22, 11 + i);
+    const b = jitter(geometry(scope, "IcosahedronGeometry", [r, 1]), r * 0.22, 11 + i);
     b.translate(x, y, z);
     parts.push(paint(normalizeForMerge(b), i % 2 ? '#4f7f2c' : '#5f9134'));
   });
@@ -226,7 +217,7 @@ function roundTreeGeometry() {
 }
 
 function pineGeometry() {
-  const parts = [paint(normalizeForMerge(new THREE.CylinderGeometry(0.1, 0.16, 1.2, 6).translate(0, 0.6, 0)), '#5a3b24')];
+  const parts = [paint(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.1, 0.16, 1.2, 6]).translate(0, 0.6, 0)), '#5a3b24')];
   const layers = [
     [1.0, 1.35, 1.7],
     [1.75, 1.05, 1.5],
@@ -234,7 +225,7 @@ function pineGeometry() {
     [3.05, 0.45, 1.0],
   ];
   layers.forEach(([y, r, h], i) => {
-    const c = jitter(new THREE.ConeGeometry(r, h, 8, 1), 0.08, 30 + i);
+    const c = jitter(geometry(scope, "ConeGeometry", [r, h, 8, 1]), 0.08, 30 + i);
     c.translate(0, y + h / 2, 0);
     parts.push(paint(normalizeForMerge(c), i % 2 ? '#2f5d34' : '#386b3a'));
   });
@@ -247,7 +238,7 @@ function palmGeometry() {
   const tube = new DynamicTube(18, 8, (t) => lerp(0.2, 0.12, t) * (1 + 0.12 * Math.max(0, Math.sin(t * 60))));
   const top = v3(1.1, 5.6, 0.2);
   tube.update([v3(0, 0, 0), v3(0.15, 1.8, 0), v3(0.55, 3.8, 0.1), top]);
-  const tg = tube.geometry.clone();
+  const tg = copyGeometry(scope, tube.geometry);
   parts.push(paint(normalizeForMerge(tg), '#8a6a45'));
   // 树冠叶片
   const fronds = 9;
@@ -270,7 +261,7 @@ function palmGeometry() {
     parts.push(paint(normalizeForMerge(leaf), i % 2 ? '#3f7d2e' : '#4f9136'));
   }
   for (let i = 0; i < 4; i++) {
-    const s = new THREE.SphereGeometry(0.14, 8, 6);
+    const s = geometry(scope, "SphereGeometry", [0.14, 8, 6]);
     const a = (i / 4) * TAU;
     s.translate(top.x + Math.cos(a) * 0.18, top.y - 0.18, top.z + Math.sin(a) * 0.18);
     parts.push(paint(normalizeForMerge(s), '#5b3d1f'));
@@ -279,19 +270,19 @@ function palmGeometry() {
 }
 
 function rockGeometry() {
-  const g = jitter(new THREE.DodecahedronGeometry(0.8, 1), 0.35, 77);
+  const g = jitter(geometry(scope, "DodecahedronGeometry", [0.8, 1]), 0.35, 77);
   g.scale(1.2, 0.7, 1);
   return paint(normalizeForMerge(g), '#9a938a');
 }
 
 function umbrellaGeometry() {
   const parts = [];
-  parts.push(paint(normalizeForMerge(new THREE.CylinderGeometry(0.03, 0.03, 2.2, 6).translate(0, 1.1, 0)), '#dddddd'));
-  const cone = new THREE.ConeGeometry(1.25, 0.45, 12, 1, true).toNonIndexed();
+  parts.push(paint(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.03, 0.03, 2.2, 6]).translate(0, 1.1, 0)), '#dddddd'));
+  const cone = copyGeometry(scope, geometry(scope, "ConeGeometry", [1.25, 0.45, 12, 1, true]), true);
   cone.translate(0, 2.2, 0);
   // 每个扇区交替条纹
   const pos = cone.attributes.position;
-  const col = new Float32Array(pos.count * 3);
+  const col = numericArray(scope, Float32Array, pos.count * 3, "Coast umbrella vertex colors");
   const a = C('#ffffff');
   const b = C('#e0413b');
   for (let i = 0; i < pos.count; i += 3) {
@@ -304,7 +295,7 @@ function umbrellaGeometry() {
   cone.setAttribute('color', new THREE.BufferAttribute(col, 3));
   cone.computeVertexNormals();
   parts.push(normalizeForMerge(cone));
-  const towel = new THREE.BoxGeometry(1.8, 0.02, 0.9).translate(0.4, 0.02, 1.0);
+  const towel = geometry(scope, "BoxGeometry", [1.8, 0.02, 0.9]).translate(0.4, 0.02, 1.0);
   parts.push(paint(normalizeForMerge(towel), '#f5f0e0'));
   return mergeGeometries(parts);
 }
@@ -313,14 +304,14 @@ function umbrellaGeometry() {
 function guardrailGeometry() {
   const parts = [];
   for (let x = 0; x < CHUNK; x += 2.4) {
-    parts.push(paint(normalizeForMerge(new THREE.BoxGeometry(0.08, 0.8, 0.08).translate(x + 1.2, 0.4, -3.05)), '#f0f0ec'));
+    parts.push(paint(normalizeForMerge(geometry(scope, "BoxGeometry", [0.08, 0.8, 0.08]).translate(x + 1.2, 0.4, -3.05)), '#f0f0ec'));
   }
-  parts.push(paint(normalizeForMerge(new THREE.BoxGeometry(CHUNK, 0.07, 0.04).translate(CHUNK / 2, 0.74, -3.0)), '#d9dcdf'));
-  parts.push(paint(normalizeForMerge(new THREE.BoxGeometry(CHUNK, 0.05, 0.04).translate(CHUNK / 2, 0.42, -3.0)), '#d9dcdf'));
+  parts.push(paint(normalizeForMerge(geometry(scope, "BoxGeometry", [CHUNK, 0.07, 0.04]).translate(CHUNK / 2, 0.74, -3.0)), '#d9dcdf'));
+  parts.push(paint(normalizeForMerge(geometry(scope, "BoxGeometry", [CHUNK, 0.05, 0.04]).translate(CHUNK / 2, 0.42, -3.0)), '#d9dcdf'));
   // 路缘石
-  parts.push(paint(normalizeForMerge(new THREE.BoxGeometry(CHUNK, 0.1, 0.25).translate(CHUNK / 2, 0.02, -2.82)), '#bdb8ae'));
-  parts.push(paint(normalizeForMerge(new THREE.BoxGeometry(CHUNK, 0.16, 1.0).translate(CHUNK / 2, 0.06, 3.3)), '#c9c3b8'));
-  parts.push(paint(normalizeForMerge(new THREE.BoxGeometry(CHUNK, 0.18, 0.12).translate(CHUNK / 2, 0.07, 2.82)), '#e6e1d6'));
+  parts.push(paint(normalizeForMerge(geometry(scope, "BoxGeometry", [CHUNK, 0.1, 0.25]).translate(CHUNK / 2, 0.02, -2.82)), '#bdb8ae'));
+  parts.push(paint(normalizeForMerge(geometry(scope, "BoxGeometry", [CHUNK, 0.16, 1.0]).translate(CHUNK / 2, 0.06, 3.3)), '#c9c3b8'));
+  parts.push(paint(normalizeForMerge(geometry(scope, "BoxGeometry", [CHUNK, 0.18, 0.12]).translate(CHUNK / 2, 0.07, 2.82)), '#e6e1d6'));
   return mergeGeometries(parts);
 }
 
@@ -328,12 +319,12 @@ const LAMP_X = [12, 48];
 function lampGeometry() {
   const parts = [];
   for (const x of LAMP_X) {
-    parts.push(normalizeForMerge(new THREE.CylinderGeometry(0.06, 0.1, 5.2, 10).translate(x, 2.66, 3.45)));
+    parts.push(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.06, 0.1, 5.2, 10]).translate(x, 2.66, 3.45)));
     const arm = new DynamicTube(12, 6, () => 0.045);
     arm.update([v3(x, 5.1, 3.45), v3(x, 5.55, 3.2), v3(x, 5.6, 2.55), v3(x, 5.45, 2.0)]);
-    parts.push(normalizeForMerge(arm.geometry.clone()));
-    parts.push(normalizeForMerge(new THREE.CylinderGeometry(0.12, 0.26, 0.2, 12).translate(x, 5.36, 1.95)));
-    parts.push(normalizeForMerge(new THREE.CylinderGeometry(0.16, 0.16, 0.06, 10).translate(x, 0.17, 3.45)));
+    parts.push(normalizeForMerge(copyGeometry(scope, arm.geometry)));
+    parts.push(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.12, 0.26, 0.2, 12]).translate(x, 5.36, 1.95)));
+    parts.push(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.16, 0.16, 0.06, 10]).translate(x, 0.17, 3.45)));
   }
   return paint(mergeGeometries(parts), '#3a4046');
 }
@@ -341,7 +332,7 @@ function lampGeometry() {
 function bulbGeometry() {
   const parts = [];
   for (const x of LAMP_X) {
-    const s = new THREE.SphereGeometry(0.17, 16, 8, 0, TAU, Math.PI / 2, Math.PI / 2);
+    const s = geometry(scope, "SphereGeometry", [0.17, 16, 8, 0, TAU, Math.PI / 2, Math.PI / 2]);
     s.scale(1, 0.5, 1).translate(x, 5.27, 1.95);
     parts.push(normalizeForMerge(s));
   }
@@ -351,7 +342,7 @@ function bulbGeometry() {
 function poolGeometry() {
   const parts = [];
   for (const x of LAMP_X) {
-    const c = new THREE.CircleGeometry(3.4, 32);
+    const c = geometry(scope, "CircleGeometry", [3.4, 32]);
     c.rotateX(-Math.PI / 2);
     c.scale(1.25, 1, 1);
     c.translate(x, 0.03, 1.3);
@@ -361,17 +352,16 @@ function poolGeometry() {
 }
 
 function signGeometry() {
-  const post = paint(normalizeForMerge(new THREE.CylinderGeometry(0.04, 0.04, 2.3, 8).translate(0, 1.15, 0)), '#9aa0a6');
+  const post = paint(normalizeForMerge(geometry(scope, "CylinderGeometry", [0.04, 0.04, 2.3, 8]).translate(0, 1.15, 0)), '#9aa0a6');
   return post;
 }
 
 // ---------------- 世界 ----------------
-export function createWorld(scene, opts) {
   const group = new THREE.Group();
   scene.add(group);
   const time = { value: 0 };
 
-  const detail = makeDetailTexture(256, 0.8, 1.0, 3);
+  const detail = makeDetailTexture(256, 0.8, 1.0, 3, scope);
   detail.repeat.set(1, 1);
   const terrainMat = new THREE.MeshStandardMaterial({
     vertexColors: true,
@@ -380,7 +370,7 @@ export function createWorld(scene, opts) {
     metalness: 0,
   });
 
-  const road = makeRoadTextures();
+  const road = makeRoadTextures(scope);
   road.map.repeat.set(CHUNK / 24, 1);
   road.bump.repeat.set(CHUNK / 24, 1);
   const roadMat = new THREE.MeshStandardMaterial({
@@ -390,14 +380,14 @@ export function createWorld(scene, opts) {
     roughness: 0.82,
     metalness: 0.02,
   });
-  const roadGeo = new THREE.PlaneGeometry(CHUNK, 5.64);
+  const roadGeo = geometry(scope, "PlaneGeometry", [CHUNK, 5.64]);
   roadGeo.rotateX(-Math.PI / 2);
   roadGeo.translate(CHUNK / 2, 0.005, 0);
 
   const staticMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.1 });
   const lampMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.45, metalness: 0.6 });
   const bulbMat = new THREE.MeshStandardMaterial({ color: '#fff4dc', emissive: new THREE.Color('#ffc27a'), emissiveIntensity: 0 });
-  const sprite = makeSpriteTexture();
+  const sprite = makeSpriteTexture(scope);
   const poolMat = new THREE.MeshBasicMaterial({
     map: sprite,
     color: new THREE.Color('#ffb467'),
@@ -445,9 +435,9 @@ export function createWorld(scene, opts) {
     signPost: signGeometry(),
   };
   const signMats = ['crossing', 'speed', 'fish'].map(
-    (k) => new THREE.MeshStandardMaterial({ map: makeSignTexture(k), transparent: true, alphaTest: 0.4, roughness: 0.5, side: THREE.DoubleSide }),
+    (k) => new THREE.MeshStandardMaterial({ map: makeSignTexture(k, scope), transparent: true, alphaTest: 0.4, roughness: 0.5, side: THREE.DoubleSide }),
   );
-  const signPlate = new THREE.PlaneGeometry(1.1, 1.1);
+  const signPlate = geometry(scope, "PlaneGeometry", [1.1, 1.1]);
   signPlate.rotateY(-Math.PI / 2);
 
   const density = opts.density ?? 1;
@@ -475,11 +465,11 @@ export function createWorld(scene, opts) {
     cg.add(terrain, roadMesh, guard, lamps, bulbs, pools);
     const inst = {};
     const mk = (key, mat, cast = true) => {
-      const m = new THREE.InstancedMesh(G[key], mat, MAX[key]);
+      const m = instancedMesh(scope, G[key], mat, MAX[key]);
       m.castShadow = cast;
       m.receiveShadow = true;
       m.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-      m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX[key] * 3), 3);
+      m.instanceColor = new THREE.InstancedBufferAttribute(numericArray(scope, Float32Array, MAX[key] * 3, "Coast instance colors"), 3);
       cg.add(m);
       inst[key] = m;
     };
@@ -574,29 +564,29 @@ export function createWorld(scene, opts) {
   // ---------- 灯塔小岛 ----------
   const lighthouse = new THREE.Group();
   {
-    const island = jitter(new THREE.ConeGeometry(16, 7, 14, 3), 1.6, 5);
+    const island = jitter(geometry(scope, "ConeGeometry", [16, 7, 14, 3]), 1.6, 5);
     island.translate(0, 1.2, 0);
     const isl = new THREE.Mesh(island, new THREE.MeshStandardMaterial({ color: '#6f6a5f', roughness: 1, flatShading: true }));
     isl.receiveShadow = true;
     const grass = new THREE.Mesh(
-      jitter(new THREE.SphereGeometry(7, 12, 6, 0, TAU, 0, Math.PI / 2.4), 0.8, 8).scale(1, 0.35, 1).translate(0, 4.2, 0),
+      jitter(geometry(scope, "SphereGeometry", [7, 12, 6, 0, TAU, 0, Math.PI / 2.4]), 0.8, 8).scale(1, 0.35, 1).translate(0, 4.2, 0),
       new THREE.MeshStandardMaterial({ color: '#6f8f3a', roughness: 1, flatShading: true }),
     );
-    const stripes = makeStripeTexture(['#f4f1ea', '#c9302c'], 6);
+    const stripes = makeStripeTexture(['#f4f1ea', '#c9302c'], 6, false, scope);
     const tower = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.1, 1.7, 13, 24, 1),
+      geometry(scope, "CylinderGeometry", [1.1, 1.7, 13, 24, 1]),
       new THREE.MeshStandardMaterial({ map: stripes, roughness: 0.6 }),
     );
     tower.position.y = 11;
     tower.castShadow = true;
-    const gallery = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 1.7, 0.25, 24), new THREE.MeshStandardMaterial({ color: '#2b2f33' }));
+    const gallery = new THREE.Mesh(geometry(scope, "CylinderGeometry", [1.7, 1.7, 0.25, 24]), new THREE.MeshStandardMaterial({ color: '#2b2f33' }));
     gallery.position.y = 17.6;
     const lantern = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.9, 0.9, 1.6, 16),
+      geometry(scope, "CylinderGeometry", [0.9, 0.9, 1.6, 16]),
       new THREE.MeshStandardMaterial({ color: '#fff6d8', emissive: new THREE.Color('#ffd27a'), emissiveIntensity: 0.4, roughness: 0.2 }),
     );
     lantern.position.y = 18.5;
-    const cap = new THREE.Mesh(new THREE.ConeGeometry(1.25, 1.4, 16), new THREE.MeshStandardMaterial({ color: '#b3261e', roughness: 0.5 }));
+    const cap = new THREE.Mesh(geometry(scope, "ConeGeometry", [1.25, 1.4, 16]), new THREE.MeshStandardMaterial({ color: '#b3261e', roughness: 0.5 }));
     cap.position.y = 20;
     // 原作此处还有一对「夜间旋转光束」加法混合锥体；移植实测它的片元在某类
     // 视角下产出 NaN，被泛光前的 sanitize pass 判成黑色，在天空里留下两个
@@ -628,18 +618,18 @@ export function createWorld(scene, opts) {
     sailShape.lineTo(0, 7);
     sailShape.quadraticCurveTo(1.6, 3.5, 3.4, 0.2);
     sailShape.closePath();
-    const sailGeo = new THREE.ShapeGeometry(sailShape, 8);
+    const sailGeo = shapeGeometry(scope, sailShape, 8);
     const jibShape = new THREE.Shape();
     jibShape.moveTo(0, 0);
     jibShape.lineTo(0, 6.2);
     jibShape.lineTo(-2.4, 0.2);
     jibShape.closePath();
-    const jibGeo = new THREE.ShapeGeometry(jibShape);
+    const jibGeo = shapeGeometry(scope, jibShape);
     const colors = ['#ffffff', '#ffd166', '#ef476f', '#ffffff', '#8ecae6'];
     for (let i = 0; i < 5; i++) {
       const b = new THREE.Group();
       const hull = new THREE.Mesh(hullGeo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4 }));
-      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 8, 6), new THREE.MeshStandardMaterial({ color: '#dcdcdc' }));
+      const mast = new THREE.Mesh(geometry(scope, "CylinderGeometry", [0.06, 0.08, 8, 6]), new THREE.MeshStandardMaterial({ color: '#dcdcdc' }));
       mast.position.set(0.3, 4.2, 0);
       const sailMat = new THREE.MeshStandardMaterial({ color: colors[i], side: THREE.DoubleSide, roughness: 0.8 });
       const sail = new THREE.Mesh(sailGeo, sailMat);
@@ -659,9 +649,9 @@ export function createWorld(scene, opts) {
 
   // ---------- 飞鸟：海鸥与鹈鹕编队（实例化） ----------
   function birdSet(count, { body, wing, wingMat, bodyMat, shoulder }) {
-    const bodies = new THREE.InstancedMesh(body, bodyMat, count);
-    const wl = new THREE.InstancedMesh(wing, wingMat, count);
-    const wr = new THREE.InstancedMesh(wing, wingMat, count);
+    const bodies = instancedMesh(scope, body, bodyMat, count);
+    const wl = instancedMesh(scope, wing, wingMat, count);
+    const wr = instancedMesh(scope, wing, wingMat, count);
     for (const m of [bodies, wl, wr]) {
       m.frustumCulled = false;
       m.castShadow = false;
@@ -670,10 +660,10 @@ export function createWorld(scene, opts) {
     return { bodies, wl, wr, count, shoulder };
   }
   const gullBody = mergeGeometries([
-    paint(normalizeForMerge(new THREE.SphereGeometry(1, 12, 8).scale(0.24, 0.075, 0.08)), '#fbfbfb'),
-    paint(normalizeForMerge(new THREE.SphereGeometry(0.06, 10, 8).translate(0.22, 0.03, 0)), '#ffffff'),
-    paint(normalizeForMerge(new THREE.ConeGeometry(0.018, 0.08, 6).rotateZ(-Math.PI / 2).translate(0.3, 0.025, 0)), '#f2c230'),
-    paint(normalizeForMerge(new THREE.ConeGeometry(0.06, 0.16, 6).rotateZ(Math.PI / 2).translate(-0.28, 0.0, 0).scale(1, 0.4, 1)), '#e8e8e8'),
+    paint(normalizeForMerge(geometry(scope, "SphereGeometry", [1, 12, 8]).scale(0.24, 0.075, 0.08)), '#fbfbfb'),
+    paint(normalizeForMerge(geometry(scope, "SphereGeometry", [0.06, 10, 8]).translate(0.22, 0.03, 0)), '#ffffff'),
+    paint(normalizeForMerge(geometry(scope, "ConeGeometry", [0.018, 0.08, 6]).rotateZ(-Math.PI / 2).translate(0.3, 0.025, 0)), '#f2c230'),
+    paint(normalizeForMerge(geometry(scope, "ConeGeometry", [0.06, 0.16, 6]).rotateZ(Math.PI / 2).translate(-0.28, 0.0, 0).scale(1, 0.4, 1)), '#e8e8e8'),
   ]);
   const wingGeo = (len, chord, tipColor, baseColor, tipFrac) => {
     const sh = new THREE.Shape();
@@ -682,10 +672,10 @@ export function createWorld(scene, opts) {
     sh.lineTo(len * 0.8, -chord * 0.45);
     sh.quadraticCurveTo(len * 0.4, -chord * 0.9, 0, -chord * 0.8);
     sh.closePath();
-    const g = new THREE.ShapeGeometry(sh, 6);
+    const g = shapeGeometry(scope, sh, 6);
     g.rotateX(-Math.PI / 2); // 形状 Y -> -Z
     const pos = g.attributes.position;
-    const col = new Float32Array(pos.count * 3);
+    const col = numericArray(scope, Float32Array, pos.count * 3, "Coast umbrella vertex colors");
     const tc = C(tipColor);
     const bc = C(baseColor);
     for (let i = 0; i < pos.count; i++) {
@@ -706,10 +696,10 @@ export function createWorld(scene, opts) {
     gulls.params.push({ cx: (i - 4) * 7, cy: 7 + (i % 3) * 2.5, cz: -12 - (i % 4) * 7, rx: 9 + i, rz: 4 + (i % 3) * 2, w: 0.12 + i * 0.013, ph: i * 1.7, flap: 5.5 + (i % 3), s: 0.9 + (i % 3) * 0.15 });
   }
   const pelBody = mergeGeometries([
-    paint(normalizeForMerge(new THREE.SphereGeometry(1, 14, 10).scale(0.5, 0.16, 0.17)), '#f6f3ec'),
-    paint(normalizeForMerge(new THREE.SphereGeometry(0.11, 10, 8).translate(0.44, 0.06, 0)), '#f6f3ec'),
-    paint(normalizeForMerge(new THREE.ConeGeometry(0.045, 0.55, 8).rotateZ(-Math.PI / 2).scale(1, 1, 0.7).translate(0.8, 0.02, 0)), '#f2b24a'),
-    paint(normalizeForMerge(new THREE.SphereGeometry(0.05, 8, 6).scale(4, 1, 1).translate(0.72, -0.05, 0)), '#f6c85f'),
+    paint(normalizeForMerge(geometry(scope, "SphereGeometry", [1, 14, 10]).scale(0.5, 0.16, 0.17)), '#f6f3ec'),
+    paint(normalizeForMerge(geometry(scope, "SphereGeometry", [0.11, 10, 8]).translate(0.44, 0.06, 0)), '#f6f3ec'),
+    paint(normalizeForMerge(geometry(scope, "ConeGeometry", [0.045, 0.55, 8]).rotateZ(-Math.PI / 2).scale(1, 1, 0.7).translate(0.8, 0.02, 0)), '#f2b24a'),
+    paint(normalizeForMerge(geometry(scope, "SphereGeometry", [0.05, 8, 6]).scale(4, 1, 1).translate(0.72, -0.05, 0)), '#f6c85f'),
   ]);
   const pelFlock = birdSet(3, { body: pelBody, wing: wingGeo(1.3, 0.38, '#161616', '#f4f1ea', 0.55), wingMat, bodyMat: birdBodyMat, shoulder: 0.0 });
 
@@ -744,8 +734,8 @@ export function createWorld(scene, opts) {
   // ---------- 萤火虫（夜间） ----------
   const FF = 160;
   const ffGeo = new THREE.BufferGeometry();
-  const ffPos = new Float32Array(FF * 3);
-  const ffSeed = new Float32Array(FF);
+  const ffPos = numericArray(scope, Float32Array, FF * 3, "Coast firefly positions");
+  const ffSeed = numericArray(scope, Float32Array, FF, "Coast firefly seed");
   const rr = mulberry32(5);
   for (let i = 0; i < FF; i++) {
     ffPos[i * 3] = rr() * 200 - 60;
@@ -872,4 +862,29 @@ export function createWorld(scene, opts) {
     ffGeo.setDrawRange(0, Math.floor(FF * visibleDensity));
   }
   return { group, update, lampPositions, ffMat, terrainHeight, chunks, setDensity };
+}
+
+export function prepareGridLod(geometry, columns, rows, scope) {
+  const high = geometry.index.count;
+  const count = high + 6 * Math.ceil((columns - 1) / 2) * Math.ceil((rows - 1) / 2)
+    + 6 * Math.ceil((columns - 1) / 3) * Math.ceil((rows - 1) / 3);
+  const bytes = count * (columns * rows > 65535 ? 4 : 2);
+  const plan = geometryPlan(scope, bytes + count * 8, bytes, 'Coast grid LOD index source');
+  const indices = Array.from(geometry.index.array), ranges = { high: { start: 0, count: indices.length } };
+  const reverse = indices[1] === indices[0] + 1;
+  for (const [mode, stride] of [['medium', 2], ['low', 3]]) {
+    const start = indices.length;
+    for (let y = 0; y < rows - 1; y += stride) {
+      for (let x = 0; x < columns - 1; x += stride) {
+        const a = y * columns + x, b = Math.min(rows - 1, y + stride) * columns + x;
+        const dx = Math.min(columns - 1, x + stride) - x;
+        // Preserve the original grid winding, including the ocean's reversed Z.
+        if (reverse) indices.push(a, a + dx, b, b, a + dx, b + dx);
+        else indices.push(a, b, a + dx, b, b + dx, a + dx);
+      }
+    }
+    ranges[mode] = { start, count: indices.length - start };
+  }
+  geometry.setIndex(indices); plan.upload(geometry.index); plan.cpuReady(bytes); geometry.userData.lodRanges = ranges;
+  geometry.setDrawRange(0, ranges.high.count);
 }

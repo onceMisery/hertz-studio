@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 封面星球：封面亮度驱动真实浮雕，指针可把玩倾斜，点击在球面打出冲击波，
 // 换曲用双纹理交叉淡入；轨道尘埃/细环提供纵深。
@@ -86,10 +88,10 @@ export function createCoverSphere(ctx) {
   const field = createField(ctx, globe, { depth: 0, radius: 3.0 });
   const uniforms = { ...field.uniforms, uCover: { value: null }, uPrevCover: { value: null }, uHasCover: { value: 0 }, uHasPrev: { value: 0 },
     uMix: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 }, uMotion: { value: .6 } };
-  const geometry = own(ctx, new T.SphereGeometry(3.2, 96, 64));
+  const geometry = own(ctx, constructedGeometry(T, ctx.scope, 'SphereGeometry', [3.2, 96, 64]));
   const surfaceMesh = new T.Mesh(geometry, own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: vertex, fragmentShader: surface })));
   globe.add(surfaceMesh);
-  const shell = new T.Mesh(own(ctx, new T.SphereGeometry(3.26, 48, 32)), own(ctx, new T.ShaderMaterial({
+  const shell = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'SphereGeometry', [3.26, 48, 32])), own(ctx, new T.ShaderMaterial({
     uniforms, vertexShader: vertex, fragmentShader: atmosphere, side: T.BackSide, transparent: true, depthWrite: false
   }))); globe.add(shell);
 
@@ -104,6 +106,7 @@ export function createCoverSphere(ctx) {
   const grainsMaterial = own(ctx, new T.PointsMaterial({ color: 0xe4f5f0, size: .012, transparent: true, opacity: .13, depthWrite: false }));
   globe.add(new T.Points(grains, grainsMaterial));
 
+  declaredArrayPayload(ctx.scope,192*3,'Cover sphere orbit numeric source and typed backing',4,2);
   const orbitPositions = [];
   for (let i = 0; i < 192; i++) { const a = i / 192 * TAU; orbitPositions.push(Math.cos(a) * 4.25, 0, Math.sin(a) * 4.25); }
   const orbit = new T.LineLoop(own(ctx, new T.BufferGeometry().setFromPoints(orbitPositions.map((v, i) => i % 3 === 0 ? new T.Vector3(v, orbitPositions[i + 1], orbitPositions[i + 2]) : null).filter(Boolean))),
@@ -183,3 +186,6 @@ export function createCoverSphere(ctx) {
     dispose: cleanup, stats: () => ({ covers: Number(!!entry?.texture) + Number(!!prev?.texture), particles: grains.drawRange.count, drawCalls: 9, triangles: 15168 })
   });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createCoverSphere.resourcePlan = () => sourcePlan(14).geometry('SphereGeometry',[3.2,96,64]).geometry('SphereGeometry',[3.26,48,32]).array(10000*3).array(3,8).array(192*3,4,2).stars(1300).glows(4).shock(6).result();

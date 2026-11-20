@@ -332,6 +332,7 @@ pub(super) fn page(
 
 #[path = "work_drafts_composition_package.rs"]
 mod package;
+pub(super) use package::validate_derivative_license;
 pub(crate) use package::PackageBuild;
 #[cfg(test)]
 #[path = "work_drafts_model_tests.rs"]

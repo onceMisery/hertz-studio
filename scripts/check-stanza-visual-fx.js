@@ -40,8 +40,9 @@ const HARNESS = `<!doctype html><meta charset="utf-8">
 
 async function bootStage(page, mode) {
   await page.setContent(HARNESS);
-  for (const file of ['vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
+  for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
     'stanza/stanza-sonnet-fx.js', 'stanza/stanza-sonnet.js', 'stanza/stanza-tempera.js']) {
+    if (file === 'vendor/pixi.min.js') await page.evaluate(() => { window.Stage = {resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy))}; });
     await page.addScriptTag({ path: path.join(web, file) });
   }
   await page.evaluate((stageMode) => {
@@ -53,7 +54,7 @@ async function bootStage(page, mode) {
       { start_ms: 13000, end_ms: 20000, text: '我们沿着星光继续向前走' }
     ];
     fx.track = { id: 'fx-check', title: 'Visual FX check', path: 'fx-check' };
-    window.Stage = {
+    window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)),
       presentation: () => ({ playing: false, reduced: fx.reduced, track: fx.track }),
       position: () => fx.position,
       lyrics: () => ({ lines: fx.lines }),
@@ -179,6 +180,7 @@ async function runClassic(browser) {
   await page.setContent(HARNESS);
   for (const file of ['stanza/stanza-util.js', 'stanza/stanza-theme.js',
     'stanza/stanza-sonnet-fx.js', 'stanza/stanza-classic.js']) {
+    if (file === 'vendor/pixi.min.js') await page.evaluate(() => { window.Stage = {resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy))}; });
     await page.addScriptTag({ path: path.join(web, file) });
   }
   // 消费端规则在真 stanza.css 里（calc 读 --fl-vocal/--fl-bass）：
@@ -193,7 +195,7 @@ async function runClassic(browser) {
       { start_ms: 0, end_ms: 6000, text: '晚风送来一句轻轻的问候' },
       { start_ms: 6000, end_ms: 13000, text: '我们沿着星光继续向前走' }
     ];
-    window.Stage = {
+    window.Stage = { resources: () => (window.__stanzaTestLedger ||= StageResourceBudget.create(StageResourcePolicy)),
       presentation: () => ({ playing: true, reduced: false, track: { id: 'c', title: 'classic check' } }),
       position: () => fx.position,
       lyrics: () => ({ lines: fx.lines }),

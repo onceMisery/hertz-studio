@@ -31,6 +31,15 @@ fixture('video',480,320,'contain',[background,{id:'video',type:'video',stateVers
   [image,video],[{path:'red.png',source:redFile,mime:'image/png'},{path:'movie.webm',source:videoFile,mime:'video/webm'}]);
 fixture('text',480,320,'contain',[background,{id:'caption',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:0,width:256,height:128,anchorX:0,anchorY:0,text:'Hertz',fontSize:40,color:'#ffffff'}}],
   [{id:'font',kind:'font',source:font.file,variants:[]}],fontFiles);
+fixture('timeline-effects',480,320,'contain',[background,overlay],[image],[{path:'red.png',source:redFile,mime:'image/png'}]);
+requests.at(-1).document.timeline.tracks=[{id:'fade',target:{nodeId:overlay.id,property:'opacity',component:null},
+  keys:[{timeSeconds:0,value:1,easing:'linear'},{timeSeconds:1,value:0,easing:'linear'}]}];
+requests.at(-1).document.effects=[{id:'grade',type:'colorAdjust',stateVersion:1,target:{kind:'output'},
+  properties:{brightness:0,contrast:1,saturation:0,hueDegrees:0}}];
+fixture('particles-glow',480,320,'contain',[background,{id:'dust',type:'particles',stateVersion:1,
+  properties:{x:128,y:64,width:256,height:128,count:1,seed:17}}]);
+requests.at(-1).document.effects=[{id:'glow',type:'glow',stateVersion:1,target:{kind:'output'},
+  properties:{strength:.2,radius:8,threshold:.5}}];
 const input=path.join(output,'requests.json'),mappingFile=path.join(output,'native-projections.json');fs.writeFileSync(input,JSON.stringify(requests,null,2));
 const exportProjection=!process.argv.includes('--projection-ready');
 if(exportProjection)execFileSync('cargo',['+1.88.0','test','--locked','-p','hertz-desktop','--lib','--features','wallpaper-media-probe',
@@ -80,6 +89,24 @@ try{const page=await browser.newPage({viewport:{width:800,height:600},deviceScal
     await page.screenshot({path:path.join(output,`${width}-${fit}.png`)});
     results.push({case:'fit and linear alpha over colored builtin with paused fixed input',width,height,fit,W,H,x,y,back,front,input:stats.sceneStats.builtin.input});
   }
+  await select('timeline-effects');
+  const phases={};
+  for(const time of [0,.5,1,.5,0]){
+    await page.evaluate(time=>host.frame({sceneTime:time,seek:true,paused:true}),time);
+    const frame=await snapshot();
+    if(phases[time])assert.equal(frame,phases[time],'builtin and overlay use the same reversible phase');
+    phases[time]=frame;
+  }
+  assert.notEqual(phases[0],phases[1]);
+  const monochrome=await pixel(Math.floor(mapping['timeline-effects'].projection.target.width/2),Math.floor(mapping['timeline-effects'].projection.target.height/2));
+  assert(Math.abs(monochrome[0]-127)<=4,JSON.stringify(monochrome));
+  assert.equal(monochrome[0],monochrome[1]);assert.equal(monochrome[1],monochrome[2]);
+  results.push({case:'builtin background accepts 2D timeline layers and shared output effects',phases,monochrome});
+  const particleGlow=await select('particles-glow');
+  assert.equal(particleGlow.state,'ready',JSON.stringify(particleGlow));
+  assert.equal(mapping['particles-glow'].projection.pageLimits.programs,9);
+  assert.equal(await page.evaluate(()=>ledger.snapshot().violations.length),0);
+  results.push({case:'builtin particles and glow use identical additive native/browser program budgets',particleGlow});
   await select('text');assert.equal(await page.evaluate(()=>document.fonts.size),1);results.push({case:'same-package native-prepared font + builtin share output'});
   await select('video');await page.waitForFunction(()=>host.frame({sceneTime:.1,seek:true,paused:true,level:.5,spectrum:[30,90]}),null,{timeout:12000});
   assert.equal(await page.evaluate(()=>ledger.snapshot().held.decoderLeases),1);const first=await snapshot();

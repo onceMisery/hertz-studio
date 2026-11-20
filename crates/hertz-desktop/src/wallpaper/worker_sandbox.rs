@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Native launch ownership. A PID is diagnostic; held handles and creation times own processes.
-use super::protocol::{Bootstrap, Budget, ProcessIdentity};
+use super::protocol::{
+    Bootstrap, BoundaryProbe, BoundaryReceipt, Budget, ProcessIdentity, UdpProbeOperation,
+};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,6 +21,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Security::{Authorization::*, Isolation::*, *};
 use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::System::Diagnostics::ProcessSnapshotting::*;
 use windows_sys::Win32::System::JobObjects::*;
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
@@ -350,6 +353,317 @@ impl Drop for Profile {
     }
 }
 
+const BOUNDARY_CANARY: &[u8] = b"hertz-g3s-owned-canary-v1\n";
+/// Only the existing Launch owns these fixtures. They never point at user files
+/// or external hosts, and remain alive until the held process tree has exited.
+pub struct BoundaryFixture {
+    canary: File,
+    request: BoundaryProbe,
+    tcp: std::net::TcpListener,
+    udp: std::net::UdpSocket,
+    handle_inheritance: Option<serde_json::Value>,
+}
+impl BoundaryFixture {
+    fn create(profile: &Profile) -> Result<Self> {
+        let directory = profile.root.join("denied-canary");
+        std::fs::create_dir(&directory)?;
+        let owner = owner_sid()?;
+        // Remove inherited AppContainer access from this sibling of UDF/runtime.
+        protect_directory(&directory, &owner, &owner, "FA")?;
+        let path = directory.join("existing.txt");
+        std::fs::write(&path, BOUNDARY_CANARY)?;
+        let canary = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&path)?;
+        // Deliberately inheritable, but absent from the fixed five-handle list.
+        win(
+            unsafe {
+                SetHandleInformation(
+                    canary.as_raw_handle(),
+                    HANDLE_FLAG_INHERIT,
+                    HANDLE_FLAG_INHERIT,
+                )
+            },
+            "make exclusion canary inheritable",
+        )?;
+        let tcp = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let tcp_port = tcp.local_addr()?.port();
+        let positive =
+            std::net::TcpStream::connect_timeout(&tcp.local_addr()?, Duration::from_secs(1))?;
+        drop(tcp.accept()?);
+        drop(positive);
+        tcp.set_nonblocking(true)?;
+        let udp = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let udp_port = udp.local_addr()?.port();
+        let positive = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        positive.send_to(BOUNDARY_CANARY, udp.local_addr()?)?;
+        udp.set_read_timeout(Some(Duration::from_secs(1)))?;
+        let mut buffer = [0; 64];
+        let (length, _) = udp.recv_from(&mut buffer)?;
+        if &buffer[..length] != BOUNDARY_CANARY {
+            bail!("loopback positive control mismatch");
+        }
+        udp.set_nonblocking(true)?;
+        Ok(Self {
+            request: BoundaryProbe {
+                canary_path: path.to_string_lossy().into(),
+                excluded_handle: canary.as_raw_handle() as u64,
+                tcp_port,
+                udp_port,
+            },
+            canary,
+            tcp,
+            udp,
+            handle_inheritance: None,
+        })
+    }
+    pub fn request(&self) -> BoundaryProbe {
+        self.request.clone()
+    }
+    fn clear_inheritance(&self) -> Result<()> {
+        private(&self.canary)
+    }
+    fn observe_suspended_handles(&mut self, process: HANDLE, expected: &[HANDLE]) -> Result<()> {
+        let handles = captured_handle_values(process)?;
+        let excluded_absent = !handles.contains(&(self.canary.as_raw_handle() as usize));
+        let required_present = expected
+            .iter()
+            .all(|handle| handles.contains(&(*handle as usize)));
+        self.handle_inheritance = Some(
+            serde_json::json!({"source":"PssCaptureSnapshot/PSS_CAPTURE_HANDLES",
+            "capturedBeforeResume":true,"workerPid":unsafe { GetProcessId(process) },"workerCreated":created(process)?,
+            "capturedHandleCount":handles.len(),"requiredHandleCount":expected.len(),
+            "requiredHandlesPresent":required_present,"excludedCanaryHandleAbsent":excluded_absent}),
+        );
+        if !excluded_absent || !required_present {
+            bail!("suspended worker handle snapshot differs from private whitelist");
+        }
+        Ok(())
+    }
+    pub fn verify(&self) -> Result<serde_json::Value> {
+        let handles = self
+            .handle_inheritance
+            .as_ref()
+            .context("missing suspended handle snapshot")?;
+        let handles_passed = handles["requiredHandlesPresent"] == true
+            && handles["excludedCanaryHandleAbsent"] == true;
+        let tcp_quiet = match self.tcp.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+            Ok(_) => false,
+            Err(error) => return Err(error.into()),
+        };
+        let mut buffer = [0; 64];
+        let udp_quiet = match self.udp.recv_from(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+            Ok(_) => false,
+            Err(error) => return Err(error.into()),
+        };
+        let canary_unchanged = std::fs::read(&self.request.canary_path)? == BOUNDARY_CANARY;
+        let no_created_file = !Path::new(&self.request.canary_path)
+            .with_file_name("created.txt")
+            .exists();
+        Ok(
+            serde_json::json!({"passed":tcp_quiet && udp_quiet && canary_unchanged && no_created_file && handles_passed,
+            "handleInheritance":handles,
+            "parentTcpPositiveControl":true,"parentUdpPositiveControl":true,
+            "tcpListenerQuiet":tcp_quiet,"udpListenerQuiet":udp_quiet,
+            "canaryUnchanged":canary_unchanged,"noCreatedFile":no_created_file,
+            "scope":"owned sibling file and IPv4 loopback TCP/UDP only"}),
+        )
+    }
+}
+/// A snapshot enumerates handle values without dereferencing guessed values in
+/// the child. The held process is still suspended at the Launch call site.
+fn captured_handle_values(process: HANDLE) -> Result<Vec<usize>> {
+    struct Capture(HPSS);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            unsafe {
+                PssFreeSnapshot(GetCurrentProcess(), self.0);
+            }
+        }
+    }
+    struct Marker(HPSSWALK);
+    impl Drop for Marker {
+        fn drop(&mut self) {
+            unsafe {
+                PssWalkMarkerFree(self.0);
+            }
+        }
+    }
+    let checked = |code: u32, operation: &str| -> Result<()> {
+        if code != ERROR_SUCCESS {
+            bail!(
+                "{operation}: {}",
+                std::io::Error::from_raw_os_error(code as i32)
+            );
+        }
+        Ok(())
+    };
+    let mut raw = null_mut();
+    checked(
+        unsafe { PssCaptureSnapshot(process, PSS_CAPTURE_HANDLES, 0, &mut raw) },
+        "capture suspended worker handle values",
+    )?;
+    let snapshot = Capture(raw);
+    let mut information = PSS_HANDLE_INFORMATION::default();
+    checked(
+        unsafe {
+            PssQuerySnapshot(
+                snapshot.0,
+                PSS_QUERY_HANDLE_INFORMATION,
+                (&mut information as *mut PSS_HANDLE_INFORMATION).cast(),
+                size_of_val(&information) as u32,
+            )
+        },
+        "query captured handle count",
+    )?;
+    if information.HandlesCaptured > 256 {
+        bail!("suspended worker handle count exceeds qualification bound");
+    }
+    let mut raw = null_mut();
+    checked(
+        unsafe { PssWalkMarkerCreate(null(), &mut raw) },
+        "create handle snapshot walk",
+    )?;
+    let marker = Marker(raw);
+    let mut handles = Vec::with_capacity(information.HandlesCaptured as usize);
+    loop {
+        let mut entry = PSS_HANDLE_ENTRY::default();
+        let code = unsafe {
+            PssWalkSnapshot(
+                snapshot.0,
+                PSS_WALK_HANDLES,
+                marker.0,
+                (&mut entry as *mut PSS_HANDLE_ENTRY).cast(),
+                size_of_val(&entry) as u32,
+            )
+        };
+        if code == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        checked(code, "walk captured handle values")?;
+        if handles.len() >= information.HandlesCaptured as usize {
+            bail!("captured handle count changed during walk");
+        }
+        handles.push(entry.Handle as usize);
+    }
+    if handles.len() != information.HandlesCaptured as usize {
+        bail!("captured handle walk incomplete");
+    }
+    Ok(handles)
+}
+fn duplicate_parent_canary(parent: HANDLE, canary: HANDLE) -> Result<Option<i32>> {
+    let mut duplicated = null_mut();
+    // canary is a real file handle held in the source (parent) process. The
+    // inherited parent handle intentionally lacks PROCESS_DUP_HANDLE.
+    let copied = unsafe {
+        DuplicateHandle(
+            parent,
+            canary,
+            GetCurrentProcess(),
+            &mut duplicated,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if copied == 0 {
+        return Ok(std::io::Error::last_os_error().raw_os_error());
+    }
+    drop(Handle::new(
+        duplicated,
+        "unexpected parent canary duplicate",
+    )?);
+    Ok(None)
+}
+pub fn probe_boundaries(
+    bootstrap: &Bootstrap,
+    parent: HANDLE,
+    mut progress: impl FnMut(&str) -> Result<()>,
+) -> Result<BoundaryReceipt> {
+    let probe = bootstrap
+        .boundary_probe
+        .as_ref()
+        .context("missing fixed boundary probe")?;
+    // The bootstrap has already been validated against the held parent and
+    // this random profile. No path, host or handle comes from page input.
+    progress("boundaryUdfReadWrite")?;
+    let positive = Path::new(&bootstrap.user_data_folder).join("boundary-positive.txt");
+    std::fs::write(&positive, BOUNDARY_CANARY)?;
+    let own_udf_read_write = std::fs::read(&positive)? == BOUNDARY_CANARY;
+    std::fs::remove_file(&positive)?;
+    progress("boundaryOutsideRead")?;
+    let outside_read_error = File::open(&probe.canary_path)
+        .err()
+        .and_then(|error| error.raw_os_error());
+    progress("boundaryOutsideWrite")?;
+    let outside_write_error = OpenOptions::new()
+        .write(true)
+        .open(&probe.canary_path)
+        .err()
+        .and_then(|error| error.raw_os_error());
+    progress("boundaryOutsideCreate")?;
+    let outside_create_error = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(Path::new(&probe.canary_path).with_file_name("created.txt"))
+        .err()
+        .and_then(|error| error.raw_os_error());
+    progress("boundaryParentCanaryDuplicate")?;
+    let inherited_parent_duplicate_error =
+        duplicate_parent_canary(parent, probe.excluded_handle as HANDLE)?;
+    progress("boundaryParentDangerousOpen")?;
+    let opened = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
+            0,
+            bootstrap.parent_pid,
+        )
+    };
+    let parent_harmful_open_error = if opened.is_null() {
+        std::io::Error::last_os_error().raw_os_error()
+    } else {
+        drop(Handle::new(opened, "unexpected parent access")?);
+        None
+    };
+    progress("boundaryTcpConnect")?;
+    let tcp_connect_error = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, probe.tcp_port)),
+        Duration::from_millis(300),
+    )
+    .err()
+    .and_then(|error| error.raw_os_error());
+    progress("boundaryUdpSend")?;
+    let (udp_denial_operation, udp_send_error) =
+        match std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
+            Ok(socket) => (
+                UdpProbeOperation::SendTo,
+                socket
+                    .send_to(
+                        BOUNDARY_CANARY,
+                        (std::net::Ipv4Addr::LOCALHOST, probe.udp_port),
+                    )
+                    .err()
+                    .and_then(|error| error.raw_os_error()),
+            ),
+            Err(error) => (UdpProbeOperation::Bind, error.raw_os_error()),
+        };
+    Ok(BoundaryReceipt {
+        own_udf_read_write,
+        outside_read_error,
+        outside_write_error,
+        outside_create_error,
+        inherited_parent_duplicate_error,
+        parent_harmful_open_error,
+        tcp_connect_error,
+        udp_send_error,
+        udp_denial_operation,
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileIdentity {
@@ -552,6 +866,8 @@ struct JobObservation {
     test_delay: Arc<ObserverDelay>,
     #[cfg(test)]
     test_port: Handle,
+    #[cfg(test)]
+    test_packets: Arc<Mutex<Vec<(u32, usize, u32)>>>,
 }
 struct ObserverRetirement {
     resources: Mutex<Option<LaunchResources>>,
@@ -719,6 +1035,10 @@ impl JobObservation {
         let fatal_receipt = Arc::new(OnceLock::new());
         let thread_fatal_receipt = fatal_receipt.clone();
         #[cfg(test)]
+        let test_packets = Arc::new(Mutex::new(Vec::new()));
+        #[cfg(test)]
+        let thread_packets = test_packets.clone();
+        #[cfg(test)]
         let test_delay = Arc::new(ObserverDelay::default());
         #[cfg(test)]
         let thread_test_delay = test_delay.clone();
@@ -741,6 +1061,13 @@ impl JobObservation {
                 };
                 if ok == 0 && unsafe { GetLastError() } == WAIT_TIMEOUT {
                     continue;
+                }
+                #[cfg(test)]
+                {
+                    let mut packets = thread_packets.lock().unwrap();
+                    if packets.len() < 128 {
+                        packets.push((message, key, value as usize as u32));
+                    }
                 }
                 let result = (|| -> Result<()> {
                     win(ok, "receive original Job lifecycle message")?;
@@ -887,6 +1214,7 @@ impl JobObservation {
                     resources.control_write.take();
                     resources.resource_read.take();
                     resources.resource_write.take();
+                    resources.boundary_fixture.take();
                     before_deadline(retirement.deadline.unwrap(), "original observer cleanup")?;
                     resources.profile.cleaned = false;
                     if let Err(error) = resources.profile.cleanup() {
@@ -914,6 +1242,8 @@ impl JobObservation {
             test_delay,
             #[cfg(test)]
             test_port,
+            #[cfg(test)]
+            test_packets,
         })
     }
 }
@@ -1068,6 +1398,17 @@ impl Job {
         Ok(self
             .query::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>(JobObjectBasicAccountingInformation)?
             .ActiveProcesses)
+    }
+    pub fn workload_sample(&self) -> Result<serde_json::Value> {
+        let accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
+            self.query(JobObjectBasicAccountingInformation)?;
+        let limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+            self.query(JobObjectExtendedLimitInformation)?;
+        Ok(
+            serde_json::json!({"totalUserTime100ns":accounting.TotalUserTime,
+            "totalKernelTime100ns":accounting.TotalKernelTime,"peakJobMemoryBytes":limits.PeakJobMemoryUsed,
+            "activeProcesses":accounting.ActiveProcesses}),
+        )
     }
     pub fn register_suspended_root(&self, process: HANDLE, pin: &VerifiedWorker) -> Result<()> {
         if self.active()? != 0 {
@@ -1630,6 +1971,7 @@ pub struct LaunchResources {
     pub resource_write: Option<File>,
     pub token: TokenEvidence,
     pub worker: ProcessIdentity,
+    pub boundary_fixture: Option<BoundaryFixture>,
 }
 impl std::ops::Deref for Launch {
     type Target = LaunchResources;
@@ -1648,9 +1990,17 @@ impl std::ops::DerefMut for Launch {
 }
 impl Launch {
     pub fn suspended(path: &Path, expected_hash: Option<&str>, output: &Path) -> Result<Self> {
+        Self::suspended_probe(path, expected_hash, output, false)
+    }
+    pub fn suspended_probe(
+        path: &Path,
+        expected_hash: Option<&str>,
+        output: &Path,
+        boundaries: bool,
+    ) -> Result<Self> {
         let mut trace = serde_json::json!({"schemaVersion":1,"phase":"sandboxFoundation","stage":"profileCreate","expectedWorkerHash":expected_hash,"parentPid":unsafe{GetCurrentProcessId()},"resumed":false});
         record_trace(output, &trace)?;
-        let result = Self::suspended_traced(path, expected_hash, output, &mut trace);
+        let result = Self::suspended_traced(path, expected_hash, output, &mut trace, boundaries);
         if let Err(error) = &result {
             trace["error"] = serde_json::json!(format!("{error:#}"));
             if let Some(root) = trace["profile"]["root"].as_str() {
@@ -1665,6 +2015,7 @@ impl Launch {
         expected_hash: Option<&str>,
         output: &Path,
         trace: &mut serde_json::Value,
+        boundaries: bool,
     ) -> Result<Self> {
         let mut profile = Profile::create()?;
         trace["profile"] = serde_json::json!({"sid":profile.sid_text,"root":profile.root,"udf":profile.udf,"staging":profile.staging,"capabilityCount":0,"aclScope":"sessionDirectoriesOnly"});
@@ -1672,6 +2023,11 @@ impl Launch {
         record_trace(output, trace)?;
         let mut source = VerifiedWorker::open(path, expected_hash)?;
         let staged = source.stage(&profile)?;
+        let mut boundary_fixture = if boundaries {
+            Some(BoundaryFixture::create(&profile)?)
+        } else {
+            None
+        };
         trace["sourceBinary"] = serde_json::to_value(&source.identity)?;
         trace["stagedBinary"] = serde_json::to_value(&staged.identity)?;
         trace["stage"] = serde_json::json!("jobCreate");
@@ -1771,6 +2127,11 @@ impl Launch {
         // Any failure after creation kills the still-suspended process through its owned handle.
         let mut assigned_to_job = false;
         let validation = (|| -> Result<_> {
+            if let Some(fixture) = &mut boundary_fixture {
+                fixture.clear_inheritance()?;
+                fixture.observe_suspended_handles(process.0, &handles)?;
+                trace["handleInheritance"] = serde_json::to_value(&fixture.handle_inheritance)?;
+            }
             trace["stage"] = serde_json::json!("assignJobAndInspectToken");
             trace["createdWorker"] =
                 serde_json::json!({"pid":info.dwProcessId,"created":created(process.0)?});
@@ -1839,6 +2200,7 @@ impl Launch {
                 resource_write: Some(parent_resource_write),
                 token,
                 worker,
+                boundary_fixture,
             }),
             job,
             closed: false,
@@ -2397,6 +2759,7 @@ mod tests {
                     capability_count: 0,
                 },
                 worker,
+                boundary_fixture: None,
             }),
             job,
             closed: false,
@@ -2742,6 +3105,59 @@ mod tests {
         assert!(!job.terminated.load(Ordering::Acquire));
     }
     #[test]
+    #[ignore = "explicit bounded native observation diagnostic; does not qualify WebView2 or author Web"]
+    fn real_job_forced_exit_notification_diagnostic() {
+        let mut runs = Vec::new();
+        for method in ["selfExit", "terminateProcess", "terminateJobObject"] {
+            let fixture = NativeFixture::suspended("idle");
+            let job = Job::create().unwrap();
+            fixture.admit(&job);
+            fixture.resume();
+            wait_file(&fixture.root.join("root-ready"));
+            job.reconcile_observation(Instant::now() + Duration::from_secs(2), false)
+                .unwrap();
+            let close_started = Instant::now();
+            match method {
+                "selfExit" => fixture.signal("stop-root"),
+                "terminateProcess" => win(
+                    unsafe { TerminateProcess(fixture.process.0, 0x4753) },
+                    "terminate own diagnostic process",
+                )
+                .unwrap(),
+                "terminateJobObject" => job.terminate().unwrap(),
+                _ => unreachable!(),
+            }
+            let initial_complete = job
+                .wait_physical_tree_exit(Instant::now() + Duration::from_secs(3))
+                .unwrap();
+            let initial = job.observation_evidence().unwrap();
+            let later_complete = job
+                .reconcile_observation(Instant::now() + Duration::from_secs(2), true)
+                .is_ok();
+            let later = job.observation_evidence().unwrap();
+            let packets = job.observation.test_packets.lock().unwrap().clone();
+            let run = serde_json::json!({"method":method,"initialComplete":initial_complete,"laterComplete":later_complete,
+                "elapsedMs":close_started.elapsed().as_millis(),"initial":initial,"later":later,"rawPackets":packets});
+            assert_eq!(job.active().unwrap(), 0);
+            assert_eq!(
+                unsafe { WaitForSingleObject(fixture.process.0, 0) },
+                WAIT_OBJECT_0
+            );
+            assert!(run["later"]["processes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|process| process["newProcessReceipt"] == true
+                    && process["physicalExitSignalled"] == true));
+            runs.push(run);
+        }
+        let evidence = serde_json::json!({"scope":"three sequential owned native fixture processes, self/Process/Job termination; not Web qualification",
+            "packetConstants":{"newProcess":JOB_OBJECT_MSG_NEW_PROCESS,"exitProcess":JOB_OBJECT_MSG_EXIT_PROCESS,
+                "abnormalExitProcess":JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS,"activeZero":JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO},"runs":runs});
+        save_evidence("forced-exit-notification-diagnostic.json", &evidence);
+        println!("{}", serde_json::to_string(&evidence).unwrap());
+    }
+    #[test]
     fn real_job_missing_exit_receipt_is_rejected_even_after_active_zero() {
         let fixture = NativeFixture::suspended("idle");
         let job = Job::create().unwrap();
@@ -2878,6 +3294,61 @@ mod tests {
         assert!(!evidence.breakaway);
         assert!(job.pids().unwrap().is_empty());
         assert!(job.wait_zero(Duration::from_millis(1)).unwrap());
+    }
+    #[test]
+    fn handle_snapshot_and_duplicate_probe_use_real_owned_handles() {
+        let path =
+            std::env::temp_dir().join(format!("hertz-handle-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, BOUNDARY_CANARY).unwrap();
+        let canary = File::open(&path).unwrap();
+        let snapshot = captured_handle_values(unsafe { GetCurrentProcess() }).unwrap();
+        assert!(snapshot.contains(&(canary.as_raw_handle() as usize)));
+        let limited = Handle::new(
+            unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    0,
+                    GetCurrentProcessId(),
+                )
+            },
+            "limited actual test process",
+        )
+        .unwrap();
+        assert_eq!(
+            duplicate_parent_canary(limited.0, canary.as_raw_handle()).unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            duplicate_parent_canary(unsafe { GetCurrentProcess() }, canary.as_raw_handle())
+                .unwrap(),
+            None
+        );
+        drop(canary);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn suspended_boundary_probe_observes_inheritance_without_child_dereference() {
+        let output =
+            std::env::temp_dir().join(format!("hertz-boundary-snapshot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&output).unwrap();
+        let mut launch =
+            Launch::suspended_probe(&std::env::current_exe().unwrap(), None, &output, true)
+                .unwrap();
+        let evidence = launch.boundary_fixture.as_ref().unwrap().verify().unwrap();
+        assert_eq!(evidence["handleInheritance"]["capturedBeforeResume"], true);
+        assert_eq!(
+            evidence["handleInheritance"]["requiredHandlesPresent"],
+            true
+        );
+        assert_eq!(
+            evidence["handleInheritance"]["excludedCanaryHandleAbsent"],
+            true
+        );
+        assert_eq!(evidence["passed"], true);
+        launch.job.terminate().unwrap();
+        launch.close().unwrap();
+        drop(launch);
+        std::fs::remove_dir_all(output).unwrap();
     }
     #[test]
     fn held_binary_denies_replacement_and_wrong_hash() {

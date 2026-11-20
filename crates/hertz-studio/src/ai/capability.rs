@@ -292,6 +292,25 @@ struct RegisteredScene {
     aliases: Vec<String>,
     owns_lyrics: bool,
     params: Vec<RegisteredParam>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    presentation: Option<RegisteredPresentation>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RegisteredPresentation {
+    family: String,
+    dimension: RegisteredDimension,
+    counterpart: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+enum RegisteredDimension {
+    #[serde(rename = "2d")]
+    Planar,
+    #[serde(rename = "3d")]
+    Spatial,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -617,6 +636,9 @@ pub(crate) const CAPABILITIES: &[Capability] = &[
             "scenes[].params[].min",
             "scenes[].params[].max",
             "scenes[].params[].default",
+            "scenes[].presentation.family",
+            "scenes[].presentation.dimension",
+            "scenes[].presentation.counterpart",
             "total",
             "offset",
             "nextOffset",
@@ -1289,6 +1311,23 @@ mod tests {
             &page
         ));
         ensure_allowed_projection(page_capability, &page).unwrap();
+        assert_eq!(
+            page["scenes"][0]["presentation"]["counterpart"],
+            "towers-flat"
+        );
+        assert_eq!(page["scenes"][1]["presentation"]["dimension"], "2d");
+        for invalid in [
+            json!({"family":"spectrum-towers","dimension":"4d","counterpart":"towers"}),
+            json!({"family":"spectrum-towers","dimension":"2d","counterpart":"towers","execute":"code"}),
+            json!(null),
+        ] {
+            let mut changed = page.clone();
+            changed["scenes"][0]["presentation"] = invalid;
+            assert!(!validate_registered_output(
+                page_capability.output_schema,
+                &changed
+            ));
+        }
         let empty_page = crate::ai::contract::page(10_000, 10);
         assert!(validate_registered_output(
             page_capability.output_schema,
@@ -1406,7 +1445,6 @@ mod tests {
             &leaked
         ));
         assert!(ensure_allowed_projection(search_capability, &leaked).is_err());
-
     }
 
     #[test]
@@ -1516,17 +1554,31 @@ mod tests {
                 "{name}"
             );
         }
-
     }
 
     #[test]
     fn registry_matches_the_available_product_form() {
-        assert_eq!(CAPABILITIES.len(), if cfg!(feature = "desktop-host") { 14 } else { 10 });
-        for name in ["wallpaper_catalog_get", "wallpaper_switch_request", "wallpaper_generate_request", "wallpaper_request_get"] {
+        assert_eq!(
+            CAPABILITIES.len(),
+            if cfg!(feature = "desktop-host") {
+                14
+            } else {
+                10
+            }
+        );
+        for name in [
+            "wallpaper_catalog_get",
+            "wallpaper_switch_request",
+            "wallpaper_generate_request",
+            "wallpaper_request_get",
+        ] {
             assert_eq!(find(name).is_some(), cfg!(feature = "desktop-host"));
         }
         for scope in ["wallpaper:catalog_read", "wallpaper:request"] {
-            assert_eq!(super::SCOPES.contains(&scope), cfg!(feature = "desktop-host"));
+            assert_eq!(
+                super::SCOPES.contains(&scope),
+                cfg!(feature = "desktop-host")
+            );
         }
         assert!(CAPABILITIES
             .iter()

@@ -653,6 +653,11 @@ impl App {
                         .expect("entry")
                         .receipt = receipt;
                     if let Some(token) = token {
+                        let mut payload = json!({"confirmationToken":token});
+                        if let Some(pause) = request.payload.get("pauseDynamic") {
+                            payload["pauseDynamic"] = pause.clone();
+                        }
+                        self.prepare_generation_pause(owner, &payload)?;
                         let proxy = self.proxy.clone();
                         let response = request.clone();
                         let external_id = id.clone();
@@ -660,7 +665,7 @@ impl App {
                             self.profile.clone(),
                             owner,
                             "wallpaper.ai.generate.confirm".into(),
-                            json!({"confirmationToken":token}),
+                            payload,
                             move |result, submission_pending| {
                                 let _ = proxy.send_event(UserEvent::WallpaperExternal(Box::new(
                                     Completion::Generated(

@@ -81,6 +81,7 @@ pub(crate) struct VersionRow {
     pub version: i64,
     pub package_hash: String,
     pub state: String,
+    pub locally_authored: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -146,19 +147,36 @@ impl Library {
         &self.pool
     }
 
-    pub(crate) fn trust(&self) -> &Arc<super::community::TrustStore> { &self.trust }
-    pub(crate) fn root(&self) -> &Path { self.path.parent().expect("library path has a root") }
+    pub(crate) fn trust(&self) -> &Arc<super::community::TrustStore> {
+        &self.trust
+    }
+    pub(crate) fn root(&self) -> &Path {
+        self.path.parent().expect("library path has a root")
+    }
 
     /// 安装事务（§7.2：BEGIN IMMEDIATE 插入作品/版本/包）。幂等规则：
     /// 相同 hash 再导入返回既有事实；同 work+version 不同 hash 拒绝；
     /// 来源内相同 workId 复用既有 work_key，不建立第二份作品。
     pub async fn install(&self, work: &InstallWork) -> Result<()> {
         self.trust.security_check(&work.package_hash)?;
-        let release_id=if work.source_id!=LOCAL_SOURCE {
-            let receipt=self.trust.installed_receipt(&work.source_id,&work.package_hash).await?;
-            if receipt.body().work_id!=work.remote_work_id||receipt.body().version!=u64::from(work.version)||receipt.body().bytes!=work.package_bytes{return Err(JobError::new("release_package_mismatch","安装索引与受信回执不一致"));}
+        let release_id = if work.source_id != LOCAL_SOURCE {
+            let receipt = self
+                .trust
+                .installed_receipt(&work.source_id, &work.package_hash)
+                .await?;
+            if receipt.body().work_id != work.remote_work_id
+                || receipt.body().version != u64::from(work.version)
+                || receipt.body().bytes != work.package_bytes
+            {
+                return Err(JobError::new(
+                    "release_package_mismatch",
+                    "安装索引与受信回执不一致",
+                ));
+            }
             Some(receipt.body().release_id.clone())
-        } else {None};
+        } else {
+            None
+        };
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -265,10 +283,11 @@ impl Library {
             }
         }
         super::ai_receipts::AiReceipts::finish_image_install(&mut tx, work, &work_key).await?;
-        if let Some(release)=release_id {
+        if let Some(release) = release_id {
             sqlx::query("UPDATE versions SET release_id=?3 WHERE work_key=?1 AND version=?2 AND (release_id IS NULL OR release_id=?3)").bind(&work_key).bind(work.version as i64).bind(release).execute(&mut *tx).await.map_err(|e|JobError::database(e.to_string()))?;
         }
-        super::community::subscriptions::Subscriptions::finish_install(&mut tx, work, &work_key).await?;
+        super::community::subscriptions::Subscriptions::finish_install(&mut tx, work, &work_key)
+            .await?;
         tx.commit()
             .await
             .map_err(|error| JobError::database(error.to_string()))?;
@@ -450,13 +469,13 @@ impl Library {
     }
 
     pub(crate) async fn versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
-        sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC LIMIT 100")
+        sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state, EXISTS(SELECT 1 FROM authored_versions a WHERE a.version_key=v.version_key) AS locally_authored FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC LIMIT 100")
             .bind(work_key).fetch_all(&*self.pool).await.map_err(|error| JobError::database(error.to_string()))
     }
 
     /// 删除计划必须看到该作品的全部版本，不能受详情页最多 100 条的展示上限影响。
     async fn all_versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
-        sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC")
+        sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state, EXISTS(SELECT 1 FROM authored_versions a WHERE a.version_key=v.version_key) AS locally_authored FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC")
             .bind(work_key)
             .fetch_all(&*self.pool)
             .await

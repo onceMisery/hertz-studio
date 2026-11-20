@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 粒子绸带：三条会翻卷的发光绸带，丝线/经线与布面同步，悬停压出沿线传播的凹槽，
 // 点击把一道光沿绸带甩出去。
@@ -114,6 +116,7 @@ export function createParticleSilk(ctx) {
     uMotion: { value: .6 }, uResponse: { value: .7 }, uSize: { value: 1 }, uPixel: { value: 1 }, uHeight: { value: 720 },
     uColorA: { value: new T.Color(0x5fe3ff) }, uColorB: { value: new T.Color(0xff6fb5) }, uColorC: { value: new T.Color(0xffd28a) } };
 
+  declaredArrayPayload(ctx.scope, POINTS * 7, 'Silk position/UV/ribbon/seed backing');
   const positions = new Float32Array(POINTS * 3), au = new Float32Array(POINTS), av = new Float32Array(POINTS), ribbon = new Float32Array(POINTS), seeds = new Float32Array(POINTS);
   for (let i = 0; i < POINTS; i++) {
     au[i] = seed(i, 1); av[i] = seed(i, 2) * 2 - 1; ribbon[i] = i % 3; seeds[i] = seed(i, 3);
@@ -132,6 +135,7 @@ export function createParticleSilk(ctx) {
     transparent: true, depthWrite: false, blending: T.NormalBlending })));
   points.frustumCulled = false; world.add(points);
 
+  declaredArrayPayload(ctx.scope, 3 * 180 * 2 * 8, 'Silk line numeric scratch and attributes', 4, 1);
   const linePositions = [], lu = [], lv = [], lr = [], lseed = [], la = [];
   function segment(rib, u0, u1, v0, v1, alpha, salt) {
     for (const [u, v] of [[u0, v0], [u1, v1]]) {
@@ -201,3 +205,6 @@ export function createParticleSilk(ctx) {
     stats: () => ({ particles: pointGeometry.drawRange.count, lineVertices: lineGeometry.drawRange.count, drawCalls: 7 })
   });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createParticleSilk.resourcePlan = () => sourcePlan(12).array(POINTS*7).array(3*180*2*8,4,1).stars(900).stars(460).glows(3).sky().shock(6).result();

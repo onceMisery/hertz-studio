@@ -142,6 +142,7 @@ ui_assets! {
     "/stage-shelf.js", JS => const STAGE_SHELF_JS: &str = edition_ui!("stage-shelf.js");
     "/vendor/stage-runtime.js", JS => const STAGE_RUNTIME_JS: &str = edition_ui!("vendor/stage-runtime.js");
     "/vendor/coast-stage.js", JS => const COAST_STAGE_JS: &str = edition_ui!("vendor/coast-stage.js");
+    "/stage-scene-host.js", JS => const STAGE_SCENE_HOST_JS: &str = edition_ui!("stage-scene-host.js");
     "/stage-coast.js", JS => const STAGE_COAST_JS: &str = edition_ui!("stage-coast.js");
     "/vendor/zodiac-stage.js", JS => const ZODIAC_STAGE_JS: &str = edition_ui!("vendor/zodiac-stage.js");
     "/stage-zodiac.js", JS => const STAGE_ZODIAC_JS: &str = edition_ui!("stage-zodiac.js");

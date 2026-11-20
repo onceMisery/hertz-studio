@@ -44,6 +44,29 @@ const result = await build({
       return { contents, loader: 'js', resolveDir: dirname(args.path) };
     });
   } }, { name: 'single-three-version', setup(builder) {
+    builder.onLoad({ filter: /postprocessing[\\/]Pass\.js$/ }, args => {
+      let contents = readFileSync(args.path, 'utf8').replace(/\r\n/g, '\n');
+      const replace = (from, to) => {
+        if (contents.split(from).length !== 2) throw new Error('Three Pass admission source changed');
+        contents = contents.replace(from, to);
+      };
+      // Fullscreen geometry belongs to a pass, is created only on its first
+      // render and uses that renderer's page port. No allocation at evaluation.
+      replace('const _geometry = new FullscreenTriangleGeometry();', '');
+      replace('this._mesh = new Mesh( _geometry, material );',
+        'this._mesh = new Mesh( new BufferGeometry(), material );\n\t\tthis._hertzReady = false;\n\t\tthis._hertzCpu = null;');
+      replace('this._mesh.geometry.dispose();',
+        'this._mesh.geometry.dispose();\n\t\tthis._hertzCpu?.release({ apiReleased: true, allocationEnded: true });\n\t\tthis._hertzCpu = null;\n\t\tthis._hertzReady = false;');
+      replace('renderer.render( this._mesh, _camera );', `if (!this._hertzReady) {
+          this._hertzCpu = renderer.hertzBufferResources?.require({ ownedCpuBytes: 15 * 12 },
+            'Three FullScreenQuad original Float32 position9 uv6 and JS source arrays', 0);
+          this._mesh.geometry = new FullscreenTriangleGeometry();
+          this._hertzCpu?.commit({ ownedCpuBytes: 15 * 4 });
+          this._hertzReady = true;
+        }
+        renderer.render( this._mesh, _camera );`);
+      return { contents, loader: 'js', resolveDir: dirname(args.path) };
+    });
     builder.onResolve({ filter: /^three(?:\/|$)/ }, args => ({ path: args.path === 'three' ? resolve(here, 'node_modules/three/build/three.module.js') : stageRequire.resolve(args.path) }));
     builder.onLoad({ filter: /three[\\/]build[\\/]three\.module\.js$/ }, args => ({
       contents: withBufferAdmission(withProgramAdmission(readFileSync(args.path, 'utf8'))), loader: 'js', resolveDir: dirname(args.path)

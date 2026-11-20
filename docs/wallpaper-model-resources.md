@@ -1,5 +1,7 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-20 当前增量：在后文 r86 已有模型播放及双 clip 混合上，接通 transform、opacity、animationWeight 和 animationSpeed 的时间线/绑定、绝对求值与固定采样工作区；每种 program 的成本独立相加，原模型选择和格式限制保持。当前组合浏览器 76 组、原生成本 49 项通过，细节见[离线实施记录](offline-design-completion.md)。下方早期“运行门关闭”只描述相应前置切片，不覆盖随后已完成的原包准备、成本和同 renderer 接线；设备矩阵与长稳资格仍独立。
+
 2026-11-12，原 `BudgetRequest` 的 grant/check_requests 与 `SessionPlan::new`
 复用同一身份规则：session 非空且最多 128 UTF-8 bytes，generation 非零，task id
 沿原 local id 规则最多 64 bytes。session 仍允许 Unicode、冒号与大写，不套用

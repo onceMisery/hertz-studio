@@ -1,3 +1,5 @@
+import { declaredArrayPayload } from '../source-resources.js';
+import { declaredTexturePayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // Colour, light and atmosphere helpers for the phoenix performance. This file
 // owns no artwork, geometry, UV, skinning or egg shape: everything here is a
@@ -43,6 +45,8 @@ function spaceNoise(x, y, period) {
 }
 
 export function createSpaceNoise(ctx) {
+  declaredArrayPayload(ctx.scope,256*256*4,'Phoenix procedural raster backing',1);
+  declaredTexturePayload(ctx.scope,256,256,'Phoenix procedural texture levels',true);
   const T = ctx.THREE, size = 256, data = new Uint8Array(size * size * 4);
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
     const u = (x + .5) / size, v = (y + .5) / size;

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { geometryPlan, finishGeometry, numericArray } from './resource-tools.js';
 import { SKY, SKY_GLSL, NOISE_CHUNK } from './sky.js';
 
 export const SEA_LEVEL = -1.6;
@@ -130,12 +131,12 @@ void main() {
 }
 `;
 
-export function createOcean() {
+export function createOcean(scope) {
   const uniforms = {
     ...SKY,
     uOffset: { value: 0 },
     uAmp: { value: 1 },
-    uPhase: { value: new Float32Array(WAVES.length) },
+    uPhase: { value: numericArray(scope, Float32Array, WAVES.length, "Coast wave phase uniforms") },
     uDeep: { value: new THREE.Color('#0b3a5a') },
     uShallow: { value: new THREE.Color('#1fa3a8') },
     uFogDensity: { value: 0.0042 },
@@ -152,6 +153,9 @@ export function createOcean() {
   for (let x = -260; x <= 420; x += x > -60 && x < 120 ? 1.2 : 4) xs.push(x);
   const zs = [];
   for (let z = -8; z >= -520; z -= z > -70 ? 0.9 : z > -160 ? 2.5 : 8) zs.push(z);
+  const vertices = xs.length * zs.length, indices = (xs.length - 1) * (zs.length - 1) * 6;
+  const bytes = vertices * 3 * 4 + indices * (vertices > 65535 ? 4 : 2);
+  const plan = geometryPlan(scope, bytes + (vertices * 3 + indices) * 8, bytes, 'Coast ocean source grid');
   const pos = [];
   const idx = [];
   for (let j = 0; j < zs.length; j++) for (let i = 0; i < xs.length; i++) pos.push(xs[i], 0, zs[j]);
@@ -165,7 +169,7 @@ export function createOcean() {
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setIndex(idx);
+  geo.setIndex(idx); finishGeometry(scope, plan, geo, bytes);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = SEA_LEVEL;
   mesh.frustumCulled = false;

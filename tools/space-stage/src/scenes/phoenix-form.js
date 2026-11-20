@@ -1,3 +1,5 @@
+import { declaredArrayPayload, sourcePlan } from '../source-resources.js';
+import { declaredTexturePayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // Reference artwork, distant flock plumage and the shared egg surface.
 import { own, seed } from './factories.js';
@@ -6,14 +8,27 @@ import { phoenixArt } from './assets/phoenix-reference-data.js';
 
 const TAU = Math.PI * 2;
 const WIDTH = 12.5, HEIGHT = WIDTH * phoenixArt.height / phoenixArt.width;
-let artworkPixels;
-
-function pixels() {
-  if (artworkPixels) return artworkPixels;
+const scopedArtwork = new WeakMap();
+export function phoenixFormResourcePlan(flockCount, shardCount) {
+  const triangles = 112 * 120 * 2;
+  return sourcePlan(0)
+    .array(phoenixArt.width * phoenixArt.height * 6 + phoenixArt.planes.length * 3, 1)
+    .texture(phoenixArt.width, phoenixArt.height)
+    .array(triangles * 12 * (6 + 12) + triangles * 18 + 113 * 121 * 5, 4, 1)
+    .array(Math.ceil(phoenixArt.width / 8) * Math.ceil(phoenixArt.height / 8) * 2 + flockCount * 3, 4, 1)
+    .array(13 * 15 * 9 + 12 * 14 * 6, 4, 1)
+    .array(49 * 65 * 8 + 48 * 64 * 6, 4, 1)
+    .array(384 * 192 * 4, 1).texture(384, 192, false)
+    .array(192 * 96 * 2 + shardCount * 3, 4, 1).result();
+}
+function pixels(ctx) {
+  if(scopedArtwork.has(ctx.scope))return scopedArtwork.get(ctx.scope);
+  const count = phoenixArt.width * phoenixArt.height;
+  declaredArrayPayload(ctx.scope,count*6+phoenixArt.planes.length*3,'Phoenix fixed compressed, planar and RGBA source coexistence',1);
   const compressed = Uint8Array.from(atob(phoenixArt.planes), char => char.charCodeAt(0));
-  const planes = unzlibSync(compressed), count = phoenixArt.width * phoenixArt.height;
+  const planes = unzlibSync(compressed,{out:new Uint8Array(count*2)});
   if (planes.length !== count * 2) throw new Error('Invalid phoenix artwork');
-  artworkPixels = new Uint8Array(count * 4);
+  const artworkPixels = new Uint8Array(count * 4);
   for (let i = 0; i < count; i++) {
     const color = planes[i] * 3, dest = i * 4;
     artworkPixels[dest] = phoenixArt.palette[color];
@@ -21,12 +36,14 @@ function pixels() {
     artworkPixels[dest + 2] = phoenixArt.palette[color + 2];
     artworkPixels[dest + 3] = planes[count + i];
   }
+  scopedArtwork.set(ctx.scope,artworkPixels);ctx.scope.defer(()=>scopedArtwork.delete(ctx.scope));
   return artworkPixels;
 }
 
 export function createPhoenixArtwork(ctx) {
   const T = ctx.THREE;
-  const texture = own(ctx, new T.DataTexture(pixels(), phoenixArt.width, phoenixArt.height, T.RGBAFormat));
+  declaredTexturePayload(ctx.scope,phoenixArt.width,phoenixArt.height,'Phoenix artwork texture mip levels');
+  const texture = own(ctx, new T.DataTexture(pixels(ctx), phoenixArt.width, phoenixArt.height, T.RGBAFormat));
   texture.name = 'phoenix-reference-artwork';
   texture.colorSpace = T.SRGBColorSpace;
   texture.magFilter = T.LinearFilter; texture.minFilter = T.LinearMipmapLinearFilter;
@@ -47,8 +64,13 @@ function profile(x, y) {
 // Keep the approved painting's complete silhouette and UV layout. Depth is a
 // shallow relief of that artwork, not a substitute anatomical character.
 export function buildPhoenixReference(ctx, columns = 112, rows = 120) {
+  // Each source grid triangle clips to at most four vertices, with two faces
+  // and four rim vertices. Account numeric vectors, keys/map payload and indices.
+  const triangles=columns*rows*2,maxVertices=triangles*12,maxIndices=triangles*18;
+  declaredArrayPayload(ctx.scope,maxVertices*(6+12)+maxIndices+(columns+1)*(rows+1)*5,
+    'Phoenix clipped reference mesh numeric scratch and typed/map payload',4,1);
   const T = ctx.THREE, positions = [], uvs = [], surfaces = [], indices = [];
-  const rgba = pixels(), width = phoenixArt.width, height = phoenixArt.height;
+  const rgba = pixels(ctx), width = phoenixArt.width, height = phoenixArt.height;
   const alpha = (u, v) => rgba[(Math.min(height - 1, Math.round(v * (height - 1))) * width + Math.min(width - 1, Math.round(u * (width - 1)))) * 4 + 3] / 255;
   const grid = [], vertexIndices = new Map();
   for (let row = 0; row <= rows; row++) for (let col = 0; col <= columns; col++) {
@@ -100,8 +122,10 @@ export function buildPhoenixReference(ctx, columns = 112, rows = 120) {
   return geometry;
 }
 
-export function phoenixDeparturePoints(count) {
-  const rgba = pixels(), candidates = [], width = phoenixArt.width, height = phoenixArt.height;
+export function phoenixDeparturePoints(count, ctx) {
+  declaredArrayPayload(ctx.scope,Math.ceil(phoenixArt.width/8)*Math.ceil(phoenixArt.height/8)*2+count*3,
+    'Phoenix departure point numeric candidates and output',4,1);
+  const rgba = pixels(ctx), candidates = [], width = phoenixArt.width, height = phoenixArt.height;
   for (let y = 8; y < height; y += 8) for (let x = 8; x < width; x += 8) {
     if (rgba[(y * width + x) * 4 + 3] > 200) candidates.push([x / width, y / height]);
   }
@@ -126,6 +150,8 @@ export function phoenixDeparturePoints(count) {
 
 // Distant fledglings retain the detailed painted silhouette at low cost.
 export function buildPhoenixGeometry(ctx, columns = 12, rows = 14) {
+  declaredArrayPayload(ctx.scope,(columns+1)*(rows+1)*9+columns*rows*6,
+    'Phoenix flock mesh numeric scratch and typed arrays',4,1);
   const T = ctx.THREE, positions = [], uvs = [], sides = [], parts = [], indices = [];
   for (let row = 0; row <= rows; row++) for (let col = 0; col <= columns; col++) {
     const u = col / columns, v = row / rows, x = (u - .5) * WIDTH, y = (.55 - v) * HEIGHT;
@@ -229,6 +255,7 @@ float phoenixEggRadius(float height){
 }`;
 
 export function buildEggGeometry(ctx) {
+  declaredArrayPayload(ctx.scope,49*65*8+48*64*6,'Phoenix egg numeric scratch, normal and typed arrays',4,1);
   const T = ctx.THREE, rings = 48, radial = 64, positions = [], uvs = [], indices = [];
   for (let i = 0; i <= rings; i++) {
     const v = i / rings, normalizedY = -Math.cos(v * Math.PI), y = normalizedY * 2.4;
@@ -295,6 +322,8 @@ const fbm3 = (x, y, z) => noise3(x, y, z) * .58
 // R = seam gap (x4 for sub-texel precision near the glowing cracks), G = grain,
 // B = deposit. U wraps with the shell; V clamps at the poles.
 export function createShellField(ctx) {
+  declaredArrayPayload(ctx.scope,384*192*4,'Phoenix procedural raster backing',1);
+  declaredTexturePayload(ctx.scope,384,192,'Phoenix procedural texture levels',false);
   const T = ctx.THREE, width = 384, height = 192, data = new Uint8Array(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const u = (x + .5) / width, v = (y + .5) / height;
@@ -316,7 +345,8 @@ export function createShellField(ctx) {
 
 // Even stride along the seam network keeps shards spread over the whole shell
 // at every draw count; the 1.16 factor matches the flock arrival surface.
-export function phoenixCrackPoints(count) {
+export function phoenixCrackPoints(count, ctx) {
+  declaredArrayPayload(ctx.scope,192*96*2+count*3,'Phoenix fissure numeric candidates and output',4,1);
   const candidates = [], cols = 192, rows = 96;
   for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
     const u = (x + .5) / cols, v = (y + .5) / rows;

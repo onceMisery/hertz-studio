@@ -96,6 +96,26 @@ async fn old(root: &Path, count: usize) -> SqlitePool {
     pool
 }
 
+#[tokio::test]
+async fn provenance_migration_preserves_existing_drafts_and_refuses_old_app() {
+    let root = tempfileish::temp_dir("work-provenance-schema");
+    let pool = old(root.path(), 12).await;
+    let document =
+        r#"{"title":"Original saved work","sceneId":"coast","stateVersion":1,"params":{}}"#;
+    sqlx::query("INSERT INTO drafts(draft_id,work_key,work_id,revision,document_json,committed_revision,committed_document_json,created_at,updated_at) VALUES('fixture-draft','fixture','fixture',3,?,2,?,1,2)")
+        .bind(document).bind(document).execute(&pool).await.unwrap();
+    MIGRATOR.run(&pool).await.unwrap();
+    let saved: (String, String, i64, i64) = sqlx::query_as("SELECT document_json,committed_document_json,revision,committed_revision FROM drafts WHERE draft_id='fixture-draft'").fetch_one(&pool).await.unwrap();
+    assert_eq!(saved, (document.into(), document.into(), 3, 2));
+    let mut old_app = sqlx::migrate!("migrations/wallpaper");
+    old_app.migrations = Cow::Owned(old_app.iter().take(12).cloned().collect());
+    assert!(matches!(
+        old_app.run(&pool).await,
+        Err(sqlx::migrate::MigrateError::VersionMissing(13))
+    ));
+    pool.close().await;
+}
+
 fn resources(root: &Path) {
     for directory in [
         "packages/original/empty",

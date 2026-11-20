@@ -1,14 +1,28 @@
+import { declaredTexturePayload } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload, sourcePlan } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 凤凰涅槃: a centered reference phoenix slowly releases fledglings into the
 // shell, and release the same phoenix rig as the egg cracks and its wings unfold.
 import { basicInstance, own, qualityDensity, root, seed } from './factories.js';
 import { createParticlePointer, particleNoiseShader } from './particle-pointer.js';
 import { approach, createGlow, createShockPool, createStarfield, faceCamera } from './scene-field.js';
-import { createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry, createShellField, phoenixCrackPoints } from './phoenix-form.js';
+import { createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry, createShellField, phoenixCrackPoints, phoenixFormResourcePlan } from './phoenix-form.js';
 import { phoenixAtmosphereVertex, phoenixAtmosphereFragment, createPhoenixStarTravel, createPhoenixSanctum } from './phoenix-atmosphere.js';
 import { phoenixColor, createSpaceNoise } from './phoenix-color.js';
 
 const PHOENIXES = 16, DUST = 15000, TRAILS = 760, SHARDS = 120;
+
+createPhoenixVortex.resourcePlan = () => sourcePlan(40).add(phoenixFormResourcePlan(PHOENIXES, SHARDS))
+  .array(2 * 256 * 256 * 4, 1).texture(256, 256).texture(256, 256)
+  .array(PHOENIXES * (10 + 16 * 2) + SHARDS * (3 + 1 + 19) + 12 * 10, 4, 1)
+  .geometry('TorusGeometry', [2.28, .045, 8, 160]).geometry('TorusGeometry', [2.68, .03, 8, 160])
+  .geometry('CylinderGeometry', [2.95, 2.3, 5.9, 96, 1, true]).geometry('CylinderGeometry', [2.12, 1.72, 6.6, 96, 1, true])
+  .geometry('PlaneGeometry', [9.4, 9.4]).geometry('PlaneGeometry', [14, 14]).geometry('PlaneGeometry', [9, 9])
+  .geometry('RingGeometry', [.86, .95, 64]).geometry('TetrahedronGeometry', [.13, 0])
+  .array(DUST * 8, 4, 1).array(TRAILS * 2 * 8, 4, 1)
+  .geometry('PlaneGeometry', [26, 26]).geometry('PlaneGeometry', [2, 2]).geometry('PlaneGeometry', [56, 56])
+  .array(3 * 161 * 2 * 3 + 3 * 160 * 6, 4, 1).array(480 * 14).array(1000 * 3 * 8, 4, 1)
+  .glows(5).stars(1800).shock(5).result();
 const NEST = [0, .9, .2];
 const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
@@ -482,6 +496,8 @@ void main(){
 // 3-octave field. Three texture samples replace ~30 noise evaluations per
 // pixel, and baking avoids the facets a vertex-interpolated field would show.
 function createVeilNoise(ctx) {
+  declaredArrayPayload(ctx.scope,256*256*4,'Phoenix procedural raster backing',1);
+  declaredTexturePayload(ctx.scope,256,256,'Phoenix procedural texture levels',true);
   const T = ctx.THREE, size = 256, data = new Uint8Array(size * size * 4);
   const hash = (x, y, period) => {
     const wx = ((x % period) + period) % period, wy = ((y % period) + period) % period;
@@ -541,8 +557,9 @@ export function createPhoenixVortex(ctx) {
   heroFire.name = 'phoenix-reference-fire'; heroFire.frustumCulled = false; heroFire.renderOrder = 4; hero.add(heroFire);
 
   // Flock ------------------------------------------------------------------
+  declaredArrayPayload(ctx.scope,PHOENIXES*(10+16*2)+SHARDS*(3+1+19)+12*10,'Phoenix flock/shard instance and particle arrays',4,1);
   const swarmGeometry = buildPhoenixGeometry(ctx, 12, 14), flights = new Float32Array(PHOENIXES * 4);
-  const homes = phoenixDeparturePoints(PHOENIXES);
+  const homes = phoenixDeparturePoints(PHOENIXES, ctx);
   const perches = new Float32Array(PHOENIXES * 3);
   const spread = [[-7, 4], [7, 4], [-3, -4], [3, -4], [-7, 0], [7, 0], [-4, 1.5], [4, 1.5],
     [-4, -1.8], [4, -1.8], [0, 4.7], [-4.5, 4], [4.5, 4], [0, -4.5], [-1.8, 1], [1.8, 1]];
@@ -599,31 +616,31 @@ export function createPhoenixVortex(ctx) {
   const eggRingMaterial = own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
     fragmentShader: fireRingFragment, transparent: true, depthWrite: false, depthTest: true, blending: T.AdditiveBlending, side: T.DoubleSide }));
-  const fireRingA = new T.Mesh(own(ctx, new T.TorusGeometry(2.28, .045, 8, 160)), eggRingMaterial);
-  const fireRingB = new T.Mesh(own(ctx, new T.TorusGeometry(2.68, .03, 8, 160)), eggRingMaterial);
+  const fireRingA = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'TorusGeometry', [2.28, .045, 8, 160])), eggRingMaterial);
+  const fireRingB = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'TorusGeometry', [2.68, .03, 8, 160])), eggRingMaterial);
   for (const ring of [fireRingA, fireRingB]) { ring.name = 'phoenix-egg-ring'; ring.position.set(NEST[0], NEST[1] - 2.85, NEST[2]); ring.frustumCulled = false; ring.renderOrder = 4; ring.visible = false; world.add(ring); }
   const vortexMaterial = own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
     fragmentShader: vortexFragment, transparent: true, depthWrite: false, depthTest: true, blending: T.AdditiveBlending, side: T.DoubleSide }));
-  const vortexA = new T.Mesh(own(ctx, new T.CylinderGeometry(2.95, 2.3, 5.9, 96, 1, true)), vortexMaterial);
-  const vortexB = new T.Mesh(own(ctx, new T.CylinderGeometry(2.12, 1.72, 6.6, 96, 1, true)), vortexMaterial);
+  const vortexA = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'CylinderGeometry', [2.95, 2.3, 5.9, 96, 1, true])), vortexMaterial);
+  const vortexB = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'CylinderGeometry', [2.12, 1.72, 6.6, 96, 1, true])), vortexMaterial);
   for (const [mesh, dir] of [[vortexA, 1], [vortexB, -1]]) {
     mesh.name = 'phoenix-fire-vortex'; mesh.userData.dir = dir;
     mesh.position.set(NEST[0], NEST[1] - .3, NEST[2] - 1.0); mesh.frustumCulled = false; mesh.renderOrder = 4; mesh.visible = false; world.add(mesh);
   }
 
-  const eclipse = new T.Mesh(own(ctx, new T.PlaneGeometry(9.4, 9.4)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const eclipse = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [9.4, 9.4])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
     fragmentShader: eclipseFragment, transparent: true, depthWrite: false, depthTest: false })));
   eclipse.name = 'phoenix-ring'; eclipse.position.set(NEST[0], 2.15, NEST[2] - 1.9); eclipse.renderOrder = -5; eclipse.frustumCulled = false; world.add(eclipse);
 
   const runeGroup = new T.Group(); runeGroup.position.set(NEST[0], 1.55, NEST[2] - 2.3); world.add(runeGroup);
-  const runePlane = new T.Mesh(own(ctx, new T.PlaneGeometry(14, 14)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const runePlane = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [14, 14])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
     fragmentShader: runesFragment, transparent: true, depthWrite: false, depthTest: false, blending: T.AdditiveBlending })));
   runePlane.name = 'phoenix-runes'; runePlane.renderOrder = -4; runePlane.frustumCulled = false; runeGroup.add(runePlane);
 
-  const ritual = new T.Mesh(own(ctx, new T.PlaneGeometry(9, 9)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const ritual = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [9, 9])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
     fragmentShader: ritualFragment, transparent: true, depthWrite: false, depthTest: false, blending: T.AdditiveBlending })));
   ritual.name = 'phoenix-ritual'; ritual.position.set(...NEST); ritual.renderOrder = 6; ritual.frustumCulled = false; world.add(ritual);
@@ -638,13 +655,13 @@ export function createPhoenixVortex(ctx) {
   const cursor = createGlow(ctx, world, { color: 0xffb06a, opacity: 0, size: .8 });
   const cursorRingGroup = new T.Group(); world.add(cursorRingGroup);
   const cursorRingMaterial = own(ctx, new T.MeshBasicMaterial({ color: 0xffa050, transparent: true, opacity: 0, depthWrite: false, depthTest: false, blending: T.AdditiveBlending, side: T.DoubleSide }));
-  const cursorRing = new T.Mesh(own(ctx, new T.RingGeometry(.86, .95, 64)), cursorRingMaterial);
+  const cursorRing = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'RingGeometry', [.86, .95, 64])), cursorRingMaterial);
   cursorRing.renderOrder = 9; cursorRingGroup.add(cursorRing);
   const shock = createShockPool(ctx, world, { count: 5, duration: 1.05, opacity: .95 }); own(ctx, shock.mesh);
 
   // Shell shards -----------------------------------------------------------
-  const shardGeometry = own(ctx, new T.TetrahedronGeometry(.13, 0));
-  const shardDirs = phoenixCrackPoints(SHARDS), shardSeeds = new Float32Array(SHARDS);
+  const shardGeometry = own(ctx, constructedGeometry(T, ctx.scope, 'TetrahedronGeometry', [.13, 0]));
+  const shardDirs = phoenixCrackPoints(SHARDS, ctx), shardSeeds = new Float32Array(SHARDS);
   for (let i = 0; i < SHARDS; i++) shardSeeds[i] = seed(i, 23);
   shardGeometry.setAttribute('aDir', new T.InstancedBufferAttribute(shardDirs, 3));
   shardGeometry.setAttribute('aShard', new T.InstancedBufferAttribute(shardSeeds, 1));
@@ -656,6 +673,7 @@ export function createPhoenixVortex(ctx) {
   shards.instanceMatrix.needsUpdate = true;
 
   const dustGeometry = (count, trails_) => {
+    declaredArrayPayload(ctx.scope,count*(trails_?2:1)*8,'Phoenix dust scratch and typed arrays',4,1);
     const position = [], data = [], ends = [];
     for (let i = 0; i < count; i++) for (let end = 0; end < (trails_ ? 2 : 1); end++) {
       position.push((seed(i, 8) - .5) * 34, (seed(i, 9) - .5) * 21, -seed(i, 10) * 28);
@@ -672,11 +690,11 @@ export function createPhoenixVortex(ctx) {
   const dust = new T.Points(dustGeometry(DUST), dustMaterial(false)); dust.frustumCulled = false; dust.renderOrder = 1; world.add(dust);
   const trails = new T.LineSegments(dustGeometry(TRAILS), dustMaterial(true)); trails.frustumCulled = false; trails.renderOrder = 1; world.add(trails);
 
-  const veil = new T.Mesh(own(ctx, new T.PlaneGeometry(26, 26)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const veil = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [26, 26])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}', fragmentShader: veilFragment,
     transparent: true, depthWrite: false, blending: T.AdditiveBlending, side: T.DoubleSide })));
   veil.position.set(0, .9, -4.2); veil.renderOrder = -6; veil.frustumCulled = false; world.add(veil);
-  const atmosphere = new T.Mesh(own(ctx, new T.PlaneGeometry(2, 2)), own(ctx, new T.ShaderMaterial({ uniforms,
+  const atmosphere = new T.Mesh(own(ctx, constructedGeometry(T, ctx.scope, 'PlaneGeometry', [2, 2])), own(ctx, new T.ShaderMaterial({ uniforms,
     vertexShader: phoenixAtmosphereVertex, fragmentShader: phoenixAtmosphereFragment, depthTest: false, depthWrite: false })));
   atmosphere.name = 'phoenix-deep-space'; atmosphere.renderOrder = -20; atmosphere.frustumCulled = false; world.add(atmosphere);
   const stars = createStarfield(ctx, world, { count: 1800, near: 30, far: 72, palette: [0xd9e9ff, 0x8bb7ec, 0xffdab0], opacity: .65, size: [.55, 1.5] });

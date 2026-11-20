@@ -28,6 +28,7 @@ async function main(){
     });
     const track=await fixture.seed();await page.goto(uiUrl(fixture.base));
     await page.waitForFunction(()=>window.CreativeTemplates && window.Workshop);
+    await page.waitForFunction(()=>window.HertzStartup && HertzStartup.state.appReady && HertzStartup.state.dismissed);
     await page.route('**/v1/ai/**',route=>{
       const request=route.request();
       if(request.method()==='POST'&&new URL(request.url()).pathname==='/v1/ai/jobs')modelDispatches++;
@@ -108,15 +109,15 @@ async function main(){
     // candidate or replace the committed preset.
     const original=await page.evaluate(()=>CreativeStage.preset());
     await page.evaluate(()=>{
-      window.realTemplatePrepare=CreativeTemplates.prepare;
-      CreativeTemplates.prepare=id=>new Promise((resolve,reject)=>{
+      window.realTemplatePrepare=CreativeTemplates.prepareLease;
+      CreativeTemplates.prepareLease=id=>new Promise((resolve,reject)=>{
         window.finishTemplate=()=>realTemplatePrepare(id).then(resolve,reject);
       });
     });
     await page.locator('[data-template="quiet-orb"]').click();
     await page.waitForFunction(()=>typeof window.finishTemplate==='function');
     await page.evaluate(()=>Workshop.close());
-    await page.evaluate(async()=>{await finishTemplate();CreativeTemplates.prepare=realTemplatePrepare;});
+    await page.evaluate(async()=>{await finishTemplate();CreativeTemplates.prepareLease=realTemplatePrepare;});
     assert.equal(await page.evaluate(()=>CreativeStage.preview()),null);
     assert.deepEqual(await page.evaluate(()=>CreativeStage.preset()),original);
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('scene');});
@@ -129,7 +130,8 @@ async function main(){
       await page.waitForTimeout(550);
       assert.deepEqual(await page.evaluate(()=>CreativeStage.preset()),before.preset);
       assert.deepEqual(await page.evaluate(()=>CreativeStage.library()),before.library);
-      assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('vmusic.creative.preset'))),before.preset);
+      await page.evaluate(()=>CreativeStage.flushPersistence());
+      assert.deepEqual((await fixture.api('/v1/stage/presets')).current,before.preset);
       assert.equal(await page.evaluate(()=>CreativeStage.scene()),template.scene);
       await page.getByRole('button',{name:'取消预览',exact:true}).click();
       assert.equal(await page.evaluate(()=>CreativeStage.scene()),before.preset.scene);
@@ -174,7 +176,11 @@ async function main(){
     await page.evaluate(()=>{CreativeStageContract.schemaHash=originalSchemaHash;Workshop.render();});
     await page.getByRole('button',{name:'存进工坊',exact:true}).click();
     const saved=await page.evaluate(()=>CreativeStage.library()[0]);assert.equal(saved.name,'墨线地形');
-    await page.reload();await page.waitForFunction(()=>window.CreativeTemplates && CreativeStage.preset().name==='墨线地形');
+    await page.evaluate(()=>CreativeStage.flushPersistence());
+    await page.reload();
+    await page.waitForFunction(()=>window.HertzStartup && HertzStartup.state.appReady && HertzStartup.state.dismissed);
+    await page.evaluate(()=>CreativeStage.hydrated());
+    await page.waitForFunction(()=>window.CreativeTemplates && CreativeStage.preset()?.name==='墨线地形');
     assert.equal(await page.evaluate(()=>CreativeStage.preview()),null);
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('presets');});
     await page.getByRole('button',{name:'载入并应用',exact:true}).first().click();
@@ -184,6 +190,8 @@ async function main(){
     await page.screenshot({path:path.join(output,'catalog-390.png')});
     await fixture.api('/v1/tracks/'+encodeURIComponent(track.id)+'/lyrics','PUT',{content:'[00:00.00]第一句歌词保持清晰\n[00:04.00]第二句歌词不被卡片遮住'});
     await page.reload();await page.waitForFunction(()=>window.CreativeTemplates&&window.Workshop);
+    await page.waitForFunction(()=>window.HertzStartup && HertzStartup.state.appReady && HertzStartup.state.dismissed);
+    await page.evaluate(()=>CreativeStage.hydrated());
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('scene');});
     await page.waitForFunction(()=>Stage.lyrics()?.lines?.length===2);
     await page.evaluate(()=>Workshop.close());

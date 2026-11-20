@@ -32,6 +32,9 @@ import {
   LINE_CORE_WIDTH, LINE_HALO_WIDTH, EDGE_CORE_WIDTH, EDGE_HALO_WIDTH,
 } from './zodiac.js';
 import { createWorld } from './world.js';
+import { createScope } from '../../space-stage/src/scope.js';
+import { createRenderContext } from '../../space-stage/src/render-context.js';
+export { resourcePlan } from './world.js';
 
 export const qualityProfiles = Object.freeze({
   low: Object.freeze({ prCap: 1.0, budget: 1900000 }),
@@ -75,12 +78,7 @@ const PITCH_LIMIT = 0.75;
 const CAMERA_DRIFT = 0.035;  // 机位极慢漂移（rad/s），与造型微摆错开速度产生视差
 
 export function probe() {
-  try {
-    const canvas = document.createElement('canvas');
-    return !!(canvas.getContext && canvas.getContext('webgl2'));
-  } catch (_) {
-    return false;
-  }
+  return typeof WebGL2RenderingContext !== 'undefined';
 }
 
 let st = null;
@@ -114,15 +112,17 @@ function createStage(canvas, opts = {}, context = null) {
     reduced: !!opts.reduced, meteors: clamp(Number(opts.meteors ?? 1), 0, 1.5),
     palette: opts.palette || {},
   };
-  const world = createWorld(THREE, scene, { quality: context ? 'high' : quality, scope: context && context.scope,
+  const world = createWorld(THREE, scene, { quality: context && !context.standalone ? 'high' : quality, scope: context && context.scope,
     meteors: prefs.meteors, onEvent: opts.onEvent });
   if (context) context.scope.defer(() => world.dispose());
   world.setPalette(prefs.palette);
+  const audioTicket = context?.scope.reserve({ ownedCpuBytes: BIN_COUNT * 2 * 4 }, 'Zodiac original two 24-bin Float32 audio arrays');
   const audio = {
     raw: null, levels: null, onset: false,
     bins: new Float32Array(BIN_COUNT), target: new Float32Array(BIN_COUNT),
     bass: 0, onsetLevel: 0,
   };
+  audioTicket?.commit();
 
   // 相机在造型球外轨道：drift 极慢漂移 + 拖拽 yaw/pitch + 滚轮缩放，双击复位。
   // 「装下设计框」的距离由舞台宽高比算出（见 fitDistance），用户缩放是在它之上
@@ -271,12 +271,22 @@ function createStage(canvas, opts = {}, context = null) {
 
 export function mount(canvas, opts = {}) {
   if (st) unmount();
-  st = createStage(canvas, opts);
-  if (!st) return false;
-  st.bindInput();
-  st.external = !!opts.external;
-  if (!st.external) st.raf = requestAnimationFrame(tick);
-  return true;
+  if (opts.admissionRequired && !opts.resources) throw new Error('resource-policy-required');
+  let context, scope;
+  try {
+    if (opts.resources) {
+      scope = createScope({ resources: opts.resources, generation: opts.generation || 0 });
+      context = createRenderContext(THREE, canvas, { resources: opts.resources, antialias: true,
+        onContextLost() { unmount(); opts.onContextLost?.(); } });
+      st = createStage(canvas, opts, { renderer: context.renderer, scope, scene: new THREE.Scene(),
+        camera: new THREE.PerspectiveCamera(), standalone: true });
+      st.resources = context; st.scope = scope;
+    } else st = createStage(canvas, opts);
+    if (!st) return false;
+    st.bindInput(); st.external = !!opts.external;
+    if (!st.external) st.raf = requestAnimationFrame(tick);
+    return true;
+  } catch (error) { scope?.dispose(); context?.dispose(); st = null; throw error; }
 }
 
 // 预热：把 12 座的全部 attribute 缓冲与着色器程序都上传一次（一次性 12 帧），
@@ -297,8 +307,11 @@ export function unmount() {
   if (st.raf) cancelAnimationFrame(st.raf);
   st.raf = 0;
   try { st.unbindInput(); } catch (_) { /* 尽力释放 */ }
-  try { st.world.dispose(); } catch (_) { /* 尽力释放 */ }
-  try { st.renderer.dispose(); st.renderer.forceContextLoss(); } catch (_) { /* 尽力释放 */ }
+  if (st.scope) { st.scope.dispose(); st.resources.dispose(); }
+  else {
+    try { st.world.dispose(); } catch (_) { /* 尽力释放 */ }
+    try { st.renderer.dispose(); st.renderer.forceContextLoss(); } catch (_) { /* 尽力释放 */ }
+  }
   st = null;
 }
 
@@ -320,8 +333,9 @@ export function resize(width, height) {
   st.width = width;
   st.height = height;
   st.pr = computeDpr(width, height, st.quality);
-  st.renderer.setPixelRatio(st.pr);
-  st.renderer.setSize(width, height, false);
+  if (st.resources) {
+    if (!st.resources.resize(width, height, st.pr)) throw new Error(st.resources.admissionFailure);
+  } else { st.renderer.setPixelRatio(st.pr); st.renderer.setSize(width, height, false); }
   st.camera.aspect = width / height;
   st.camera.updateProjectionMatrix();
   // 舞台一变窄就得往后退：设计框是按 1.78 定的，窄画框会从左右切掉横宽的星座。
@@ -354,16 +368,26 @@ export function setMotion(frame = {}) {
 }
 
 // 外部时钟入口：external 模式下由宿主按自己的帧门调用；一次调用 = 一次真实提交。
-export function render(now, dynamicDt, uiDt) {
+export function render(now, dynamicDt, uiDt, sceneTime) {
   if (!st || !st.external) return false;
+  if (Number.isFinite(sceneTime)) st.time = sceneTime;
   const stamp = Number.isFinite(Number(now)) ? Number(now) : performance.now();
   updateStage(st, stamp,
     Number.isFinite(dynamicDt) ? Math.max(0, Math.min(dynamicDt, .1)) : undefined,
     Number.isFinite(uiDt) ? Math.max(0, Math.min(uiDt, .1)) : undefined);
   st.renderer.info.reset();
   st.renderer.render(st.scene, st.camera);
+  if (st.renderer.info.programs.some(program => program.diagnostics?.runnable === false)) throw new Error('Three shader program failed');
   return true;
 }
+
+export function resetInput() {
+  if (!st) return;
+  st.audio.raw = st.audio.levels = null; st.audio.bins.fill(0); st.audio.target.fill(0);
+  st.audio.bass = st.audio.onsetLevel = 0; st.audio.onset = false;
+  st.localPointer.click = null; st.charge = 0;
+}
+export function setReduced(value) { if (st) st.prefs.reduced = !!value; }
 
 export function setPrefs(patch = {}) {
   if (!st) return;
@@ -378,6 +402,7 @@ export function setPrefs(patch = {}) {
   if (patch.speed != null) st.prefs.speed = clamp(Number(patch.speed), 0.15, 3);
   if (patch.reactivity != null) st.prefs.reactivity = clamp(Number(patch.reactivity), 0, 2);
   if (patch.pointerStrength != null) st.prefs.pointerStrength = clamp(Number(patch.pointerStrength), 0, 2);
+  if (patch.sign != null) st.prefs.sign = patch.sign === 'cycle' ? -1 : ZODIAC.findIndex(sign => sign.id === patch.sign);
   if (patch.reduced != null) st.prefs.reduced = !!patch.reduced;
   if (patch.meteors != null) {
     st.prefs.meteors = clamp(Number(patch.meteors), 0, 1.5);
@@ -699,11 +724,15 @@ export function capture() {
   const h = gl.drawingBufferHeight;
   const sample = (yFrac) => {
     const y = Math.max(0, Math.min(h - 1, Math.floor(h * yFrac)));
+    const ticket = st.scope?.reserve({ ownedCpuBytes: w * 4 }, 'Zodiac diagnostic RGBA8 row readback');
+    try {
     const row = new Uint8Array(w * 4);
+    ticket?.commit();
     gl.readPixels(0, y, w, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
     let r = 0, g = 0, b = 0;
     for (let i = 0; i < row.length; i += 4) { r += row[i]; g += row[i + 1]; b += row[i + 2]; }
     return [Math.round(r / w), Math.round(g / w), Math.round(b / w)];
+    } finally { st.scope?.releaseReservation(ticket); }
   };
   return { top: sample(0.8), middle: sample(0.5), bottom: sample(0.15), width: w, height: h };
 }

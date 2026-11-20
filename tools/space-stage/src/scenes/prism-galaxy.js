@@ -1,3 +1,5 @@
+import { sourcePlan } from '../source-resources.js';
+import { constructedGeometry, declaredArrayPayload } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // 棱镜星系：四条分色旋臂、核球辉光、星晕与棱镜碎片；指针制造切向涡旋，
 // 点击在盘面炸出棱镜新星环。
@@ -79,6 +81,7 @@ export function createPrismGalaxy(ctx) {
     uColorA: { value: new T.Color(0x7fe8ff) }, uColorB: { value: new T.Color(0xff7fbe) },
     uColorC: { value: new T.Color(0xffd08a) }, uColorD: { value: new T.Color(0xa98cff) } };
 
+  declaredArrayPayload(ctx.scope, ARMS * 10, 'Prism arm attribute backing');
   const arms = new Float32Array(ARMS), radius = new Float32Array(ARMS), seeds = new Float32Array(ARMS), sizes = new Float32Array(ARMS), jitter = new Float32Array(ARMS * 3);
   for (let i = 0; i < ARMS; i++) {
     arms[i] = i % 4; radius[i] = seed(i, 1); seeds[i] = seed(i, 2); sizes[i] = seed(i, 3);
@@ -95,6 +98,7 @@ export function createPrismGalaxy(ctx) {
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   armPoints.frustumCulled = false; world.add(armPoints);
 
+  declaredArrayPayload(ctx.scope, CORE * 7, 'Prism core attribute backing');
   const dirs = new Float32Array(CORE * 3), coreSeeds = new Float32Array(CORE);
   for (let i = 0; i < CORE; i++) {
     const y = 1 - seed(i, 7) * 2, a = seed(i, 8) * TAU, r = Math.sqrt(Math.max(0, 1 - y * y));
@@ -108,13 +112,15 @@ export function createPrismGalaxy(ctx) {
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   core.frustumCulled = false; world.add(core);
 
-  const shardGeometry = own(ctx, new T.OctahedronGeometry(.13, 0));
+  const shardGeometry = own(ctx, constructedGeometry(T, ctx.scope, 'OctahedronGeometry', [.13, 0]));
   const shardMaterial = own(ctx, new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: .3, depthWrite: false, blending: T.AdditiveBlending }));
+  declaredArrayPayload(ctx.scope, SHARDS * 19, 'Prism instance matrix and color backing');
   const shards = new T.InstancedMesh(shardGeometry, shardMaterial, SHARDS); shards.frustumCulled = false; world.add(shards);
   const shardObject = new T.Object3D(), shardColor = new T.Color(), shardTints = [0x8ff0ff, 0xffa8d4, 0xffd9a1, 0xb9a8ff];
   for (let i = 0; i < SHARDS; i++) { shardColor.set(shardTints[i % shardTints.length]); shards.setColorAt(i, shardColor); }
   if (shards.instanceColor) shards.instanceColor.needsUpdate = true;
 
+  declaredArrayPayload(ctx.scope, 3 * 128 * 6, 'Prism guide numeric scratch and attributes', 4, 1);
   const guidePositions = [];
   for (let ring = 0; ring < 3; ring++) {
     const tilt = .08 + ring * .07, radius = 5.2 + ring * 1.9, ecc = .92 - ring * .04;
@@ -187,3 +193,6 @@ export function createPrismGalaxy(ctx) {
     stats: () => ({ particles: armGeometry.drawRange.count + coreGeometry.drawRange.count, drawCalls: 12 })
   });
 }
+
+// Original factory construction plan, checked before serial handoff.
+createPrismGalaxy.resourcePlan = () => sourcePlan(14).array(ARMS*10).array(CORE*7).array(SHARDS*19).array(3*128*6,4,1).geometry('OctahedronGeometry',[.13,0]).stars(1900).glows(4).sky().shock(6).result();

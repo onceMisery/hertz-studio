@@ -1,0 +1,42 @@
+{
+  "authoringVersion": 1,
+  "id": "quiet-orb-study",
+  "version": 1,
+  "title": "静夜圆轨研究",
+  "description": "固定星球模板的低运动参数候选，等待人工视觉与许可审核",
+  "templateId": "quiet-orb",
+  "templateVersion": 3,
+  "provenance": {
+    "creator": "Codex offline parameter study",
+    "sourceRef": "Hertz built-in quiet-orb parameter recipe",
+    "revision": "catalog-v3 study-v1",
+    "license": "MIT",
+    "attribution": "Hertz Studio contributors; generated parameter variation"
+  },
+  "artifact": {
+    "artifactVersion": 1,
+    "mode": "create",
+    "schemaVersion": "1",
+    "schemaHash": "5c294943281a4a1234414c0634294e8c2bdfa0216d85c3a5223d2569c4715932",
+    "basePresetHash": "0d84301863cb08d3ce7c54ed8314a56e97eb54288908f31515ac789c8421c790",
+    "intent": {
+      "version": 1,
+      "scene": "orb",
+      "patch": {
+        "cam.dist": 16,
+        "cam.drift": 4,
+        "cam.shake": 0,
+        "cam.kick": 0,
+        "look.bloom": 0.1,
+        "look.chroma": 0,
+        "look.grain": 0.04,
+        "look.saturation": 0.7,
+        "sc.wobble": 0.08,
+        "sc.amp": 0.3,
+        "sc.radius": 2.5
+      },
+      "director": false,
+      "hand": { "on": false }
+    }
+  }
+}

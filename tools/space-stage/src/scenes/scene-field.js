@@ -1,3 +1,4 @@
+import { constructedGeometry } from '../source-resources.js';
 // SPDX-License-Identifier: MIT
 // Shared hand-feel for the four stellar scenes: pointer field, click impulse,
 // hold charge, glow billboards and pooled shock rings. No host API is added.
@@ -74,7 +75,7 @@ export function createGlow(ctx, parent, { color = 0xffffff, opacity = .5, power 
   const uniforms = { uColor: { value: new T.Color(color) }, uOpacity: { value: opacity }, uPower: { value: power } };
   const material = ctx.scope.track(new T.ShaderMaterial({ uniforms, vertexShader: glowVertex, fragmentShader: glowFragment,
     transparent: true, depthWrite: false, depthTest, blending: T.AdditiveBlending }));
-  const mesh = new T.Mesh(ctx.scope.track(new T.PlaneGeometry(1, 1)), material);
+  const mesh = new T.Mesh(constructedGeometry(T, ctx.scope, 'PlaneGeometry', [1,1]), material);
   mesh.scale.setScalar(size); mesh.renderOrder = renderOrder; mesh.frustumCulled = false; parent.add(mesh);
   return {
     mesh, uniforms,
@@ -148,7 +149,7 @@ export function createSky(ctx, parent, { top = 0x05070d, bottom = 0x0b1520, glow
   const uniforms = { uTop: { value: new T.Color(top) }, uBottom: { value: new T.Color(bottom) }, uGlow: { value: new T.Color(glow) }, uTime: { value: 0 }, uOpacity: { value: opacity } };
   const material = ctx.scope.track(new T.ShaderMaterial({ uniforms, vertexShader: skyVertex, fragmentShader: skyFragment,
     side: T.BackSide, depthWrite: false, depthTest: false, blending: T.NormalBlending }));
-  const mesh = new T.Mesh(ctx.scope.track(new T.SphereGeometry(86, 32, 18)), material);
+  const mesh = new T.Mesh(constructedGeometry(T, ctx.scope, 'SphereGeometry', [86,32,18]), material);
   mesh.renderOrder = -20; mesh.frustumCulled = false; parent.add(mesh);
   return { mesh, uniforms, update(time) { uniforms.uTime.value = time; } };
 }

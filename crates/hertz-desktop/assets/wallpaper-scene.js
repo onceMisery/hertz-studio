@@ -45,6 +45,7 @@
   var stage = null;
   var compositionUrl = null;
   var compositionFramePending = false;
+  var compositionClock = null;
   var canvas = null;
   var mounted = false;
   var switching = false;
@@ -283,17 +284,21 @@
 
   function reveal() {
     if (nativeBinding && (!firstFrameKind || !enabled)) return false;
+    if (compositionClock && (compositionClock.held || compositionFramePending)) return false;
     var record = media, clock = record && record.clock;
     if (clock && (!enabled || clock.held || clock.alignment || record.state !== 'ready')) return false;
     if (host) host.style.visibility = 'visible';
     revealed = true;
     if (nativeBinding && !revealReceiptSent) {
       revealReceiptSent = true;
-      var receiptRevision = revealRevision, revision = clock && clock.revision, clockToken = clock && clock.token;
+      var receiptRevision = revealRevision, revision = clock && clock.revision;
+      var compositionReceipt = compositionClock, clockToken = clock ? clock.token : compositionReceipt && compositionReceipt.token;
       requestAnimationFrame(function(){requestAnimationFrame(function(){
         if (!enabled || receiptRevision !== revealRevision || media !== record || (record && record.state !== 'ready')) return;
         if (clock && (media !== record || !enabled || clock.held || clock.revision !== revision || clock.token !== clockToken || record.state !== 'ready')) return;
-        sessionEvent(clock ? 'mediaClockRevealed' : 'revealed', null, null, null, clockToken);
+        if (compositionReceipt && (compositionClock !== compositionReceipt || compositionClock.held
+          || compositionClock.token !== clockToken || compositionFramePending)) { revealReceiptSent = false; return; }
+        sessionEvent(clock || compositionReceipt ? 'mediaClockRevealed' : 'revealed', null, null, null, clockToken);
       });});
     }
     return true;
@@ -526,7 +531,12 @@
     // 场景时间按运动强度积分；真实媒体时钟（positionMs）单独随 feed 传递。
     // A composition phase is one output transaction. Keep that same phase
     // while asynchronous media seeks settle, including at running loop edges.
-    sceneTime += (compositionFramePending ? 0 : dt) * config.motion;
+    if (compositionClock) {
+      if (compositionClock.held && firstFrameKind) return;
+      if (!compositionFramePending && !compositionClock.held) {
+        sceneTime = compositionClock.timeMs + (compositionClock.running ? Math.max(0, now - compositionClock.at) * config.motion : 0);
+      }
+    } else sceneTime += (compositionFramePending ? 0 : dt) * config.motion;
     pendingDt = Math.min(100, pendingDt + dt);
     // 整数分频帧门：只提交第 N 帧；rAF 仍持续用于心跳与 feed 时效。
     frameCount++;
@@ -544,7 +554,7 @@
     if(compositionUrl && window.HertzGlBudget && !HertzGlBudget.readyForFrame())return;
     if (retained && !lastRenderedFrame) return;
     var frame = retained ? Object.assign({}, lastRenderedFrame, { dynamicDt: 0, realDt: 0 }) : {
-      now: now, dynamicDt: (compositionFramePending ? 0 : frameDt) * config.motion / 1000, realDt: frameDt / 1000,
+      now: now, dynamicDt: (compositionFramePending || (compositionClock && compositionClock.zeroDt) ? 0 : frameDt) * config.motion / 1000, realDt: frameDt / 1000,
       bands: Array.from(shapedAudio(now)), sceneTime: sceneTime / 1000,
       motionActive: motionActive(), playing: scenePlaying(), position: feed.positionMs || 0
     };
@@ -593,6 +603,10 @@
         if (!retained) lastRenderedFrame = frame;
         draws++;
         firstFrame('gl');
+        if (compositionClock && !retained && !compositionClock.held) {
+          compositionClock.zeroDt = false;
+          reveal();
+        }
         captureFrame();
       }
     } catch (failure) {
@@ -614,6 +628,7 @@
     resetGate();
     audioShaped.fill(0); audioShapedAt = null;
     if (document.hidden) {
+      holdCompositionClock();
       if (compositionUrl && stage && stage.pauseComposition) {
         compositionFramePending = true;
         stage.pauseComposition(sceneTime / 1000);
@@ -632,6 +647,7 @@
     gate = computeGate(cap, config.refreshHz);
     resetGate();
     enabled = true;
+    if (compositionClock && compositionClock.held && host) host.style.visibility = 'hidden';
     if (media) {
       cancelMediaPauseCheck(media);
       if (media.clock && media.clock.held) hideMediaClock();
@@ -645,6 +661,7 @@
 
   function stop(pauseToken) {
     enabled = false;
+    holdCompositionClock();
     if (compositionUrl && stage && stage.pauseComposition) {
       compositionFramePending = true;
       stage.pauseComposition(sceneTime/1000);
@@ -701,6 +718,7 @@
   function teardown() {
     lastRenderedFrame = null;
     compositionFramePending = false;
+    compositionClock = null;
     clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
@@ -1409,12 +1427,53 @@
 
   // Only native can issue this URI and the controller-scoped read permit.
   // Fetch carries the fixed Rust projection outside the management frame.
-  async function applyComposition(url) {
+  function holdCompositionClock() {
+    if (!compositionClock) return;
+    compositionClock.held = true;
+    compositionClock.resumeAfterMs = performance.now();
+    compositionClock.zeroDt = true;
+    revealRevision++;
+    revealReceiptSent = false;
+  }
+
+  function applyCompositionClock(request) {
+    var clock = compositionClock, now = performance.now();
+    if (!clock || !compositionUrl || !mounted || !enabled || document.hidden || !nativeBinding) return false;
+    if (!request || !Number.isSafeInteger(request.token) || request.token <= 0
+      || !Number.isSafeInteger(request.timeMs) || request.timeMs < 0
+      || !Number.isFinite(request.pageDispatchMs) || request.pageDispatchMs < 0
+      || typeof request.running !== 'boolean') return false;
+    var age = now - request.pageDispatchMs;
+    if (Math.abs(age) > MEDIA_CLOCK_MAX_AGE_MS || request.token < clock.token
+      || request.pageDispatchMs < clock.resumeAfterMs
+      || (request.token === clock.token && request.pageDispatchMs < clock.dispatchMs)) return false;
+    var release = clock.held || request.token !== clock.token;
+    clock.token = request.token;
+    clock.dispatchMs = request.pageDispatchMs;
+    clock.at = now;
+    clock.timeMs = request.timeMs + (request.running ? Math.max(0, age) * config.motion : 0);
+    clock.running = request.running;
+    if (release) {
+      revealRevision++;
+      revealReceiptSent = false;
+      clock.zeroDt = true;
+      sceneTime = clock.timeMs;
+      compositionFramePending = true;
+      if (stage && stage.pauseComposition) stage.pauseComposition(sceneTime / 1000);
+    }
+    clock.held = false;
+    startLoop();
+    return true;
+  }
+
+  async function applyComposition(url, groupClock) {
     var allocation=window.__hertzWallpaperGlAllocation;
     if(!nativeBinding||!allocation||allocation.composition!==true||url!==allocation.compositionUrl
       ||!MEDIA_URL.test(url)) { notify('wallpaper_gl_failed composition_uri_invalid'); return false; }
     if(compositionUrl===url&&(mounted||switching))return true;
     unmountMedia();teardown();compositionUrl=url;switching=true;
+    compositionClock=groupClock===true?{held:true,token:0,dispatchMs:-Infinity,resumeAfterMs:0,
+      timeMs:0,at:0,running:false,zeroDt:true}:null;
     var token=++selectToken;
     try {
       var response=await fetch(url,{cache:'no-store'});
@@ -1515,6 +1574,8 @@
       ticks: ticks,
       draws: draws,
       sceneTime: Math.round(sceneTime),
+      compositionClock: compositionClock ? { held: compositionClock.held, token: compositionClock.token,
+        running: compositionClock.running, framePending: compositionFramePending } : null,
       scene: sceneId,
       backend: backend,
       session: nativeBinding ? { sessionId: nativeBinding.sessionId, generation: nativeBinding.generation, frameKind: firstFrameKind, revealed: revealed } : null,
@@ -1594,6 +1655,7 @@
     applyConfig: applyConfig,
     applyMedia: applyMedia,
     applyComposition: applyComposition,
+    applyCompositionClock: applyCompositionClock,
     start: start,
     stop: stop,
     mount: mount,

@@ -24,7 +24,8 @@ async function main() {
       caps: Object.fromEntries(budget.dimensions.map(key => [key, 64 * 1048576])) });
     const declared = definition.resourcePlan({ quality: PROFILES.low, params: registry.normalizeState('towers').params });
     assert.equal(ledger.port('renderer', 'builtin-contract-test').preflight(declared, []).ok, true);
-    assert.deepEqual(Object.keys(declared).sort(), ['bufferDeclaredBytes', 'ownedCpuBytes', 'programs']);
+    assert.deepEqual(Object.keys(declared).sort(), ['bufferDeclaredBytes', 'ownedCpuBytes', 'programs', 'textureDeclaredBytes']);
+    assert.equal(declared.textureDeclaredBytes, 0, 'towers source has no image textures');
     assert.deepEqual(definition.compositionResourcePlan({ quality: PROFILES.low }).primitives,
       { drawCalls: 3, points: 480, triangles: 1608 });
   });

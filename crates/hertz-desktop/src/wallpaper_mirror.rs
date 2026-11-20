@@ -13,6 +13,41 @@ pub(super) struct MirrorRuntime {
     selection: serde_json::Value,
     pub(super) source_generation: u64,
     pub(super) playback: GroupPlayback,
+    composition_phase: CompositionPhase,
+}
+
+#[derive(Default)]
+struct CompositionPhase {
+    identity: Option<(u64, u64, u64)>,
+    last_ms: f64,
+    phase_ms: f64,
+    motion: f64,
+}
+
+impl CompositionPhase {
+    fn sample(&mut self, identity: (u64, u64, u64), time: Duration, motion: f64) -> u64 {
+        let current = time.as_secs_f64() * 1000.0;
+        if self.identity != Some(identity) {
+            self.identity = Some(identity);
+            self.last_ms = 0.0;
+            self.phase_ms = 0.0;
+            self.motion = motion;
+        }
+        self.phase_ms += (current - self.last_ms).max(0.0) * self.motion;
+        self.last_ms = current;
+        self.motion = motion;
+        self.phase_ms.min(9_007_199_254_740_991.0) as u64
+    }
+}
+
+impl MirrorRuntime {
+    fn released_phase(&mut self, now: Instant, motion: f64) -> Option<(Duration, u64)> {
+        let (epoch, token, time) = self.playback.released_content_time(now)?;
+        let phase =
+            self.composition_phase
+                .sample((self.source_generation, epoch, token), time, motion);
+        Some((time, phase))
+    }
 }
 
 pub(super) fn validate_plan(
@@ -22,15 +57,26 @@ pub(super) fn validate_plan(
     if configuration.main().mode != LayoutMode::Mirror {
         return Ok(());
     }
-    let ResolvedSelection::Media(media) = &plan.content else {
+    let (reconstructable, decoders) = match &plan.content {
+        ResolvedSelection::Media(media) => (
+            true,
+            u32::from(
+                media.input().metadata.container != crate::wallpaper::media::Container::Image,
+            ),
+        ),
+        ResolvedSelection::Composition(composition) => {
+            let facts = composition.mirror_facts()?;
+            (facts.reconstructable, facts.decoders)
+        }
+        ResolvedSelection::Builtin(_) => (false, 0),
+    };
+    if !reconstructable {
         return Err(JobError::new(
             "mirror_not_reconstructable",
-            "此场景依赖历史状态，暂不支持镜像；请选择图片或视频作品",
+            "此场景依赖历史状态，暂不支持镜像；请选择可重建的绝对时间作品",
         ));
-    };
-    if media.input().metadata.container != crate::wallpaper::media::Container::Image
-        && configuration.main().displays.len() > 2
-    {
+    }
+    if decoders.saturating_mul(configuration.main().displays.len() as u32) > 2 {
         return Err(JobError::new(
             "mirror_decoder_limit",
             "视频镜像最多使用两台显示器，所有呈现共用两个解码名额",
@@ -63,6 +109,11 @@ impl App {
                         enabled: self.wallpaper_target_running(&runtime.configuration),
                         wallpaper: &runtime.configuration,
                         manual_pause: self.wallpaper_hidden,
+                        ai_generation: self.ai_generation_paused
+                            && runtime
+                                .surface
+                                .as_ref()
+                                .is_none_or(WallpaperSurface::dynamic),
                         fullscreen: runtime.fullscreen_gate.stable(),
                         maximized: runtime.maximized_gate.stable(),
                         application_rule: runtime.application_gate.stable(),
@@ -124,6 +175,7 @@ impl App {
                                 selection: serde_json::to_value(&group.selection).unwrap(),
                                 source_generation: self.wallpaper_generation,
                                 playback,
+                                composition_phase: CompositionPhase::default(),
                             },
                         );
                     }
@@ -269,6 +321,7 @@ impl App {
                         .unwrap(),
                     playback,
                     source_generation: self.wallpaper_generation,
+                    composition_phase: CompositionPhase::default(),
                 },
             );
         }
@@ -522,13 +575,16 @@ impl App {
 
     fn send_mirror_clock(&mut self, now: Instant) {
         let id = self.desktop.configuration.main().id.clone();
+        let motion = self.desktop.configuration.presentation().motion;
         let Some(group) = self.desktop.mirrors.get_mut(&id) else {
             return;
         };
         if group.playback.is_failed() {
             return;
         }
-        let time = group.playback.content_time(now).unwrap_or_default();
+        let Some((time, composition_time)) = group.released_phase(now, motion) else {
+            return;
+        };
         if !self.desktop.mirror_released
             || !self.wallpaper_render_allowed()
             || !self.wallpaper_target_running(&self.desktop.configuration)
@@ -543,7 +599,12 @@ impl App {
         else {
             return;
         };
-        if surface.media_frame_kind() != crate::wallpaper::session::FrameKind::Video {
+        let composition = surface
+            .session
+            .gl()
+            .is_some_and(|gl| gl.composition_url().is_some());
+        if !composition && surface.media_frame_kind() != crate::wallpaper::session::FrameKind::Video
+        {
             return;
         }
         let generation = surface.binding.generation();
@@ -590,9 +651,16 @@ impl App {
         {
             return;
         }
-        let request = serde_json::json!({"token":self.desktop.mirror_clock_token,"timeMs":time.as_millis().min(u128::from(u64::MAX)) as u64,
+        let phase = if composition {
+            composition_time
+        } else {
+            time.as_millis().min(u128::from(u64::MAX)) as u64
+        };
+        let request = serde_json::json!({"token":self.desktop.mirror_clock_token,"timeMs":phase,
             "pageDispatchMs":clock.at(now),"running":surface.configuration.presentation().motion > 0.0});
-        let method = if revealed {
+        let method = if composition {
+            "applyCompositionClock"
+        } else if revealed {
             "syncMediaClock"
         } else {
             "revealMediaClock"
@@ -693,6 +761,142 @@ fn calibrated_clock(sent: Instant, received: Instant, page_ms: Option<f64>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn phase_runtime(now: Instant) -> MirrorRuntime {
+        let list = Playlist {
+            playlist_id: "phase-list".into(),
+            revision: 1,
+            title: "phase".into(),
+            mode: crate::wallpaper::playlist::Mode::Sequential,
+            interval_seconds: 60,
+            items: (1..=2)
+                .map(|index| FixedVersion {
+                    work_key: format!("work-{index}"),
+                    package_hash: format!("{index:064x}"),
+                })
+                .collect(),
+        };
+        let mut playback = GroupPlayback::new(Source::Playlist(list), 37, now).unwrap();
+        playback
+            .reconcile_members(
+                vec![Member {
+                    key: "a".into(),
+                    runnable: true,
+                }],
+                now,
+            )
+            .unwrap();
+        playback.initial().unwrap();
+        MirrorRuntime {
+            selection: serde_json::Value::Null,
+            source_generation: 1,
+            playback,
+            composition_phase: CompositionPhase::default(),
+        }
+    }
+
+    fn release_phase(runtime: &mut MirrorRuntime, now: Instant) -> u64 {
+        let prepares = runtime.playback.take_prepares();
+        assert_eq!(prepares.len(), 1);
+        assert!(runtime.playback.ready(&prepares[0]));
+        let reveals = runtime.playback.take_reveals(now);
+        assert_eq!(reveals.len(), 1);
+        assert!(runtime.playback.presented(&reveals[0], now));
+        reveals[0].switch.token
+    }
+
+    #[test]
+    fn composition_delayed_playlist_next_cannot_adopt_predecessor_content_anchor() {
+        let now = Instant::now();
+        let mut runtime = phase_runtime(now);
+        release_phase(&mut runtime, now);
+        assert_eq!(
+            runtime
+                .released_phase(now + Duration::from_secs(6), 1.0)
+                .unwrap()
+                .1,
+            6000
+        );
+        runtime.playback.next().unwrap();
+        assert_eq!(
+            runtime.playback.content_time(now + Duration::from_secs(7)),
+            Some(Duration::from_secs(7)),
+            "preparing retains the visible predecessor's phase"
+        );
+        assert!(runtime
+            .released_phase(now + Duration::from_secs(7), 1.0)
+            .is_none());
+        release_phase(&mut runtime, now + Duration::from_secs(10));
+        assert_eq!(
+            runtime
+                .released_phase(now + Duration::from_secs(10), 1.0)
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(
+            runtime
+                .released_phase(now + Duration::from_secs(12), 1.0)
+                .unwrap()
+                .1,
+            2000
+        );
+    }
+
+    #[test]
+    fn composition_playlist_revision_resets_phase_when_runner_reuses_first_token() {
+        let now = Instant::now();
+        let mut runtime = phase_runtime(now);
+        let first_token = release_phase(&mut runtime, now);
+        assert_eq!(
+            runtime
+                .released_phase(now + Duration::from_secs(6), 0.5)
+                .unwrap()
+                .1,
+            3000
+        );
+        let mut revised = runtime.playback.playlist().unwrap().clone();
+        revised.revision += 1;
+        runtime
+            .playback
+            .replace_source(Source::Playlist(revised), 37, now + Duration::from_secs(7))
+            .unwrap();
+        runtime.source_generation += 1;
+        assert_eq!(runtime.playback.initial().unwrap().token, first_token);
+        assert!(runtime
+            .released_phase(now + Duration::from_secs(8), 0.5)
+            .is_none());
+        assert_eq!(
+            release_phase(&mut runtime, now + Duration::from_secs(9)),
+            first_token
+        );
+        assert_eq!(
+            runtime
+                .released_phase(now + Duration::from_secs(9), 0.5)
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(
+            runtime
+                .released_phase(now + Duration::from_secs(11), 0.5)
+                .unwrap()
+                .1,
+            1000
+        );
+    }
+
+    #[test]
+    fn composition_motion_phase_is_shared_and_freezes_without_rescaling_history() {
+        let mut phase = CompositionPhase::default();
+        assert_eq!(phase.sample((1, 1, 1), Duration::ZERO, 1.0), 0);
+        assert_eq!(phase.sample((1, 1, 1), Duration::from_secs(4), 0.0), 4000);
+        assert_eq!(phase.sample((1, 1, 1), Duration::from_secs(40), 0.0), 4000);
+        assert_eq!(phase.sample((1, 1, 1), Duration::from_secs(41), 0.5), 4000);
+        assert_eq!(phase.sample((1, 1, 1), Duration::from_secs(43), 0.5), 5000);
+        assert_eq!(phase.sample((1, 1, 1), Duration::from_secs(43), 0.5), 5000);
+        assert_eq!(phase.sample((1, 1, 2), Duration::ZERO, 0.5), 0);
+        assert_eq!(phase.sample((1, 1, 2), Duration::from_secs(2), 0.5), 1000);
+    }
     #[test]
     fn media_clock_uses_a_bounded_round_trip_not_upstream_beacon_age() {
         let sent = Instant::now();

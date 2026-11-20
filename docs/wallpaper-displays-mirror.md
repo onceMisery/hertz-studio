@@ -22,11 +22,11 @@ span 的矩形边界不能覆盖未选择的已连接显示器。例如三屏 A/
 
 `wallpaper.capabilities` 公布 `layouts:["single","span","mirror"]`、`multiDisplay:true` 和 `mirrorInspection:true`。`mirrorBuiltin/mirrorPackages/mirrorPlaylists:false` 表示不能按内容大类直接放行；设置页必须读取具体选择的检查结果。
 
-`wallpaper.layout.inspect` 接收 `{selection,members}`，在原生侧核对固定版本、原包完整性、实际 manifest 和资源类型。轮播检查整个快照，不能因为当前项是图片而忽略后续视频或 builtin；重复的 `workKey + packageHash` 只核验一次。该查询不创建 decoder 或媒体准备任务，也不修改配置。
+`wallpaper.layout.inspect` 接收 `{selection,members,properties?}`，在原生侧核对固定版本、原包完整性、实际 manifest 和资源类型。`properties` 是当前组的标量公开属性覆盖，仍受原 16 KiB 请求上限、64 项及声明类型/范围约束；省略表示默认值。轮播检查整个快照，不能因为当前项是图片而忽略后续视频或 builtin；重复的 `workKey + packageHash` 只核验一次。该查询不创建 decoder 或媒体准备任务，也不修改配置。
 
 检查由一个后台 worker 持续执行。首个请求与进行中查询返回 `{pending:true}`，终态返回 `{layouts,mirrorEligible,maxMembers,reason?}`；其它 key 在 worker 退出前返回 `budget_busy`。查询的两秒期限只限制观察者，不取消正在读取文件的扫描。设置页每 500ms 轮询，pending 与 busy 都保持镜像和相应 Apply 关闭。真正查询失败最多重试三次，并显示可恢复的原因。
 
-原生成功缓存最多 16 项、30 秒，key 包含选择、成员数、列表修订与固定引用。列表保存、删除、发布和导入变化使缓存失效；失效和服务退出会取消旧扫描，但读取槽在真实退出前不归还。普通播放准备不会取消扫描。设置页最多保留四组检查、16 个缓存结果、一个在途检查请求，并按草稿 epoch/组/选择/成员数隔离迟到回执。
+原生成功缓存最多 16 项、30 秒，key 包含选择、成员数、公开属性、列表修订与固定引用。列表保存、删除、发布和导入变化使缓存失效；失效和服务退出会取消旧扫描，但读取槽在真实退出前不归还。普通播放准备不会取消扫描。设置页最多保留四组检查、16 个缓存结果、一个在途检查请求，并按草稿 epoch/组/选择/成员数/公开属性隔离迟到回执。组合视频的不同循环区间分别计入解码表示；公开属性将区间合并或分开后，镜像准入与缓存必须重新匹配实际值。
 
 Apply 在准备目标前重新核验全部启用的 mirror 组，包括所有成员离线的组，不以 UI 缓存代替原生准入。禁用时仍核验新建或更改了内容/成员的 mirror 意图；关闭未改变的已保存意图不依赖媒体健康，以便损坏的壁纸仍可关闭。列表写入在受理时取消相关 Apply，未完成的列表写入会阻止新 Apply，消除数据库提交与页面事件之间的修订竞态。
 

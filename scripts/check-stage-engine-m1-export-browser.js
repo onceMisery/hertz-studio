@@ -9,9 +9,9 @@ const sources=['stage-resource-budget.js','stage-resource-policy.js','stage-json
 const digest=()=>Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(web,file))).digest('hex')]));
 const out=path.join(root,'output/a09-m1-20261108/export-browser-'+new Date().toISOString().replace(/[:.]/g,'-'));
 fs.mkdirSync(out,{recursive:true});
-const report={startedAt:new Date().toISOString(),scope:'Native Chrome export from current CreativeStage; test-only CPU caps. Immersive owner, decoder workspace bounds, GPU/weak-device qualification and current embedded products remain open.',sourceSha256:digest(),checks:[],errors:[]};
+const report={startedAt:new Date().toISOString(),scope:'Native Chrome export from current CreativeStage under unchanged candidate page caps; reduced-cap refusal is controlled. Immersive owner, decoder workspace bounds, GPU/weak-device qualification and current embedded products remain open.',sourceSha256:digest(),checks:[],errors:[]};
 let browser;
-async function pageFor(cpu=768*1024*1024){
+async function pageFor(cpu){
   const page=await browser.newPage({viewport:{width:1000,height:700},acceptDownloads:true});
   page.on('pageerror',error=>report.errors.push(error.stack));
   await page.route('**/*',route=>{
@@ -21,8 +21,8 @@ async function pageFor(cpu=768*1024*1024){
   await page.goto('http://m1-export.test');
   for(const file of sources){
     await page.addScriptTag({path:path.join(web,file)});
-    if(file==='stage-resource-policy.js') await page.evaluate(cpu=>{
-      StageResourcePolicy=Object.freeze({...StageResourcePolicy,qualification:'contract-test-only',caps:Object.freeze({...StageResourcePolicy.caps,ownedCpuBytes:cpu,decodeReservedBytes:128*1024*1024})});
+    if(file==='stage-resource-policy.js'&&cpu!==undefined) await page.evaluate(cpu=>{
+      StageResourcePolicy=Object.freeze({...StageResourcePolicy,qualification:'contract-test-only',caps:Object.freeze({...StageResourcePolicy.caps,ownedCpuBytes:cpu})});
     },cpu);
   }
   await page.evaluate(()=>{
@@ -42,13 +42,13 @@ async function check(name,run){try{report.checks.push({name,passed:true,evidence
 async function main(){
   browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL || 'chrome',headless:true,args:['--autoplay-policy=no-user-gesture-required']});
   try{
-    await check('production128MiB CPU cap refuses before native capture or encoder startup',async()=>{
-      const page=await pageFor(128*1024*1024);try{
+    await check('insufficient recording capacity refuses before native capture or encoder startup',async()=>{
+      const page=await pageFor(16*1024*1024);try{
         const result=await page.evaluate(async()=>{const baseline=Stage.resources().snapshot();harness.begin();await harness.done;return{baseline,after:Stage.resources().snapshot(),error:harness.error,captures:harness.captures,status:VideoExport.status()};});
-        assert.equal(result.error,'aggregate-budget');assert.equal(result.captures,0);assert.deepEqual(result.after.held,result.baseline.held);return result;
+        assert.match(result.error,/容量不足 8 MiB/);assert.equal(result.captures,0);assert.deepEqual(result.after.held,result.baseline.held);return result;
       }finally{await close(page);}
     });
-    await check('twenty native encodes preserve valid media and retire composition, decoder and source leases',async()=>{
+    await check('twenty native encodes under unchanged page caps preserve valid media and retire composition, decoder and source leases',async()=>{
       const page=await pageFor();try{
         const samples=[];
         for(let i=0;i<20;i++){
@@ -57,10 +57,13 @@ async function main(){
           assert.equal(await page.evaluate(()=>harness.error),null);
           await page.waitForTimeout(250);
           const download=page.waitForEvent('download',{timeout:10000});
-          const result=await page.evaluate(async()=>{const live=Stage.resources().snapshot();await VideoExport.stop();const result=await harness.done;CreativeStage.attachStage(null);
-            harness.lastResult=result;return{live,bytes:result.bytes,failed:result.failed,message:result.message,status:VideoExport.status(),after:Stage.resources().snapshot(true),ended:harness.tracks.every(track=>track.readyState==='ended'),videos:[...document.querySelectorAll('video')].filter(video=>video.srcObject).length};});
+          const result=await page.evaluate(async()=>{const live=Stage.resources().snapshot(),recording=VideoExport.status();await VideoExport.stop();const result=await harness.done;CreativeStage.attachStage(null);
+            harness.lastResult=result;return{live,recording,bytes:result.bytes,failed:result.failed,message:result.message,status:VideoExport.status(),after:Stage.resources().snapshot(true),ended:harness.tracks.every(track=>track.readyState==='ended'),videos:[...document.querySelectorAll('video')].filter(video=>video.srcObject).length};});
           const file=await download;await file.saveAs(path.join(out,'cycle-'+i+'.webm'));
           assert.ok(result.bytes>1000,result.message);assert.equal(result.failed,false);assert.equal(result.status.retiring,0);assert.equal(result.ended,true);assert.equal(result.videos,0);
+          assert.equal(result.live.caps.ownedCpuBytes,128*1024*1024);assert.equal(result.live.caps.decodeReservedBytes,64*1024*1024);
+          assert.equal(result.recording.maxBytes,32*1024*1024);assert.ok(result.live.held.ownedCpuBytes<=result.live.caps.ownedCpuBytes);
+          assert.deepEqual(result.live.violations,[]);
           assert.equal(result.after.held.decoderLeases,0);assert.equal(result.after.held.gpuContexts,0);assert.equal(result.after.held.canvases,0);
           if(i===0||i===19){result.decoded=await page.evaluate(async()=>{
             const url=URL.createObjectURL(harness.lastResult.blob),video=document.createElement('video');video.muted=true;

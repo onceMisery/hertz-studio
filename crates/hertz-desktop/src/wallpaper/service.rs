@@ -38,7 +38,7 @@ enum Work {
         slot: Slot,
     },
     CompositionDraftPreview {
-        document: super::work_drafts::Document,
+        document: Box<super::work_drafts::Document>,
         target: super::image_prepare::ImageTarget,
         fit: super::config::Fit,
         facts: Option<super::builtin_plan::TargetFacts>,
@@ -88,7 +88,7 @@ enum Work {
         slot: Slot,
     },
     ValidateMirrorLayouts {
-        selections: Vec<(super::config::Selection, usize)>,
+        selections: Vec<super::selection_plan::MirrorIntent>,
         properties: Vec<super::public_properties::PropertySelection>,
         cancel: Arc<AtomicBool>,
         reply: Box<dyn FnOnce(Result<(), JobError>) + Send>,
@@ -704,7 +704,7 @@ impl LibraryService {
     ) -> Result<(), JobError> {
         self.tx
             .try_send(Work::CompositionDraftPreview {
-                document,
+                document: Box::new(document),
                 target,
                 fit,
                 facts,
@@ -744,12 +744,21 @@ impl LibraryService {
         slot: Slot,
         reply: impl FnOnce(Result<(), JobError>) + Send + 'static,
     ) -> Result<(), JobError> {
-        self.validate_presentation_intents(selections, vec![], cancel, slot, reply)
+        self.validate_presentation_intents(
+            selections
+                .into_iter()
+                .map(|(selection, members)| (selection, members, serde_json::Map::new()))
+                .collect(),
+            vec![],
+            cancel,
+            slot,
+            reply,
+        )
     }
 
     pub(crate) fn validate_presentation_intents(
         &self,
-        selections: Vec<(super::config::Selection, usize)>,
+        selections: Vec<super::selection_plan::MirrorIntent>,
         properties: Vec<super::public_properties::PropertySelection>,
         cancel: Arc<AtomicBool>,
         slot: Slot,
@@ -760,7 +769,7 @@ impl LibraryService {
             || properties.len() > 4
             || selections
                 .iter()
-                .any(|(_, members)| !(1..=4).contains(members))
+                .any(|(_, members, _)| !(1..=4).contains(members))
         {
             return Err(JobError::invalid_input("镜像布局核验需要 1–4 个有效显示组"));
         }
@@ -1195,24 +1204,31 @@ impl State {
                     .await?
                 )
             }
-            Command::LayoutInspect { selection, members } => {
+            Command::LayoutInspect {
+                selection,
+                members,
+                properties,
+            } => {
                 let jobs = Arc::clone(self.jobs().await?);
                 self.layout_inspections
                     .observe_import(jobs.active_status().as_ref().map(|job| job.job_id.as_str()));
                 let generation = self.layout_inspections.generation();
-                let snapshot =
-                    match super::selection_plan::layout_snapshot(&jobs, selection, members).await {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            if matches!(
-                                error.code,
-                                "playlist_not_found" | "version_not_found" | "invalid_input"
-                            ) {
-                                self.layout_inspections.invalidate();
-                            }
-                            return Err(error);
+                let snapshot = match super::selection_plan::layout_snapshot(
+                    &jobs, selection, members, properties,
+                )
+                .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        if matches!(
+                            error.code,
+                            "playlist_not_found" | "version_not_found" | "invalid_input"
+                        ) {
+                            self.layout_inspections.invalidate();
                         }
-                    };
+                        return Err(error);
+                    }
+                };
                 let key = snapshot.cache_key();
                 match self
                     .layout_inspections
@@ -1351,6 +1367,18 @@ impl State {
                         .list(limit, cursor.as_deref())
                         .await?
                 )
+            }
+            Command::WorkDraftFork {
+                work_key,
+                package_hash,
+            } => {
+                self.check_owner(owner)?;
+                let jobs = self.jobs().await?;
+                let _writer = jobs.assets().content_writer()?;
+                json!(super::work_drafts::WorkDrafts::new(jobs.library())
+                    .fork_from_version(&work_key, &package_hash, jobs.assets())
+                    .await?
+                    .receipt())
             }
             Command::WorkDraftGet { draft_id } => {
                 self.check_owner(owner)?;
@@ -1928,6 +1956,7 @@ mod tests {
             .block_on(drafts.create(super::super::work_drafts::Document {
                 composition: None,
                 resources: vec![],
+                provenance: None,
                 title: "引用详情作品".into(),
                 description: String::new(),
                 scene_id: "coast".into(),
@@ -2444,6 +2473,7 @@ mod tests {
             &crate::wallpaper::work_drafts::Document {
                 composition: None,
                 resources: vec![],
+                provenance: None,
                 title: "布局快照".into(),
                 description: String::new(),
                 scene_id: "coast".into(),
@@ -2510,6 +2540,7 @@ mod tests {
                 jobs,
                 selection.clone(),
                 2,
+                serde_json::Map::new(),
             ))
             .unwrap()
             .cache_key();
@@ -2550,7 +2581,10 @@ mod tests {
             .unwrap();
         let key_after = runtime
             .block_on(super::super::selection_plan::layout_snapshot(
-                jobs, selection, 2,
+                jobs,
+                selection,
+                2,
+                serde_json::Map::new(),
             ))
             .unwrap()
             .cache_key();
@@ -3085,6 +3119,145 @@ mod tests {
                 true
             );
         }
+    }
+
+    #[test]
+    fn licensed_fork_requires_settings_owner_and_replays_the_same_draft_receipt() {
+        let root = tempfileish::temp_dir("service-licensed-fork");
+        let service = LibraryService::start(root.path().to_path_buf(), probe());
+        service.set_settings_owner(41);
+        let created = call(
+            &service,
+            request(
+                "fork-source",
+                "wallpaper.draft.create",
+                json!({"kind":"work","document":{"title":"My source","sceneId":"coast","stateVersion":1,"params":{}}}),
+            ),
+            41,
+        );
+        assert_eq!(created["ok"], true, "{created}");
+        let reference = json!({"draftId":created["result"]["draftId"],"draftRevision":created["result"]["draftRevision"]});
+        assert_eq!(
+            call(
+                &service,
+                request(
+                    "fork-source-save",
+                    "wallpaper.draft.save",
+                    reference.clone()
+                ),
+                41
+            )["ok"],
+            true
+        );
+        let published = call(
+            &service,
+            request("fork-source-publish", "wallpaper.draft.publish", reference),
+            41,
+        );
+        assert_eq!(published["ok"], true, "{published}");
+        let payload = json!({"kind":"fork","workKey":published["result"]["workKey"],"packageHash":published["result"]["packageHash"]});
+        let denied = call(
+            &service,
+            request("fork-no-owner", "wallpaper.draft.create", payload.clone()),
+            0,
+        );
+        assert_eq!(denied["error"]["code"], "settings_session_required");
+        let operation = request("fork-once", "wallpaper.draft.create", payload);
+        let fork = call(&service, operation.clone(), 41);
+        assert_eq!(fork["ok"], true, "{fork}");
+        assert_ne!(fork["result"]["workKey"], published["result"]["workKey"]);
+        let replay = call(&service, operation, 41);
+        assert_eq!(fork["result"], replay["result"]);
+        let page = call(
+            &service,
+            request("fork-drafts", "wallpaper.draft.list", json!({"limit":20})),
+            41,
+        );
+        assert_eq!(page["result"]["drafts"].as_array().unwrap().len(), 2);
+        let source = call(
+            &service,
+            request(
+                "fork-original",
+                "wallpaper.library.get",
+                json!({"workKey":published["result"]["workKey"]}),
+            ),
+            41,
+        );
+        assert_eq!(source["result"]["versions"].as_array().unwrap().len(), 1);
+        assert_eq!(source["result"]["versions"][0]["locallyAuthored"], true);
+        let reference = json!({"draftId":fork["result"]["draftId"],"draftRevision":fork["result"]["draftRevision"]});
+        assert_eq!(
+            call(
+                &service,
+                request("fork-save", "wallpaper.draft.save", reference.clone()),
+                41
+            )["ok"],
+            true
+        );
+        let published_copy = call(
+            &service,
+            request("fork-publish", "wallpaper.draft.publish", reference),
+            41,
+        );
+        assert_eq!(published_copy["ok"], true, "{published_copy}");
+        let hash = published_copy["result"]["packageHash"].as_str().unwrap();
+        let output = tempfileish::temp_dir("service-fork-export");
+        let destination = output.path().join("my-copy.hwpkg");
+        let ticket = service
+            .state
+            .output_tokens
+            .issue(
+                41,
+                hash.into(),
+                super::super::output_tokens::SelectedOutput::open(&destination).unwrap(),
+                Instant::now(),
+            )
+            .unwrap();
+        let accepted = call(
+            &service,
+            request(
+                "fork-export",
+                "wallpaper.export.begin",
+                json!({"packageHash":hash,"outputToken":ticket.output_token}),
+            ),
+            41,
+        );
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        let mut terminal = Value::Null;
+        for attempt in 0..100 {
+            terminal = call(
+                &service,
+                request(
+                    &format!("fork-export-poll-{attempt}"),
+                    "wallpaper.jobs.get",
+                    json!({"jobId":accepted["jobId"]}),
+                ),
+                41,
+            );
+            if terminal["result"]["state"] == "done" || terminal["result"]["state"] == "failed" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(terminal["result"]["state"], "done", "{terminal}");
+        let bytes = std::fs::read(destination).unwrap();
+        assert_eq!(
+            bytes,
+            std::fs::read(
+                root.path()
+                    .join("packages")
+                    .join(hash)
+                    .join("original.hwpkg")
+            )
+            .unwrap()
+        );
+        let package = hertz_wallpaper::validate_package(std::io::Cursor::new(bytes)).unwrap();
+        assert!(package
+            .manifest
+            .license
+            .attribution
+            .starts_with("Attribution and asset licenses: "));
+        assert_eq!(package.manifest.license.assets, "none");
     }
 
     #[test]

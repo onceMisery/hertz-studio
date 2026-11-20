@@ -5,6 +5,7 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), path = re
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..'), output = path.join(root, 'output/playwright/space-scenes');
 const previews = process.argv.includes('--previews');
+const resources = process.argv.includes('--resources');
 const selected = process.argv.find(arg => arg.startsWith('--scenes='))?.slice(9).split(',');
 const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
 
@@ -13,12 +14,17 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
   if (previews) fs.mkdirSync(path.join(root, 'plugin/ui/space-scene-preview'), { recursive: true });
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true,
     args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
-  const evidence = { renderer: 'Chrome ANGLE SwiftShader software WebGL2', ordinaryPc: 'unmeasured', dbx: 'unmeasured', scenes: [] }, errors = [];
+  const evidence = { renderer: 'Chrome ANGLE SwiftShader software WebGL2', pageResourceAdmission: resources, ordinaryPc: 'unmeasured', dbx: 'unmeasured', scenes: [] }, errors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     await page.setContent('<html><body style="margin:0;background:#030405"><canvas style="width:100vw;height:100vh;display:block"></canvas></body></html>');
+    if (resources) {
+      for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'stage-image-source.js'])
+        await page.addScriptTag({ path: path.join(root, 'plugin/ui', file) });
+      await page.evaluate(() => { window.testLedger = StageResourceBudget.create(StageResourcePolicy); });
+    }
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/space-stage.js') });
     const ids = await page.evaluate(() => {
@@ -28,8 +34,11 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
       const ctx = cover.getContext('2d');
       ctx.fillStyle = '#e84878'; ctx.fillRect(0, 0, 128, 256); ctx.fillStyle = '#3dd2bd'; ctx.fillRect(128, 0, 128, 256);
       ctx.fillStyle = '#fff'; ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('HERTZ', 128, 115); ctx.fillText('STUDIO', 128, 166);
-      const coverUrl = cover.toDataURL('image/png'); window.testHost = SpaceStagePure.create(canvas, { qualityMode: 'medium', deviceTier: 'high' });
-      testHost.setServices({ coverUrl: () => coverUrl, coverItems: Array(12).fill(coverUrl) });
+      const coverUrl = cover.toDataURL('image/png');
+      const port = window.testLedger?.port('space-scene-contract');
+      window.testHost = SpaceStagePure.create(canvas, { resources: port, qualityMode: 'medium', deviceTier: 'high' });
+      testHost.setServices({ coverUrl: () => coverUrl, coverItems: Array(12).fill(coverUrl),
+        decodeImage: (url, options) => StageImageSource.decode(url, { ...options, maxEncodedBytes: 1024 * 1024 }) });
       window.testFrame = (time, now = time * 1000) => ({ now, time, sceneTime: time, dt: .016, playing: true, level: .6, bands: { bass: .65, mid: .4, treble: .3 },
         spectrum: new Float32Array(64).fill(.5), onset: .8, lyrics: { index: 1, progress: .45, lines: [
           { text: '听见世界的回声', start: 0, end: 4 },
@@ -57,10 +66,18 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
           testHost.setRig(null); testHost.setQualityMode(mode); await testHost.select(id); testHost.resize(1280, 720);
           for (let i = 0; i < 5; i++) testHost.frame(testFrame(6, 1000 + i * 16));
           await new Promise(resolve => setTimeout(resolve, 30)); testHost.frame(testFrame(6, 1100));
-          return { pixels: testPixels(), stats: testHost.stats() };
+          return { pixels: testPixels(), stats: testHost.stats(), ledger: window.testLedger?.snapshot(true) };
         }, { id, mode });
         const moved = await page.evaluate(() => { testHost.frame(testFrame(8, 1200)); return testPixels(); });
         assert.equal(first.stats.effectiveQuality, mode, id + ' actual profile matches requested validation profile');
+        assert.equal(first.stats.state, 'ready', id + ' actually submitted its first frame');
+        if (resources) {
+          assert.equal(first.ledger.violations.length, 0, id + ' has no resource contract violations');
+          assert.ok(first.ledger.held.ownedCpuBytes > 0 && first.ledger.held.bufferDeclaredBytes > 0,
+            id + ' original source arrays and uploads have live admissions');
+          for (const [key, held] of Object.entries(first.ledger.held))
+            assert.ok(held <= first.ledger.caps[key], id + ' remains within ' + key);
+        }
         assert.ok(first.pixels.lit > 50 && first.pixels.centerLit > 10, id + ' ' + mode + ' nonblank/framed');
         assert.notEqual(first.pixels.hash, moved.hash, id + ' ' + mode + ' movement');
         const budget = { low: [40, 12000, 80000], medium: [80, 30000, 200000], high: [120, 50000, 400000] }[mode];
@@ -117,12 +134,16 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
       testHost.setParams({ grain: 10, halftone: 20, vignette: 25, softness: 3, bokeh: 3, chroma: 2, aberration: 2, distort: 1, bloom: 2, dust: .5, discRing: true, ripples: .6 });
       testHost.frame(testFrame(6, 2016)); const enabled = testPixels(), stats = testHost.stats();
       testHost.setQualityMode('low'); testHost.frame(testFrame(6, 2032)); const low = testPixels();
-      testHost.dispose(); return { baseline, enabled, low, stats, disposed: testHost.stats() };
+      testHost.dispose(); return { baseline, enabled, low, stats, disposed: testHost.stats(), ledger: window.testLedger?.snapshot(true) };
     });
     assert.notEqual(post.baseline.hash, post.enabled.hash, 'composable effects change real pixels'); assert.ok(post.enabled.lit > 50 && post.low.lit > 50);
     assert.equal(post.disposed.resources, 0); assert.equal(post.disposed.tasks, 0); evidence.post = post;
+    if (resources) {
+      assert.equal(post.ledger.violations.length, 0);
+      for (const [key, held] of Object.entries(post.ledger.held)) assert.equal(held, 0, key + ' fully retires at renderer exit');
+    }
     assert.deepEqual(errors, [], 'no shader/context/runtime errors');
-    fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify(evidence, null, 2));
+    fs.writeFileSync(path.join(output, resources ? 'resources-evidence.json' : 'evidence.json'), JSON.stringify(evidence, null, 2));
     console.log('All ' + checkedIds.length + ' scene previews verified. Software GL is not ordinary-PC FPS evidence.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
