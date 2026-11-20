@@ -97,9 +97,13 @@ impl Effect {
 /// [`find`] 的键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Handler {
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperCatalogGet,
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperSwitchRequest,
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperGenerateRequest,
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperRequestGet,
     StageCapabilitiesGet,
     StageIntentValidate,
@@ -116,9 +120,13 @@ pub(crate) enum Handler {
 impl Handler {
     pub(crate) fn operation(self) -> &'static str {
         match self {
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperCatalogGet => "wallpaper.catalog_get",
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperSwitchRequest => "wallpaper.switch_request",
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperGenerateRequest => "wallpaper.generate_request",
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperRequestGet => "wallpaper.request_get",
             Self::StageCapabilitiesGet => "stage.capabilities_get",
             Self::StageIntentValidate => "stage.intent_validate",
@@ -138,18 +146,20 @@ impl Handler {
     }
 
     pub(crate) fn is_wallpaper_request(self) -> bool {
-        matches!(
-            self,
+        match self {
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperCatalogGet
-                | Self::WallpaperSwitchRequest
-                | Self::WallpaperGenerateRequest
-                | Self::WallpaperRequestGet
-        )
+            | Self::WallpaperSwitchRequest
+            | Self::WallpaperGenerateRequest
+            | Self::WallpaperRequestGet => true,
+            _ => false,
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputSchema {
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperRequest(hertz_wallpaper::external_requests::Operation),
     Empty,
     StagePage,
@@ -162,6 +172,7 @@ pub(crate) enum InputSchema {
 impl InputSchema {
     pub(crate) fn value(self) -> Value {
         match self {
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperRequest(operation) => super::wallpaper_request_schema::input(operation),
             Self::Empty => json!({
                 "type": "object",
@@ -198,7 +209,9 @@ impl InputSchema {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputSchema {
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperCatalog,
+    #[cfg(any(feature = "desktop-host", test))]
     WallpaperReceipt,
     StagePage,
     StageValidation,
@@ -210,7 +223,9 @@ pub(crate) enum OutputSchema {
 impl OutputSchema {
     pub(crate) fn value(self) -> Value {
         match self {
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperCatalog => super::wallpaper_request_schema::catalog_schema(),
+            #[cfg(any(feature = "desktop-host", test))]
             Self::WallpaperReceipt => super::wallpaper_request_schema::receipt_schema(),
             Self::StagePage => schema_value::<RegisteredStagePage>(),
             Self::StageValidation => schema_value::<RegisteredStageValidation>(),
@@ -471,7 +486,9 @@ struct RegisteredLibrarySearch {
 
 fn validate_registered_output(schema: OutputSchema, value: &Value) -> bool {
     match schema {
+        #[cfg(any(feature = "desktop-host", test))]
         OutputSchema::WallpaperCatalog => super::wallpaper_request_schema::valid_catalog(value),
+        #[cfg(any(feature = "desktop-host", test))]
         OutputSchema::WallpaperReceipt => super::wallpaper_request_schema::valid_receipt(value),
         OutputSchema::StagePage => serde_json::from_value::<RegisteredStagePage>(value.clone())
             .is_ok_and(|page| {
@@ -538,11 +555,11 @@ pub(crate) struct Capability {
 
 impl Capability {
     pub(crate) fn required_scopes(&self) -> Vec<&'static str> {
+        #[cfg(any(feature = "desktop-host", test))]
         if self.handler == Handler::WallpaperSwitchRequest {
-            vec![self.scope, "wallpaper:catalog_read"]
-        } else {
-            vec![self.scope]
+            return vec![self.scope, "wallpaper:catalog_read"];
         }
+        vec![self.scope]
     }
     pub(crate) fn scopes_satisfied(&self, scopes: &BTreeSet<String>) -> bool {
         self.required_scopes()
@@ -893,6 +910,7 @@ pub(crate) async fn execute(
         ));
     }
     let result = match capability.handler {
+        #[cfg(any(feature = "desktop-host", test))]
         Handler::WallpaperCatalogGet
         | Handler::WallpaperSwitchRequest
         | Handler::WallpaperGenerateRequest

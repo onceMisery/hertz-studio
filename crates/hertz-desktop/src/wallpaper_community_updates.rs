@@ -6,9 +6,7 @@ use crate::wallpaper::{
     api,
     community::{
         self,
-        subscriptions::{
-            ApplyIdentity, ApplyPlan, DownloadIntent, DownloadPlan, Subscriptions,
-        },
+        subscriptions::{ApplyIdentity, ApplyPlan, DownloadIntent, DownloadPlan, Subscriptions},
     },
     jobs::ImportIdentity,
 };
@@ -278,7 +276,7 @@ impl App {
                 automatic: authority.automatic,
             })
             .await?;
-            Ok(Outcome::Apply(authority))
+            Ok(Outcome::Apply(Box::new(authority)))
         })?;
         self.wallpaper_community.preparing = true;
         Ok(())

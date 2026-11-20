@@ -34,7 +34,7 @@ impl Hub {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Upload>> {
-        if offset < 0 || offset > 1_000_000 || !(1..=50).contains(&limit) {
+        if !(0..=1_000_000).contains(&offset) || !(1..=50).contains(&limit) {
             return Err(HubError::invalid("分页offset须在0–1000000，每页1–50项"));
         }
         let mut tx = self.pool.begin().await?;

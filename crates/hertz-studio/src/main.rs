@@ -870,11 +870,7 @@ async fn asset(
         );
         return response;
     }
-    let payload = if gzip {
-        body.gzip
-    } else {
-        body.identity()
-    };
+    let payload = if gzip { body.gzip } else { body.identity() };
     let mut response = (
         [
             (axum::http::header::CONTENT_TYPE, mime),
@@ -1208,7 +1204,10 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(!response.headers().contains_key("content-encoding"));
-                assert_eq!(response.bytes().await.unwrap().as_ref(), entry.body.identity());
+                assert_eq!(
+                    response.bytes().await.unwrap().as_ref(),
+                    entry.body.identity()
+                );
             }
         }
         let rejected = client

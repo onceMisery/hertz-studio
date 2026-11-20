@@ -57,7 +57,12 @@ impl AdmittedPool {
         Self::for_database(pool, root, "wallpaper.db", charge)
     }
 
-    pub(crate) fn for_database(pool: SqlitePool, root: PathBuf, database: &'static str, charge: budget::SqlxPoolCharge) -> Self {
+    pub(crate) fn for_database(
+        pool: SqlitePool,
+        root: PathBuf,
+        database: &'static str,
+        charge: budget::SqlxPoolCharge,
+    ) -> Self {
         Self {
             pool: Some(pool),
             root,

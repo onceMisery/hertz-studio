@@ -313,7 +313,7 @@ impl Fixture {
     }
     pub async fn close(self) -> tempfileish::TempDir {
         self.library.pool().close().await;
-        (&*self.library.trust().pool).close().await;
+        (*self.library.trust().pool).close().await;
         self.root
     }
 

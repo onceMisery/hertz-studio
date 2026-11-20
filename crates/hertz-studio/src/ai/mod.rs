@@ -22,6 +22,7 @@
 //! 路径别名实测（§13 留待 R2-G/R4-J）、并发槽位（§8.3）。
 
 pub(crate) mod capability;
+#[cfg(any(feature = "desktop-host", test))]
 mod composition_provider;
 pub(crate) mod contract;
 pub(crate) mod credential;
@@ -29,8 +30,11 @@ pub(crate) mod emotion;
 pub mod evaluation;
 pub(crate) mod facade;
 mod generation_provider;
+#[cfg(any(feature = "desktop-host", test))]
 mod image_prepare;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod image_provider;
+#[cfg(any(feature = "desktop-host", test))]
 mod image_wire;
 pub(crate) mod jobs;
 pub(crate) mod ledger;
@@ -41,9 +45,15 @@ pub(crate) mod provider;
 pub(crate) mod stepfun;
 pub(crate) mod strict_json;
 pub(crate) mod usage;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod wallpaper_artifacts;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod wallpaper_jobs;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod wallpaper_pairing;
+#[cfg(any(feature = "desktop-host", test))]
 mod wallpaper_provider;
+#[cfg(any(feature = "desktop-host", test))]
 mod wallpaper_request_schema;
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod wallpaper_requests;

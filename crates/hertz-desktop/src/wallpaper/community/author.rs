@@ -289,10 +289,9 @@ pub(crate) async fn upload(
             auth,
             &session,
             &draft.cancel,
-            &upload.id,
+            &upload,
             file,
             draft.bytes,
-            upload.expires_at,
         )
         .await
         .map_err(|_| {

@@ -223,7 +223,13 @@ impl App {
             }
         }
         if let Some(switch) = runner.tick(Instant::now(), renderable && !failed) {
-            if let Some(current) = self.desktop.playlist.as_ref().and_then(|p| p.current()).cloned() {
+            if let Some(current) = self
+                .desktop
+                .playlist
+                .as_ref()
+                .and_then(|p| p.current())
+                .cloned()
+            {
                 if self.try_community_cutpoint(&current) {
                     return;
                 }

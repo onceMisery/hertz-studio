@@ -58,15 +58,15 @@ pub(super) enum Outcome {
     Review(Box<Review>),
     AuthorPrepared(Arc<community::author::PackageDraft>),
     ReportPrepared(Box<community::author::ReportDraft>),
-    Apply(Authority),
+    Apply(Box<Authority>),
     Browser(String),
     Login(auth::Account),
     Background(Background),
     Checked(String),
 }
 pub(crate) struct CommunityEvent {
-    pub result: CommunityResult<Outcome>,
-    pub _charge: crate::wallpaper::budget::ControlCharge,
+    result: CommunityResult<Outcome>,
+    _charge: crate::wallpaper::budget::ControlCharge,
 }
 pub(super) struct Background {
     pub status: serde_json::Value,
@@ -615,7 +615,7 @@ impl App {
                 }
             }
             Ok(Outcome::Apply(authority)) => {
-                if let Err(e) = self.start_community_apply(request.clone(), authority.clone()) {
+                if let Err(e) = self.start_community_apply(request.clone(), (*authority).clone()) {
                     self.abort_community_receipt(&authority, e.message.clone(), &request);
                     Err(e)
                 } else {

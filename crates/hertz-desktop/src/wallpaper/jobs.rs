@@ -725,7 +725,9 @@ pub(crate) struct ImportIdentity {
 impl ImportJobs {
     /// 启动 worker。`library` 与 `assets` 的所有权共享给任务管线。
     pub fn start(library: Library, assets: AssetStore, probe: ProbeClient) -> Self {
-        assets.bind_trust(Arc::clone(library.trust())).expect("one library trust owner per AssetStore");
+        assets
+            .bind_trust(Arc::clone(library.trust()))
+            .expect("one library trust owner per AssetStore");
         let budget = probe.budget_handle();
         // 每一个 caller 侧共享启动 owner 都在第一次分配前取得 prior 费用；
         // 准入失败是 fail-closed 启动错误，不构造“无 worker”的半对象。
@@ -835,14 +837,30 @@ impl ImportJobs {
         file: super::file_tokens::SelectedFile,
         identity: ImportIdentity,
     ) -> Result<JobId, JobError> {
-        self.submit_registered(job_id,JobSource::Import(ImportSource::Pinned(file)),identity).await
+        self.submit_registered(
+            job_id,
+            JobSource::Import(ImportSource::Pinned(file)),
+            identity,
+        )
+        .await
     }
 
-    pub(crate) async fn submit_community(&self,job_id:String,intent:super::community::subscriptions::DownloadIntent,identity:ImportIdentity)->Result<JobId,JobError> {
-        self.submit_registered(job_id,JobSource::Community(Box::new(intent)),identity).await
+    pub(crate) async fn submit_community(
+        &self,
+        job_id: String,
+        intent: super::community::subscriptions::DownloadIntent,
+        identity: ImportIdentity,
+    ) -> Result<JobId, JobError> {
+        self.submit_registered(job_id, JobSource::Community(Box::new(intent)), identity)
+            .await
     }
 
-    async fn submit_registered(&self,job_id:String,source:JobSource,identity:ImportIdentity)->Result<JobId,JobError> {
+    async fn submit_registered(
+        &self,
+        job_id: String,
+        source: JobSource,
+        identity: ImportIdentity,
+    ) -> Result<JobId, JobError> {
         if let Some(existing) = self.library.import_operation(&identity.request_id).await? {
             if existing.payload_digest != identity.payload_digest {
                 return Err(JobError::new(
@@ -862,12 +880,7 @@ impl ImportJobs {
                 })?;
             return Ok(JobId::new(existing.job_id, lease));
         }
-        let request = self.reserve(
-            job_id,
-            source,
-            None,
-            0,
-        )?;
+        let request = self.reserve(job_id, source, None, 0)?;
         let mut slot = ReservedSlot::new(&self.inner, &request.status);
         let status = request.status.lock().expect("status").clone();
         let accepted = self
@@ -1382,7 +1395,11 @@ async fn worker_loop(
                                 .await
                                 .map(JobOutput::Package)
                         }
-                        JobSource::Community(intent)=>community::run(&request,intent,&library,&assets,&probe,&writer).await.map(JobOutput::Package),
+                        JobSource::Community(intent) => {
+                            community::run(&request, intent, &library, &assets, &probe, &writer)
+                                .await
+                                .map(JobOutput::Package)
+                        }
                         JobSource::Prepare(prepare) => {
                             run_prepare(&request, prepare, &library, &assets, &probe)
                                 .await
@@ -1724,10 +1741,12 @@ async fn install_snapshot(
     // ② Prepare：对固定快照做包校验（结构/路径/哈希），取 manifest 事实。
     let package = assets.validate_staged(&request.job_id)?;
     library.trust().security_check(&package.package_hash)?;
-    if let Some(release)=authorization {
-        release.validate_package(&package,receipt.bytes)?;
-        if let JobSource::Community(intent)=&request.source {
-            super::community::subscriptions::Subscriptions::new(library).delta(&intent.plan.operation_id,&package,release).await?;
+    if let Some(release) = authorization {
+        release.validate_package(&package, receipt.bytes)?;
+        if let JobSource::Community(intent) = &request.source {
+            super::community::subscriptions::Subscriptions::new(library)
+                .delta(&intent.plan.operation_id, &package, release)
+                .await?;
         }
     }
     if package.package_hash != receipt.sha256 {
@@ -1766,7 +1785,7 @@ async fn install_snapshot(
         prepared.publish(assets, library).await?;
         cancelled(&request.cancel)?;
         library.mark_available(&package.package_hash).await?;
-        community::index(library,&package,receipt.bytes,authorization).await?;
+        community::index(library, &package, receipt.bytes, authorization).await?;
         return Ok(package.package_hash.clone());
     }
     // ④ 空间峰值预检；现有 staging 已从实际可用空间扣除。
@@ -1819,8 +1838,8 @@ async fn install_snapshot(
         Err(error) => return Err(error),
     };
     // ⑦ 新发布和核验通过的孤立目录都必须完成索引事务。
-    let _=content_kind;
-    community::index(library,&package,receipt.bytes,authorization).await?;
+    let _ = content_kind;
+    community::index(library, &package, receipt.bytes, authorization).await?;
     Ok(package.package_hash)
 }
 
@@ -2120,11 +2139,17 @@ async fn read_prepare_source(
     {
         return Err(JobError::new("asset_not_found", "准备资源已被移除"));
     }
-    let package=match source {
+    let package = match source {
         Some(s) => assets.read_source(s),
         None => assets.read_installed_manifest(hash),
     }?;
-    library.trust().activation_check(hash,matches!(package.manifest.content,hertz_wallpaper::Content::Web{..}))?;
+    library.trust().activation_check(
+        hash,
+        matches!(
+            package.manifest.content,
+            hertz_wallpaper::Content::Web { .. }
+        ),
+    )?;
     Ok(package)
 }
 
@@ -2281,9 +2306,14 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
                 // A library backup can retain the physical package but omit its
                 // source/version projection. Independent trust receipts rebuild
                 // those facts through the same original install transaction.
-                if !library.trust().receipts_for_hash(&row.package_hash).await?.is_empty(){
-                    let package=assets.read_installed_manifest(&row.package_hash)?;
-                    community::recover(library,assets,&package).await?;
+                if !library
+                    .trust()
+                    .receipts_for_hash(&row.package_hash)
+                    .await?
+                    .is_empty()
+                {
+                    let package = assets.read_installed_manifest(&row.package_hash)?;
+                    community::recover(library, assets, &package).await?;
                 }
             }
             _ => {

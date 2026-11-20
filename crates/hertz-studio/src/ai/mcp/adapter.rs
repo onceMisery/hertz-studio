@@ -535,6 +535,7 @@ pub(crate) fn unknown_result(
     client_operation_id: &str,
     message: String,
 ) -> CallToolResult {
+    #[cfg(any(feature = "desktop-host", test))]
     if super::super::wallpaper_requests::operation(operation).is_some() {
         return error_result(
             json!({"outcome":"unknown","code":"unknown","operation":operation,
@@ -562,6 +563,7 @@ pub(crate) fn ensure_operation_id(
     if capability.effect != Effect::Mutating {
         return Ok(None);
     }
+    #[cfg(any(feature = "desktop-host", test))]
     if capability.handler.is_wallpaper_request() {
         let bytes = serde_json::to_vec(arguments).map_err(|_| {
             error_result(json!({"code":"invalid_request","message":"申请不是合法 JSON"}))

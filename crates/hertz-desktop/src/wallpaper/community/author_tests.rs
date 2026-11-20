@@ -75,7 +75,7 @@ async fn installed_local_version_is_selectable_and_fixed_bytes_survive_token_ren
     drop(draft);
     drop(auth);
     jobs.library().pool().close().await;
-    (&*jobs.library().trust().pool).close().await;
+    (*jobs.library().trust().pool).close().await;
     drop(jobs);
 }
 
@@ -134,7 +134,7 @@ async fn cancelled_mismatched_or_tampered_package_cannot_create_a_confirmation()
     );
     drop(auth);
     jobs.library().pool().close().await;
-    (&*jobs.library().trust().pool).close().await;
+    (*jobs.library().trust().pool).close().await;
     drop(jobs);
 }
 

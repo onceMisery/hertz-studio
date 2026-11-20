@@ -162,7 +162,8 @@ pub(super) fn addresses(destination: &reqwest::Url) -> Result<Option<Vec<SocketA
     if found == ERROR_FILE_NOT_FOUND {
         return Ok(None);
     }
-    if found != ERROR_SUCCESS || kind != REG_SZ || length < 2 || length > 65536 || length % 2 != 0 {
+    if found != ERROR_SUCCESS || kind != REG_SZ || !(2..=65536).contains(&length) || length % 2 != 0
+    {
         return Err(error(
             "community_policy_invalid",
             "固定连接策略须为不超过 64 KiB 的 REG_SZ JSON",

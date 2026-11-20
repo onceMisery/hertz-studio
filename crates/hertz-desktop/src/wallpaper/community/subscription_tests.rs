@@ -236,5 +236,5 @@ async fn restoring_the_product_library_does_not_restore_old_trust_watermarks() {
         "release_version_rollback",
     );
     library.pool().close().await;
-    (&*library.trust().pool).close().await;
+    (*library.trust().pool).close().await;
 }

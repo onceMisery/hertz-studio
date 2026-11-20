@@ -7419,15 +7419,21 @@ fn wallpaper_page_response(
                 "text/javascript; charset=utf-8",
             )),
             "/vendor/stage-assets/basis_transcoder.js" => Some((
-                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-assets/basis_transcoder.js")),
+                Cow::Borrowed(include_bytes!(
+                    "../../../plugin/ui/vendor/stage-assets/basis_transcoder.js"
+                )),
                 "text/javascript; charset=utf-8",
             )),
             "/vendor/stage-assets/basis_transcoder.wasm" => Some((
-                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-assets/basis_transcoder.wasm")),
+                Cow::Borrowed(include_bytes!(
+                    "../../../plugin/ui/vendor/stage-assets/basis_transcoder.wasm"
+                )),
                 "application/wasm",
             )),
             "/vendor/stage-assets/phoenix-reference-data.json" => Some((
-                Cow::Borrowed(include_bytes!("../../../plugin/ui/vendor/stage-assets/phoenix-reference-data.json")),
+                Cow::Borrowed(include_bytes!(
+                    "../../../plugin/ui/vendor/stage-assets/phoenix-reference-data.json"
+                )),
                 "application/json",
             )),
             _ => None,
@@ -8023,11 +8029,23 @@ mod tests {
         for (path, mime) in [
             ("/wallpaper.html", "text/html; charset=utf-8"),
             ("/vendor/stage-runtime.js", "text/javascript; charset=utf-8"),
-            ("/vendor/stage-assets/basis_transcoder.js", "text/javascript; charset=utf-8"),
-            ("/vendor/stage-assets/basis_transcoder.wasm", "application/wasm"),
-            ("/vendor/stage-assets/phoenix-reference-data.json", "application/json"),
+            (
+                "/vendor/stage-assets/basis_transcoder.js",
+                "text/javascript; charset=utf-8",
+            ),
+            (
+                "/vendor/stage-assets/basis_transcoder.wasm",
+                "application/wasm",
+            ),
+            (
+                "/vendor/stage-assets/phoenix-reference-data.json",
+                "application/json",
+            ),
         ] {
-            let response = serve("test", Request::builder().uri(path).body(Vec::new()).unwrap());
+            let response = serve(
+                "test",
+                Request::builder().uri(path).body(Vec::new()).unwrap(),
+            );
             assert_eq!(response.status(), wry::http::StatusCode::OK);
             assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
             assert!(!response.body().is_empty());
@@ -8035,8 +8053,15 @@ mod tests {
                 assert_eq!(&response.body()[..4], b"\0asm");
             }
         }
-        for path in ["/vendor/other.js", "/vendor/stage-assets/../secret", "/files/test"] {
-            let response = serve("test", Request::builder().uri(path).body(Vec::new()).unwrap());
+        for path in [
+            "/vendor/other.js",
+            "/vendor/stage-assets/../secret",
+            "/files/test",
+        ] {
+            let response = serve(
+                "test",
+                Request::builder().uri(path).body(Vec::new()).unwrap(),
+            );
             assert_eq!(response.status(), wry::http::StatusCode::NOT_FOUND);
             assert!(response.body().is_empty());
         }

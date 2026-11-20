@@ -27,7 +27,7 @@ async fn an_existing_library_does_not_block_a_second_verified_trust_connection()
     );
     assert_eq!(source.origin, fixture.authority.profile.origin);
     second.pool().close().await;
-    (&*second.trust().pool).close().await;
+    (*second.trust().pool).close().await;
     drop(second);
     let _root = fixture.close().await;
 }
@@ -180,5 +180,5 @@ async fn persisted_clock_rollback_survives_native_library_reopen() {
         "revocations_stale",
     );
     trust.activation_check(&"a".repeat(64), false).unwrap();
-    (&*trust.pool).close().await;
+    (*trust.pool).close().await;
 }

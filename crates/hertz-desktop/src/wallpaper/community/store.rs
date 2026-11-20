@@ -311,6 +311,7 @@ impl TrustStore {
         }))
     }
 
+    #[cfg(test)]
     pub(crate) async fn mark_web_activated(&self, hash: &str) -> Result<(), JobError> {
         let _writer = self.writer.lock().await;
         self.activation_check(hash, true)?;

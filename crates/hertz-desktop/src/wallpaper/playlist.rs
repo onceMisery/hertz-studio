@@ -297,6 +297,7 @@ impl Runner {
         self.last = None;
         switch
     }
+    #[cfg(test)]
     pub(crate) fn initial(&mut self) -> Option<Switch> {
         self.initial_at(None)
     }

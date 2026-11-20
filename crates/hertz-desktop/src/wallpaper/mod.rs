@@ -36,8 +36,8 @@ pub(crate) mod audio_service;
 #[allow(dead_code)]
 pub(crate) mod budget;
 pub(crate) mod builtin_plan;
-pub(crate) mod composition_plan;
 pub(crate) mod community;
+pub(crate) mod composition_plan;
 #[allow(dead_code)]
 pub(crate) mod config;
 #[allow(dead_code)] // AssetStore 的持久内容计量与单写者发布。

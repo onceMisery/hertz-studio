@@ -253,7 +253,10 @@ pub(crate) fn probe_database_handles(root: &Path) -> Result<()> {
 
 /// Each admitted pool refunds only after its own physical SQLite handles exit.
 pub(crate) fn probe_named_database_handles(root: &Path, database: &str) -> Result<()> {
-    anyhow::ensure!(matches!(database, "wallpaper.db" | "trust.db"), "invalid database owner");
+    anyhow::ensure!(
+        matches!(database, "wallpaper.db" | "trust.db"),
+        "invalid database owner"
+    );
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let path = root.join(format!("{database}{suffix}"));
         let file = match OpenOptions::new()

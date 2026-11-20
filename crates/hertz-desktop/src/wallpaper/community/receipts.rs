@@ -22,7 +22,6 @@ pub(crate) struct AcceptedRelease {
     source_id: String,
     origin: String,
     envelope: SignedRelease,
-    digest: String,
 }
 
 impl AcceptedRelease {
@@ -34,9 +33,6 @@ impl AcceptedRelease {
     }
     pub(crate) fn body(&self) -> &release::Release {
         &self.envelope.release
-    }
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
     }
     pub(crate) fn envelope_json(&self) -> Result<String, JobError> {
         serde_json::to_string(&self.envelope).map_err(json)
@@ -214,7 +210,6 @@ impl TrustStore {
             source_id: id.to_owned(),
             origin: row.origin,
             envelope: signed,
-            digest: verified.canonical_digest().to_owned(),
         }))
     }
 
@@ -235,7 +230,7 @@ impl TrustStore {
                 .as_bytes(),
         )
         .map_err(contract)?;
-        let verified = signed
+        signed
             .clone()
             .verify(
                 &chain
@@ -250,7 +245,6 @@ impl TrustStore {
             source_id: id.to_owned(),
             origin: row.origin,
             envelope: signed,
-            digest: verified.canonical_digest().to_owned(),
         })
     }
 

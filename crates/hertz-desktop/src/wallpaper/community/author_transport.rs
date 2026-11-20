@@ -98,14 +98,14 @@ pub(super) async fn upload(
     auth: &Auth,
     session: &RequestSession,
     cancel: &AtomicBool,
-    id: &str,
+    upload: &super::author_model::Upload,
     file: std::fs::File,
     bytes: u64,
-    expires_at: u64,
 ) -> Result<(), JobError> {
+    let id = &upload.id;
     network::canonical_uuid(id)?;
     check(auth, session, cancel)?;
-    let remaining = expires_at.saturating_sub(super::now()).min(1800);
+    let remaining = upload.expires_at.saturating_sub(super::now()).min(1800);
     if remaining == 0 {
         return Err(error("upload_expired", "原上传已到期，请核对原记录"));
     }

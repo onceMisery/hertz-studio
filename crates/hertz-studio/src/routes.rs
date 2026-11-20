@@ -1056,6 +1056,7 @@ async fn desktop_mini_snapshot(State(state): State<Arc<AppState>>) -> Json<serde
 }
 
 /// 小窗封面的查询串：`?key=` 是曲目 uuid（safe_cover_id 准入在 desktop_mini::cover 里）。
+#[cfg(any(feature = "desktop-host", test))]
 #[derive(Deserialize)]
 struct CoverQuery {
     key: Option<String>,
@@ -1429,6 +1430,7 @@ async fn ai_wallpaper_artifact_delete(
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(feature = "desktop-host", test))]
 struct ArtifactClaim {
     grant_id: String,
     expected_claim_revision: i64,
@@ -1768,6 +1770,7 @@ async fn ai_capabilities_call(
 ) -> ApiResult<Json<serde_json::Value>> {
     let value = crate::ai::strict_json::parse(&bytes, 1024 * 1024, 128)
         .map_err(|_| bad_request("能力信封 JSON 不合法、重复字段或超过上界"))?;
+    #[cfg(any(feature = "desktop-host", test))]
     if value["operation"]
         .as_str()
         .is_some_and(|name| crate::ai::wallpaper_requests::operation(name).is_some())
@@ -2726,10 +2729,12 @@ pub(crate) struct UiNoticeRequest {
     pub(crate) action: String,
     /// 仅 `main-visibility` 用：主界面是否不可见。缺省按「可见」处理。
     #[serde(default)]
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) hidden: Option<bool>,
     /// 独立主界面的当前标题；缺省保留最近一次上报，用于原生窗口精确匹配。
     #[serde(default)]
     #[serde(rename = "windowTitle")]
+    #[cfg(any(feature = "desktop-host", test))]
     pub(crate) window_title: Option<String>,
 }
 

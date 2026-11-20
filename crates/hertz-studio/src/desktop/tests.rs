@@ -229,7 +229,9 @@ async fn dbx_library_http_has_no_desktop_or_wallpaper_backchannel() {
         .post(format!("http://{address}/v1/ui/notice"))
         .bearer_auth(&state.token)
         .json(&json!({"action":"main-visibility","hidden":true}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(visibility.status(), 400);
     let music = client
         .get(format!("http://{address}/v1/state"))

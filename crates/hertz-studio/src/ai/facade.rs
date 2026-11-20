@@ -96,6 +96,7 @@ async fn pause_rotation_before_install(grant_id: &str) {
 #[derive(Debug, Clone)]
 pub(crate) struct GrantContext {
     pub grant_id: String,
+    #[cfg(any(feature = "desktop-host", test))]
     pub credential_revision: String,
     pub scopes: BTreeSet<String>,
     pub policy_revision: i64,
@@ -387,6 +388,7 @@ pub(crate) async fn revoke_grant(
         .await
         .map_err(store_error)?
         .ok_or_else(|| internal("grant 撤销后不可见"))?;
+    #[cfg(any(feature = "desktop-host", test))]
     if row.delivery_mode == "native_session" {
         super::wallpaper_pairing::cancel_grant_jobs(state, grant_id).await?;
     }
@@ -402,6 +404,7 @@ pub(crate) async fn authenticate(
     authenticate_mode(state, presented, "file").await
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) async fn authenticate_wallpaper(
     state: &Arc<AppState>,
     presented: &str,
@@ -430,6 +433,7 @@ async fn authenticate_mode(
     if row.delivery_mode != mode {
         return Err(unauthorized());
     }
+    #[cfg(any(feature = "desktop-host", test))]
     if mode == "native_session" {
         super::wallpaper_pairing::validate_grant(state, &row).await?;
     }
@@ -437,6 +441,7 @@ async fn authenticate_mode(
         .await
         .map_err(store_error)?;
     Ok(GrantContext {
+        #[cfg(any(feature = "desktop-host", test))]
         credential_revision: row.credential_digest.clone(),
         grant_id: row.grant_id,
         scopes: parse_scopes(&row.scopes).into_iter().collect(),
@@ -479,6 +484,7 @@ pub(crate) fn context_json(ctx: &GrantContext, stage_tools_enabled: bool) -> Val
 }
 
 /// The caller holds grant_lifecycle through an external authorization decision.
+#[cfg(any(feature = "desktop-host", test))]
 pub(super) async fn current_file_grant(
     state: &Arc<AppState>,
     ctx: &GrantContext,

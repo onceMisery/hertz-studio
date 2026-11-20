@@ -230,11 +230,7 @@ pub(crate) struct LayoutInspection {
 
 impl LayoutInspection {
     fn new(integrated: bool, decoders: u32, members: usize) -> Self {
-        let max_members = if decoders == 0 {
-            4
-        } else {
-            (2 / decoders).max(1) as usize
-        };
+        let max_members = 2_u32.checked_div(decoders).map_or(4, |count| count.max(1)) as usize;
         let reason = if integrated {
             Some("内置场景使用集成渲染，仅支持单屏或横跨")
         } else if decoders > 2 || members > max_members {

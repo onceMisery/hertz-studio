@@ -143,7 +143,7 @@ async fn safety_facts_commit_even_when_the_candidate_signature_is_invalid() {
         "security_revoked",
     );
     library.pool().close().await;
-    (&*library.trust().pool).close().await;
+    (*library.trust().pool).close().await;
 }
 
 #[tokio::test]

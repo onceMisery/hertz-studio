@@ -117,14 +117,17 @@ pub(crate) trait StageIntentProvider: Send + Sync {
     /// 结构化壁纸输出模式（§19.5）：一次调用返回待校验的 builtin 输出 JSON，
     /// 校验由 [`hertz_wallpaper::generation::BuiltinSceneOutput`] 的合同层
     /// 负责。未实现结构化模式的 provider 沿用安全默认拒绝，不假装支持。
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_builtin(&self) -> bool {
         false
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_composition(&self) -> bool {
         false
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn quote_wallpaper_composition(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -133,6 +136,7 @@ pub(crate) trait StageIntentProvider: Send + Sync {
         self.quote(&request.brief)
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_composition(
         &self,
         _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -151,6 +155,7 @@ pub(crate) trait StageIntentProvider: Send + Sync {
 
     /// Quote the complete wallpaper request with its own output bounds.
     /// Existing zero-cost fixtures can keep their original quote.
+    #[cfg(any(feature = "desktop-host", test))]
     fn quote_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -158,6 +163,7 @@ pub(crate) trait StageIntentProvider: Send + Sync {
         self.quote(&request.brief)
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_builtin(
         &self,
         _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -188,6 +194,7 @@ pub(crate) struct CompletionReply {
 
 /// 壁纸结构化输出的 provider 回复：raw JSON 由合同层校验，校验失败按
 /// invalid_output 结算，与舞台 intent 的失败语义一致。
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) struct WallpaperReply {
     pub output: Result<Value, WallpaperOutputError>,
     pub usage: Option<TrustedUsage>,
@@ -196,6 +203,7 @@ pub(crate) struct WallpaperReply {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WallpaperOutputError {
     Provider(String),
+    #[cfg(any(feature = "desktop-host", test))]
     Rejected,
 }
 
@@ -209,6 +217,7 @@ impl std::fmt::Display for WallpaperOutputError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Provider(reason) => formatter.write_str(reason),
+            #[cfg(any(feature = "desktop-host", test))]
             Self::Rejected => {
                 formatter.write_str("wallpaper output violates the generation contract")
             }
@@ -225,8 +234,10 @@ pub(crate) struct GenerationCapability {
     pub reservation_micro_usd: i64,
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) const WALLPAPER_CAPABILITY: &str = "wallpaper.generate";
 
+#[cfg(any(feature = "desktop-host", test))]
 const IMAGE_GENERATION: GenerationCapability = GenerationCapability {
     input_max_bytes: hertz_wallpaper::generation::MAX_REQUEST_BYTES,
     queue_deadline_ms: QUEUE_DEADLINE_MS,
@@ -241,6 +252,7 @@ pub(crate) fn generation_capability(name: &str) -> Option<&'static GenerationCap
         run_deadline_ms: RUN_DEADLINE_MS,
         reservation_micro_usd: RESERVATION_MICRO_USD,
     };
+    #[cfg(any(feature = "desktop-host", test))]
     const WALLPAPER: GenerationCapability = GenerationCapability {
         input_max_bytes: hertz_wallpaper::generation::MAX_REQUEST_BYTES,
         queue_deadline_ms: QUEUE_DEADLINE_MS,
@@ -249,6 +261,7 @@ pub(crate) fn generation_capability(name: &str) -> Option<&'static GenerationCap
     };
     match name {
         CAPABILITY => Some(&STAGE),
+        #[cfg(any(feature = "desktop-host", test))]
         WALLPAPER_CAPABILITY => Some(&WALLPAPER),
         _ => None,
     }
@@ -259,7 +272,9 @@ pub(crate) fn generation_capability(name: &str) -> Option<&'static GenerationCap
 #[derive(Debug, Clone)]
 pub(crate) enum GenerationInput {
     Stage(String),
+    #[cfg(any(feature = "desktop-host", test))]
     Wallpaper(hertz_wallpaper::generation::WallpaperGenerateRequest),
+    #[cfg(any(feature = "desktop-host", test))]
     Composition {
         request: hertz_wallpaper::generation::WallpaperGenerateRequest,
         assets: hertz_wallpaper::generation::composition::AssetSet,
@@ -268,6 +283,7 @@ pub(crate) enum GenerationInput {
 }
 
 impl GenerationInput {
+    #[cfg(any(feature = "desktop-host", test))]
     fn wallpaper(
         request: hertz_wallpaper::generation::WallpaperGenerateRequest,
         assets: Option<hertz_wallpaper::generation::composition::AssetSet>,
@@ -282,6 +298,7 @@ impl GenerationInput {
         }
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn wallpaper_request(&self) -> Option<&hertz_wallpaper::generation::WallpaperGenerateRequest> {
         match self {
             Self::Wallpaper(request) | Self::Composition { request, .. } => Some(request),
@@ -289,15 +306,21 @@ impl GenerationInput {
         }
     }
     fn policy(&self, capability: &str) -> Option<&'static GenerationCapability> {
+        #[cfg(any(feature = "desktop-host", test))]
         if capability == WALLPAPER_CAPABILITY && self.is_image() {
-            Some(&IMAGE_GENERATION)
-        } else {
-            generation_capability(capability)
+            return Some(&IMAGE_GENERATION);
         }
+        generation_capability(capability)
     }
 
     pub(super) fn is_image(&self) -> bool {
-        matches!(self, Self::Wallpaper(request) if request.output.kind == hertz_wallpaper::generation::WallpaperGenerationKind::Image)
+        match self {
+            #[cfg(any(feature = "desktop-host", test))]
+            Self::Wallpaper(request) => {
+                request.output.kind == hertz_wallpaper::generation::WallpaperGenerationKind::Image
+            }
+            _ => false,
+        }
     }
 
     /// 按任务类型核价，壁纸使用完整请求及其独立输出预算。
@@ -312,7 +335,9 @@ impl GenerationInput {
     fn input_bytes(&self) -> Vec<u8> {
         match self {
             GenerationInput::Stage(brief) => brief.clone().into_bytes(),
+            #[cfg(any(feature = "desktop-host", test))]
             GenerationInput::Wallpaper(request) => serde_json::to_vec(request).unwrap_or_default(),
+            #[cfg(any(feature = "desktop-host", test))]
             GenerationInput::Composition {
                 request, assets, ..
             } => serde_json::to_vec(
@@ -409,14 +434,17 @@ impl StageIntentProvider for FakeProvider {
         })
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_builtin(&self) -> bool {
         true
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_composition(&self) -> bool {
         true
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_composition(
         &self,
         _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -455,6 +483,7 @@ impl StageIntentProvider for FakeProvider {
 
     /// 确定性壁纸输出：使用用户选定的资格目录场景，参数走目录默认
     /// （空 params 合法）；产物必然通过自家合同校验，供本地联调与回归。
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -503,15 +532,21 @@ pub(crate) struct AiRuntime {
     /// path without becoming durable jobs or retaining briefs.
     evaluations: Mutex<HashMap<String, RegisteredEvaluation>>,
     provider: RwLock<Arc<dyn StageIntentProvider>>,
+    #[cfg(any(feature = "desktop-host", test))]
     image_provider: Arc<dyn super::image_provider::ImageProvider>,
     /// 模型执行槽（§8.3）：每 DataDir 1 个受管执行——worker 先拿槽再
     /// accepted→running，等满 8 个停在 accepted。清理中的调用仍占槽。
     execution_slots: Arc<tokio::sync::Semaphore>,
     /// 壁纸生成 quote 内存态（§19.4）：重启即丢，不写任何持久层。
+    #[cfg(any(feature = "desktop-host", test))]
     wallpaper_quotes: Mutex<super::wallpaper_jobs::QuoteStore>,
+    #[cfg(any(feature = "desktop-host", test))]
     pub(super) wallpaper_pairings: Mutex<super::wallpaper_pairing::PendingStore>,
+    #[cfg(any(feature = "desktop-host", test))]
     pub(super) wallpaper_request_proofs: Mutex<super::wallpaper_requests::ProofStore>,
+    #[cfg(any(feature = "desktop-host", test))]
     pub(super) wallpaper_session_deadlines: Mutex<HashMap<String, std::time::Instant>>,
+    #[cfg(any(feature = "desktop-host", test))]
     pub(super) wallpaper_artifacts: Arc<super::wallpaper_artifacts::Runtime>,
 }
 
@@ -542,12 +577,18 @@ impl AiRuntime {
             inputs: Mutex::new(HashMap::new()),
             evaluations: Mutex::new(HashMap::new()),
             provider: RwLock::new(super::provider::configured(config)),
+            #[cfg(any(feature = "desktop-host", test))]
             image_provider: super::image_provider::configured(&config.image),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(any(feature = "desktop-host", test))]
             wallpaper_quotes: Mutex::new(super::wallpaper_jobs::QuoteStore::default()),
+            #[cfg(any(feature = "desktop-host", test))]
             wallpaper_pairings: Mutex::new(super::wallpaper_pairing::PendingStore::default()),
+            #[cfg(any(feature = "desktop-host", test))]
             wallpaper_request_proofs: Mutex::new(super::wallpaper_requests::ProofStore::default()),
+            #[cfg(any(feature = "desktop-host", test))]
             wallpaper_session_deadlines: Mutex::new(HashMap::new()),
+            #[cfg(any(feature = "desktop-host", test))]
             wallpaper_artifacts: Arc::new(super::wallpaper_artifacts::Runtime::default()),
         }
     }
@@ -556,6 +597,7 @@ impl AiRuntime {
         self.provider.read().await.clone()
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     pub(super) fn image_provider(&self) -> Arc<dyn super::image_provider::ImageProvider> {
         self.image_provider.clone()
     }
@@ -564,10 +606,12 @@ impl AiRuntime {
         &self,
         input: &GenerationInput,
     ) -> super::generation_provider::Provider {
-        if input.is_image() {
-            super::generation_provider::Provider::Image(self.image_provider())
-        } else {
-            super::generation_provider::Provider::Text(self.provider().await)
+        match input {
+            #[cfg(any(feature = "desktop-host", test))]
+            input if input.is_image() => {
+                super::generation_provider::Provider::Image(self.image_provider())
+            }
+            _ => super::generation_provider::Provider::Text(self.provider().await),
         }
     }
 
@@ -575,6 +619,7 @@ impl AiRuntime {
         self.execution_slots.clone()
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     pub(super) async fn discard_wallpaper_quotes(&self, principal: &str) {
         self.wallpaper_quotes.lock().await.discard(principal);
     }
@@ -879,7 +924,9 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
     if let Some(error) = first_error {
         return Err(error);
     }
+    #[cfg(any(feature = "desktop-host", test))]
     super::wallpaper_artifacts::cleanup(state).await?;
+    #[cfg(any(feature = "desktop-host", test))]
     super::wallpaper_artifacts::maintain_retention(state);
     if recovered > 0 {
         tracing::warn!("AI 恢复：{recovered} 个未完结任务收敛为 interrupted");
@@ -1174,6 +1221,7 @@ async fn submit_owned(
                 return Err(bad_request("brief 超过 16 KiB 上限"));
             }
         }
+        #[cfg(any(feature = "desktop-host", test))]
         GenerationInput::Wallpaper(request) | GenerationInput::Composition { request, .. } => {
             if request.brief.len() > cap.input_max_bytes {
                 return Err(bad_request("生成请求超过能力输入上限"));
@@ -1306,6 +1354,7 @@ async fn submit_owned(
         ));
     }
     let now = now_ms();
+    #[cfg(any(feature = "desktop-host", test))]
     if capability == WALLPAPER_CAPABILITY && principal != crate::idempotency::LOCAL_OWNER {
         super::wallpaper_pairing::require_transaction_time(
             state,
@@ -1413,11 +1462,13 @@ async fn submit_owned(
         .await
         .map_err(sql_error)?;
     }
+    #[cfg(any(feature = "desktop-host", test))]
     if let Some(request) = input.wallpaper_request() {
         super::wallpaper_artifacts::reserve(state, &mut tx, &job, request).await?;
     }
     // Serialize input handoff with cancellation cleanup, including the commit boundary.
     let mut inputs = state.ai_runtime.inputs.lock().await;
+    #[cfg(any(feature = "desktop-host", test))]
     if capability == WALLPAPER_CAPABILITY && principal != crate::idempotency::LOCAL_OWNER {
         super::wallpaper_pairing::require_transaction_time(
             state,
@@ -1475,7 +1526,9 @@ async fn run_job(
     }
     // All worker exits, including artifact I/O failure, retire ephemeral input.
     state.ai_runtime.inputs.lock().await.remove(&job_id);
+    #[cfg(any(feature = "desktop-host", test))]
     super::wallpaper_artifacts::maintain_retention(&state);
+    #[cfg(any(feature = "desktop-host", test))]
     if let Err(error) = super::wallpaper_artifacts::cleanup(&state).await {
         tracing::warn!(code=%error.code, "wallpaper result cleanup is deferred");
     }
@@ -1629,6 +1682,7 @@ async fn run_job_inner(
             tracing::warn!("AI dispatch blocked before send: {}", error.code);
             return Err("failed");
         }
+        #[cfg(any(feature = "desktop-host", test))]
         if job.capability == WALLPAPER_CAPABILITY
             && job.principal != crate::idempotency::LOCAL_OWNER
             && super::wallpaper_pairing::require_transaction_time(
@@ -1716,7 +1770,9 @@ async fn run_job_inner(
     // §19.5：壁纸走结构化输出模式，不复用返回 StageIntent 的 generate()。
     enum ProviderCall {
         Stage(ProviderReply),
+        #[cfg(any(feature = "desktop-host", test))]
         Wallpaper(WallpaperReply),
+        #[cfg(any(feature = "desktop-host", test))]
         Image(super::image_provider::Reply),
     }
     let mut call: std::pin::Pin<Box<dyn std::future::Future<Output = ProviderCall> + Send>> =
@@ -1742,6 +1798,7 @@ async fn run_job_inner(
                     )
                 })
             }
+            #[cfg(any(feature = "desktop-host", test))]
             (
                 GenerationInput::Wallpaper(request),
                 WALLPAPER_CAPABILITY,
@@ -1781,6 +1838,7 @@ async fn run_job_inner(
                     )
                 })
             }
+            #[cfg(any(feature = "desktop-host", test))]
             (
                 GenerationInput::Wallpaper(request),
                 WALLPAPER_CAPABILITY,
@@ -1802,6 +1860,7 @@ async fn run_job_inner(
                     )
                 })
             }
+            #[cfg(any(feature = "desktop-host", test))]
             (
                 GenerationInput::Composition {
                     request, assets, ..
@@ -1852,6 +1911,7 @@ async fn run_job_inner(
                 // A blocking file owner must actually exit before this slot is returned.
                 let reply = call.await;
                 let usage = match reply {
+                    #[cfg(any(feature = "desktop-host", test))]
                     ProviderCall::Image(reply) => reply.usage,
                     _ => None,
                 };
@@ -1864,7 +1924,16 @@ async fn run_job_inner(
             return;
         }
     };
-    let (mut raw_output, trusted_usage, image_file) = match outcome {
+    #[cfg(not(any(feature = "desktop-host", test)))]
+    let (raw_output, trusted_usage) = {
+        let ProviderCall::Stage(reply) = outcome;
+        (
+            reply.intent.map_err(WallpaperOutputError::Provider),
+            reply.usage,
+        )
+    };
+    #[cfg(any(feature = "desktop-host", test))]
+    let (raw_output, trusted_usage, image_file) = match outcome {
         ProviderCall::Stage(reply) => (
             reply.intent.map_err(WallpaperOutputError::Provider),
             reply.usage,
@@ -1891,7 +1960,11 @@ async fn run_job_inner(
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
+    #[cfg(any(feature = "desktop-host", test))]
+    let mut raw_output = raw_output;
+    #[cfg(any(feature = "desktop-host", test))]
     let mut image_prepared = None;
+    #[cfg(any(feature = "desktop-host", test))]
     if let Some(file) = image_file {
         let GenerationInput::Wallpaper(request) = &input else {
             unreachable!()
@@ -1934,11 +2007,13 @@ async fn run_job_inner(
                             contract::validate_artifact(&contract::artifact(&value)).map(|_| ())
                         })
                         .map(|_| ("artifact:1", contract::artifact(&value).to_string())),
+                    #[cfg(any(feature = "desktop-host", test))]
                     (GenerationInput::Wallpaper(_), WALLPAPER_CAPABILITY)
                         if input.is_image() && image_prepared.is_some() =>
                     {
                         Ok(("wallpaper.image:1", String::new()))
                     }
+                    #[cfg(any(feature = "desktop-host", test))]
                     (GenerationInput::Wallpaper(request), WALLPAPER_CAPABILITY) => {
                         match serde_json::to_vec(&value) {
                             Ok(bytes) => {
@@ -1955,6 +2030,7 @@ async fn run_job_inner(
                             Err(error) => Err(format!("输出序列化失败: {error}")),
                         }
                     }
+                    #[cfg(any(feature = "desktop-host", test))]
                     (GenerationInput::Composition { assets, .. }, WALLPAPER_CAPABILITY) => {
                         serde_json::to_vec(&value)
                             .map_err(|error| error.to_string())
@@ -1974,6 +2050,7 @@ async fn run_job_inner(
                 };
             match validated {
                 Ok((proposal_schema, proposal_payload)) => {
+                    #[cfg(any(feature = "desktop-host", test))]
                     let prepared = if input.is_image() {
                         image_prepared.take()
                     } else if job.capability == WALLPAPER_CAPABILITY {
@@ -2061,10 +2138,17 @@ async fn run_job_inner(
                             tx.commit().await.map_err(sql_error)?;
                             return Ok::<(), ApiError>(());
                         }
-                        if let Some(prepared) = &prepared {
+                        #[cfg(any(feature = "desktop-host", test))]
+                        let artifact_stored = if let Some(prepared) = &prepared {
                             super::wallpaper_artifacts::make_available(&mut tx, prepared, now)
                                 .await?;
+                            true
                         } else {
+                            false
+                        };
+                        #[cfg(not(any(feature = "desktop-host", test)))]
+                        let artifact_stored = false;
+                        if !artifact_stored {
                             let proposal = store::ProposalRow {
                                 proposal_id: proposal_id.clone(),
                                 job_id: job.job_id.clone(),
@@ -2125,6 +2209,7 @@ async fn run_job_inner(
                 }
             }
         }
+        #[cfg(any(feature = "desktop-host", test))]
         Err(WallpaperOutputError::Rejected) => {
             finish_running_with_failure_code(
                 state.clone(),
@@ -2644,6 +2729,7 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
 
 /// The lifecycle owner holds admission closed while this transaction reads
 /// fresh revisions, signals workers, and settles all of this principal's jobs.
+#[cfg(any(feature = "desktop-host", test))]
 pub(super) async fn cancel_principal_jobs(state: &Arc<AppState>, principal: &str) -> ApiResult<()> {
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
@@ -2741,6 +2827,7 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
     if !state.ai_runner_held() {
         return Ok(());
     }
+    #[cfg(any(feature = "desktop-host", test))]
     super::wallpaper_artifacts::cleanup(state).await?;
     let now = now_ms();
     let candidates = store::recovery_candidates(&state.db)
@@ -3195,6 +3282,7 @@ pub(crate) async fn instance_owner(state: &Arc<AppState>) -> ApiResult<String> {
 // local-owner 直连路径。
 // ---------------------------------------------------------------------------
 
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) async fn wallpaper_capabilities(
     state: &Arc<AppState>,
 ) -> ApiResult<super::wallpaper_jobs::CapabilitySnapshot> {
@@ -3203,6 +3291,7 @@ pub(crate) async fn wallpaper_capabilities(
 
 /// 本地编码/计价（§19.4）：不发 provider 网络请求。schema 哈希、能力快照与
 /// builtin 的场景目录哈希都必须与当前服务版本一致，不做静默降级。
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) async fn wallpaper_quote(
     state: &Arc<AppState>,
     principal: &str,
@@ -3352,6 +3441,7 @@ pub(crate) async fn wallpaper_quote(
 /// quote 消费与幂等（§19.4）：submit 只引用 quoteId 与 requestId。未消费
 /// quote 先乐观标记（并发同 quote 只有一个受理），受理失败还原为未消费；
 /// 已消费 quote 仅允许同键同载荷回放原 job，不能创建第二个任务。
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) async fn wallpaper_submit(
     state: &Arc<AppState>,
     principal: &str,
@@ -3372,6 +3462,7 @@ pub(crate) async fn wallpaper_submit(
     .map_err(|e| internal(format!("AI acceptance failed: {e}")))?
 }
 
+#[cfg(any(feature = "desktop-host", test))]
 async fn wallpaper_submit_owned(
     state: &Arc<AppState>,
     principal: &str,
@@ -3389,6 +3480,7 @@ async fn wallpaper_submit_owned(
             .ok_or_else(crate::error::unauthorized)?;
         super::wallpaper_pairing::validate_grant(state, &row).await?;
     }
+    #[cfg(any(feature = "desktop-host", test))]
     super::wallpaper_artifacts::cleanup(state).await?;
     let now = now_ms();
     let key = normalize_key(idempotency_key, now)?;
@@ -3573,6 +3665,7 @@ async fn wallpaper_submit_owned(
 }
 
 /// Native selection sends only a strictly bounded, public metadata snapshot.
+#[cfg(any(feature = "desktop-host", test))]
 pub(crate) async fn wallpaper_asset_set(
     state: &Arc<AppState>,
     principal: &str,

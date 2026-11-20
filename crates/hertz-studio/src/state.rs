@@ -4768,7 +4768,8 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         server_instance_id: state.server_instance_id.clone(),
         #[cfg(feature = "desktop-host")]
-        desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty()).then_some(crate::desktop_lyrics::PROTOCOL),
+        desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty())
+            .then_some(crate::desktop_lyrics::PROTOCOL),
         #[cfg(not(feature = "desktop-host"))]
         desktop_lyrics_protocol: None,
         #[cfg(feature = "desktop-host")]
@@ -4776,7 +4777,8 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         #[cfg(not(feature = "desktop-host"))]
         wallpaper_protocol: None,
         #[cfg(feature = "desktop-host")]
-        desktop_mini_protocol: (!state.desktop_mini_key.is_empty()).then_some(crate::desktop_mini::PROTOCOL),
+        desktop_mini_protocol: (!state.desktop_mini_key.is_empty())
+            .then_some(crate::desktop_mini::PROTOCOL),
         #[cfg(not(feature = "desktop-host"))]
         desktop_mini_protocol: None,
     };
@@ -7306,13 +7308,29 @@ pub(crate) mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["port"], 4321);
-        assert_eq!(value["wallpaper_protocol"], if cfg!(feature = "desktop-host") { serde_json::json!(crate::wallpaper::PROTOCOL) } else { serde_json::Value::Null });
+        assert_eq!(
+            value["wallpaper_protocol"],
+            if cfg!(feature = "desktop-host") {
+                serde_json::json!(crate::wallpaper::PROTOCOL)
+            } else {
+                serde_json::Value::Null
+            }
+        );
         state.desktop_lyrics_key = "b".repeat(64);
         state.desktop_mini_key = "c".repeat(64);
         write_discovery(&state, 4321).await.unwrap();
-        let all: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        for field in ["desktop_lyrics_protocol", "wallpaper_protocol", "desktop_mini_protocol"] {
-            assert_eq!(all.get(field).is_some(), cfg!(feature = "desktop-host"), "{field}");
+        let all: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for field in [
+            "desktop_lyrics_protocol",
+            "wallpaper_protocol",
+            "desktop_mini_protocol",
+        ] {
+            assert_eq!(
+                all.get(field).is_some(),
+                cfg!(feature = "desktop-host"),
+                "{field}"
+            );
         }
         assert_eq!(value["desktop_lyrics_protocol"], serde_json::Value::Null);
         state.audio.shutdown();

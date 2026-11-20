@@ -175,13 +175,20 @@ impl AssetStore {
     }
 
     pub(crate) fn bind_trust(&self, trust: Arc<super::community::TrustStore>) -> Result<()> {
-        let bound=self.trust.get_or_init(||Arc::clone(&trust));
-        if !Arc::ptr_eq(bound,&trust){return Err(JobError::new("trust_owner_conflict","资产库已绑定另一安全库"));}
+        let bound = self.trust.get_or_init(|| Arc::clone(&trust));
+        if !Arc::ptr_eq(bound, &trust) {
+            return Err(JobError::new(
+                "trust_owner_conflict",
+                "资产库已绑定另一安全库",
+            ));
+        }
         Ok(())
     }
 
     pub(crate) fn security_check(&self, hash: &str) -> Result<()> {
-        if let Some(trust)=self.trust.get(){trust.security_check(hash)?;}
+        if let Some(trust) = self.trust.get() {
+            trust.security_check(hash)?;
+        }
         Ok(())
     }
 

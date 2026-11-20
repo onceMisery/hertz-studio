@@ -15,6 +15,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(any(feature = "desktop-host", test))]
 mod openai_wallpaper;
 
 const RESPONSE_BYTES: usize = 256 * 1024;
@@ -301,12 +302,15 @@ impl StageIntentProvider for Ollama {
     fn ready(&self) -> bool {
         true
     }
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_builtin(&self) -> bool {
         true
     }
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_composition(&self) -> bool {
         true
     }
+    #[cfg(any(feature = "desktop-host", test))]
     fn quote_wallpaper_composition(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -314,6 +318,7 @@ impl StageIntentProvider for Ollama {
     ) -> Result<PriceQuote, String> {
         super::composition_provider::quote(self, request, assets)
     }
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_composition(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -331,12 +336,14 @@ impl StageIntentProvider for Ollama {
             cancellation,
         ))
     }
+    #[cfg(any(feature = "desktop-host", test))]
     fn quote_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
     ) -> Result<PriceQuote, String> {
         super::wallpaper_provider::quote(self, request)
     }
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -728,14 +735,17 @@ impl StageIntentProvider for OpenAi {
         true
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_builtin(&self) -> bool {
         self.ready()
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn supports_wallpaper_composition(&self) -> bool {
         self.ready()
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn quote_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -743,6 +753,7 @@ impl StageIntentProvider for OpenAi {
         openai_wallpaper::quote(self, request, None)
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn quote_wallpaper_composition(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -751,6 +762,7 @@ impl StageIntentProvider for OpenAi {
         openai_wallpaper::quote(self, request, Some(assets))
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
@@ -769,6 +781,7 @@ impl StageIntentProvider for OpenAi {
         ))
     }
 
+    #[cfg(any(feature = "desktop-host", test))]
     fn generate_wallpaper_composition(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,

@@ -131,7 +131,6 @@ async fn hierarchy_and_order_survive_save_reopen_and_immutable_package() {
     );
     assert_eq!(author["effects"][0]["id"], "glow");
     library.pool().close().await;
-    drop(drafts);
     drop(library);
     let reopened = Library::open(root.path()).await.unwrap();
     let reopened_draft = WorkDrafts::new(&reopened).get(&created.id).await.unwrap();
