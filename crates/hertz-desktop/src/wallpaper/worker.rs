@@ -2,6 +2,8 @@
 //! G3-S qualification entry. Product Web selection remains disabled until all three gates pass.
 #[path = "worker_protocol.rs"]
 pub(crate) mod protocol;
+#[path = "worker_renderer_probe.rs"]
+pub(crate) mod renderer_probe;
 #[path = "worker_sandbox.rs"]
 pub(crate) mod sandbox;
 #[path = "worker_webview.rs"]
@@ -9,6 +11,7 @@ mod webview;
 
 use anyhow::{bail, Context, Result};
 use protocol::*;
+use renderer_probe::{NetworkFixture, RENDERER_DEADLINE_SECONDS};
 use sandbox::{Handle, Launch, VerifiedWorker};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -239,6 +242,11 @@ impl WorkerManager {
             Launch::suspended(&self.executable, Some(&self.sha256), output)?
         };
         launch.job.install_runtime_pin(&runtime_binary)?;
+        let mut network_fixture = if mode == ProbeMode::RendererNetwork {
+            Some(NetworkFixture::create()?)
+        } else {
+            None
+        };
         let bootstrap = Bootstrap {
             worker_protocol: PROTOCOL,
             identity: Identity {
@@ -267,6 +275,10 @@ impl WorkerManager {
                 .boundary_fixture
                 .as_ref()
                 .map(|fixture| fixture.request()),
+            network_targets: network_fixture
+                .as_ref()
+                .map(|fixture| fixture.targets())
+                .transpose()?,
         };
         bootstrap.validate()?;
         let mut evidence = serde_json::json!({"schemaVersion":1,"gate":"G3-S-stop-1","passed":false,"webEnabled":false,"desktopBuildId":crate::component::BUILD_ID,"workerProtocol":PROTOCOL,"parent":{"pid":bootstrap.parent_pid,"created":bootstrap.parent_created},"worker":launch.worker,"sourceBinary":launch.source.identity,"stagedBinary":launch.staged.as_ref().unwrap().identity,"token":launch.token,"job":launch.job.evidence()?,"runtime":{"version":version,"folder":folder},"bootstrap":bootstrap,"events":[]});
@@ -285,6 +297,8 @@ impl WorkerManager {
             ProbeMode::BoundedMemory => "fixed 64MiB touched JS allocation, native Job peak commit growth and owned-Job termination; 512MiB limit enforcement and GPU pressure remain unqualified",
             ProbeMode::MemoryLimit => "fixed maximum 640MiB touched JS allocation with 10s independent deadline; only original Job memory-limit notification proves enforcement, strict lifecycle qualification remains required",
             ProbeMode::MessageFlood => "fixed 192 valid page frames exceed native page rate bucket and terminate owned Job; private pipe fuzz matrix remains separate",
+            ProbeMode::RendererNetwork => "fixed browser attempts against owned IPv4/IPv6 loopback controls; CSP, native denials and parent transport counts are separate facts; no complete network qualification",
+            ProbeMode::GraphicsPressure => "eight bounded Canvas/WebGL/PNG/VP8 pixel and lifecycle rounds followed by original whole-tree close; no physical GPU or long-duration qualification",
         });
         evidence["parentBinary"] = serde_json::to_value(&parent_binary.identity)?;
         evidence["runtimeBinary"] = serde_json::to_value(&runtime_binary.identity)?;
@@ -347,10 +361,16 @@ impl WorkerManager {
         let mut suspend_at = None::<Instant>;
         let mut suspend_guard = None;
         let mut pressure_guard = None;
+        let mut renderer_guard = None;
+        let mut renderer_completed = false;
+        let mut renderer_passed = false;
         let mut suspend_requested = false;
         let mut expected_termination = false;
         let result = (|| -> Result<()> {
             loop {
+                if let Some(fixture) = &mut network_fixture {
+                    evidence["rendererNetworkParent"] = fixture.sample()?;
+                }
                 if mode == ProbeMode::MemoryLimit && launch.job.memory_limit_observed() {
                     expected_termination = true;
                     evidence["nativeMemoryLimitReached"] = serde_json::json!(true);
@@ -417,6 +437,25 @@ impl WorkerManager {
                             serde_json::to_vec_pretty(&evidence)?,
                         )?;
                         match &message {
+                            WorkerControl::RendererCompleted {
+                                receipt, denials, ..
+                            } => {
+                                if !frame
+                                    || workload_started.is_none()
+                                    || renderer_completed
+                                    || receipt.mode() != mode
+                                {
+                                    bail!("unexpected renderer completion receipt");
+                                }
+                                renderer_completed = true;
+                                renderer_passed = receipt.workload_passed(denials);
+                                evidence["rendererReceipt"] = serde_json::to_value(receipt)?;
+                                evidence["rendererNativeDenials"] = serde_json::to_value(denials)?;
+                                evidence["rendererWorkloadAfter"] = launch.job.workload_sample()?;
+                                writer.send(ParentControl::Stop {
+                                    identity: bootstrap.identity.clone(),
+                                })?;
+                            }
                             WorkerControl::Boundaries { receipt, .. } => {
                                 if mode != ProbeMode::OsBoundaries || boundaries {
                                     bail!("unexpected boundary receipt");
@@ -585,7 +624,7 @@ impl WorkerManager {
                                 evidence["presentation"] = serde_json::json!({"hwnd":mounted_hwnd as u64,"visible":true,"alpha":alpha,"flags":flags,"afterVerifiedCapture":true});
                                 std::thread::sleep(Duration::from_millis(250));
                                 frame = true;
-                                if mode.expects_termination() {
+                                if mode.has_workload() {
                                     evidence["workloadBefore"] = launch.job.workload_sample()?;
                                     workload_dispatched = Some(Instant::now());
                                     if mode == ProbeMode::MemoryLimit {
@@ -593,6 +632,12 @@ impl WorkerManager {
                                             Some(launch.job.deadline(
                                                 Instant::now() + Duration::from_secs(10),
                                             )?);
+                                    }
+                                    if mode.is_renderer() {
+                                        renderer_guard = Some(launch.job.deadline(
+                                            Instant::now()
+                                                + Duration::from_secs(RENDERER_DEADLINE_SECONDS),
+                                        )?);
                                     }
                                     writer.send(ParentControl::RunProbe {
                                         identity: bootstrap.identity.clone(),
@@ -662,6 +707,7 @@ impl WorkerManager {
                     && (!expected_termination || workload_started.is_none()))
                 || (!mode.expects_termination() && !closed)
                 || (mode == ProbeMode::BusySuspend && !suspend_requested)
+                || (mode.is_renderer() && !renderer_completed)
             {
                 bail!("missing native startup facts");
             }
@@ -690,6 +736,18 @@ impl WorkerManager {
         }
         if let Some(guard) = pressure_guard {
             evidence["pressureDeadlineTerminatedJob"] = serde_json::json!(guard.finish()?);
+        }
+        if let Some(guard) = renderer_guard {
+            evidence["rendererDeadlineTerminatedJob"] = serde_json::json!(guard.finish()?);
+        }
+        if let Some(fixture) = &mut network_fixture {
+            // Sample after close too; a late connection cannot be lost by an earlier read.
+            evidence["rendererNetworkParent"] = fixture.sample()?;
+            renderer_passed &= evidence["rendererNetworkParent"]["listenersQuiet"] == true;
+        }
+        if mode.is_renderer() {
+            evidence["rendererWorkloadCompleted"] = serde_json::json!(renderer_completed);
+            evidence["rendererWorkloadPassed"] = serde_json::json!(renderer_passed);
         }
         evidence["exit"] = match exit {
             Ok(value) => value,
@@ -721,6 +779,8 @@ impl WorkerManager {
                 && evidence["exit"]["activeProcesses"] == 0
                 && evidence["deadlineTerminatedJob"] == false
                 && evidence["pressureDeadlineTerminatedJob"] != true
+                && evidence["rendererDeadlineTerminatedJob"] != true
+                && (!mode.is_renderer() || renderer_passed)
         );
         if let Err(error) = result {
             evidence["error"] = serde_json::json!(format!("{error:#}"));
@@ -747,6 +807,9 @@ fn probe_failure_reason(evidence: &serde_json::Value) -> String {
         || evidence["exit"]["activeProcesses"] != 0
     {
         return "original Job physical exit barrier incomplete".into();
+    }
+    if evidence["rendererWorkloadPassed"] == false {
+        return "bounded renderer workload did not meet its software observations; inspect receipt and native controls".into();
     }
     "native probe close policy did not pass".into()
 }

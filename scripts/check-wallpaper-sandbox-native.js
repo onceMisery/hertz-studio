@@ -14,9 +14,14 @@ const value = (flag) => {
   return options[index + 1];
 };
 const candidate = path.resolve(value('--output-dir') || path.join(root, 'output/a05-g3s-20261108/current-candidate'));
-const executable = path.resolve(value('--exe') || path.join(candidate, 'target/debug/hertz-desktop.exe'));
+const buildTarget = path.resolve(value('--target-dir') || path.join(candidate, 'target'));
+const executable = path.resolve(value('--exe') || path.join(buildTarget, 'debug/hertz-desktop.exe'));
 const build = options.includes('--build');
 const extended = options.includes('--extended');
+const rendererOnly = options.includes('--renderer-only');
+const probeModes = extended ? ['os-boundaries', 'busy-suspend', 'bounded-memory', 'memory-limit',
+  'message-flood', 'renderer-network', 'graphics-pressure']
+  : rendererOnly ? ['renderer-network', 'graphics-pressure'] : [];
 const digest = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const run = (file, args, timeout = 60000) => {
@@ -99,13 +104,13 @@ fs.rmSync(path.join(candidate, 'candidate-evidence.json'), { force: true });
 if (build) {
   fs.rmSync(receiptFile, { force: true });
   fs.rmSync(path.join(candidate, 'build-input-hashes.json'), { force: true });
-  const produced = path.join(candidate, 'target/debug/hertz-desktop.exe');
+  const produced = path.join(buildTarget, 'debug/hertz-desktop.exe');
   if (executable.toLowerCase() !== produced.toLowerCase()) {
     throw new Error('--build requires --exe to select the actual dedicated build output.');
   }
   const buildInputs = snapshot();
   // A separate target directory never overwrites the user's running debug executable.
-  const built = run('cargo', ['build', '-p', 'hertz-desktop', '--locked', '--target-dir', path.join(candidate, 'target')], 20 * 60 * 1000);
+  const built = run('cargo', ['+1.88.0', 'build', '-p', 'hertz-desktop', '--locked', '--offline', '--target-dir', buildTarget], 20 * 60 * 1000);
   fs.writeFileSync(path.join(candidate, 'build.log'), built.stdout + '\n' + built.stderr);
   if (built.exitCode !== 0) throw new Error(`Dedicated candidate build failed: ${built.error || built.exitCode}`);
   if (JSON.stringify(buildInputs) !== JSON.stringify(snapshot())) throw new Error('Source changed during dedicated build.');
@@ -145,8 +150,8 @@ fs.writeFileSync(path.join(candidate, 'harness.stderr.log'), actual.stderr);
 let startup = null;
 try { startup = readJson(path.join(candidate, 'startup-report.json')); } catch (error) { startup = { passed: false, error: actual.error || `Current native report absent: ${error}` }; }
 const probes = [];
-if (extended) {
-  for (const mode of ['os-boundaries', 'busy-suspend', 'bounded-memory', 'memory-limit', 'message-flood']) {
+if (probeModes.length) {
+  for (const mode of probeModes) {
     // Each mode owns one fresh profile, process tree and report. Earlier failures
     // stay visible; a successful later mode never substitutes for their evidence.
     const directory = path.join(candidate, mode);
@@ -166,7 +171,7 @@ if (extended) {
   }
 }
 const facts = {
-  schemaVersion: 1, gate: extended ? 'G3-S-offline-partial' : 'G3-S-stop-1', started, completed: new Date().toISOString(),
+  schemaVersion: 1, gate: probeModes.length ? 'G3-S-offline-partial' : 'G3-S-stop-1', started, completed: new Date().toISOString(),
   executable, executableSha256: parentHash, executableHashAfter: digest(fs.readFileSync(executable)),
   component, sourceHashes, sourceBuildBinding, buildReceipt: receipt,
   git: run('git', ['status', '--short'], 10000).stdout,
@@ -176,8 +181,8 @@ const facts = {
   harness: { exitCode: actual.exitCode, signal: actual.signal, error: actual.error },
   startup, probes, webEnabled: false, g3sQualified: false,
   remainingQualification: [
-    'Browser HTTP/HTTPS, IPv6/private/public, DNS, WebSocket, WebTransport, WebRTC/STUN, worker/service-worker, redirects and downloads matrix',
-    'Whole-tree memory-limit qualification and strict exit barrier, repeated canvas/decoder allocation and independently attributed physical GPU pressure/stop thresholds',
+    'Full OS-enforced network matrix: private/public routing, system DNS, real TLS/QUIC/STUN/redirect handshakes; local browser denials do not grant this qualification',
+    'Whole-tree memory-limit qualification and strict exit barrier, independently attributed physical GPU pressure/stop thresholds; fixed renderer rounds are bounded software coverage only',
     'Long-running pressure and environment qualification; these bounded local probes do not grant product Web execution'
   ],
   passed: actual.exitCode === 0 && startup.passed === true && direct.exitCode !== 0 && direct.exitCode !== null

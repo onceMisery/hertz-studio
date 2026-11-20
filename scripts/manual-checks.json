@@ -119,6 +119,10 @@
       "purpose": "Fresh source-bound Windows candidate with real WorkerW/WebView2: immutable native package import, builtin/image/font/video/particles shared output, requested high/30fps to actual low/15fps independent preview, three fits, pause/resume, natural exit/reopen, nonzero predicate refusal preserving current selection, all native allocations draining and same-connection PID-verified natural quit. Requires copied wallpaper-media-probe HERTZ_DESKTOP_BIN, HERTZ_DESKTOP_BUILD_RECEIPT, HERTZ_BUILTIN_NATIVE_OUTPUT and PLAYWRIGHT_MODULE. Serial GUI; existing hosts preserved. Other monitor/GPU, native/editor seek and long stability remain separate."
     },
     {
+      "script": "check-wallpaper-renderer-probes.js",
+      "purpose": "Real Chrome fixed renderer workloads with the native CSP: eight Canvas/WebGL/PNG/VP8 pixel and lifecycle rounds, unavailable codec and late-frame cleanup, 25 local network paths. Requires PLAYWRIGHT_MODULE. Ordinary Chrome diagnostics only; use source-bound check-wallpaper-sandbox-native.js --renderer-only for native denial counters, owned loopback controls, AppContainer and strict whole-tree exit."
+    },
+    {
       "script": "check-wallpaper-sandbox-native.js",
       "purpose": "Actual owned Windows G3-S no-network AppContainer candidate: exact worker binary/hash, private bootstrap, token/SID/capabilities and Job limit readback, WorkerW ownership/mount, isolated WebView2 process identity, rendered probe first frame and whole-Job shutdown. Uses --exe/--output-dir (optional isolated --build); product author Web remains disabled until all three qualification gates pass. Run GUI candidates serially."
     },

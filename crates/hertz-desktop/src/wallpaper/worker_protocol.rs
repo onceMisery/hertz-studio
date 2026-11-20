@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Private G3-S protocol. Lengths are checked before allocation on both channels.
+use super::renderer_probe::{NativeDenials, NetworkTargets, RendererReceipt};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -29,6 +30,8 @@ pub enum ProbeMode {
     BoundedMemory,
     MemoryLimit,
     MessageFlood,
+    RendererNetwork,
+    GraphicsPressure,
 }
 impl ProbeMode {
     pub fn from_cli(value: &str) -> io::Result<Self> {
@@ -39,6 +42,8 @@ impl ProbeMode {
             "bounded-memory" => Ok(Self::BoundedMemory),
             "memory-limit" => Ok(Self::MemoryLimit),
             "message-flood" => Ok(Self::MessageFlood),
+            "renderer-network" => Ok(Self::RendererNetwork),
+            "graphics-pressure" => Ok(Self::GraphicsPressure),
             _ => invalid("unknown fixed qualification probe"),
         }
     }
@@ -47,6 +52,12 @@ impl ProbeMode {
             self,
             Self::BusySuspend | Self::BoundedMemory | Self::MemoryLimit | Self::MessageFlood
         )
+    }
+    pub fn is_renderer(self) -> bool {
+        matches!(self, Self::RendererNetwork | Self::GraphicsPressure)
+    }
+    pub fn has_workload(self) -> bool {
+        self.expects_termination() || self.is_renderer()
     }
 }
 
@@ -160,6 +171,7 @@ pub struct Bootstrap {
     pub user_data_folder: String,
     pub probe_mode: ProbeMode,
     pub boundary_probe: Option<BoundaryProbe>,
+    pub network_targets: Option<NetworkTargets>,
 }
 impl Bootstrap {
     pub fn validate(&self) -> io::Result<()> {
@@ -208,6 +220,11 @@ impl Bootstrap {
             }
             _ => return invalid("boundary fixture and probe mode differ"),
         }
+        match (&self.network_targets, self.probe_mode) {
+            (Some(targets), ProbeMode::RendererNetwork) => targets.validate()?,
+            (None, mode) if mode != ProbeMode::RendererNetwork => {}
+            _ => return invalid("network fixture and probe mode differ"),
+        }
         Ok(())
     }
     pub fn origin(&self) -> String {
@@ -240,6 +257,11 @@ pub enum ParentControl {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkerControl {
+    RendererCompleted {
+        identity: Identity,
+        receipt: RendererReceipt,
+        denials: NativeDenials,
+    },
     Boundaries {
         identity: Identity,
         receipt: BoundaryReceipt,
@@ -301,6 +323,7 @@ impl WorkerControl {
         match self {
             Self::Stage { identity, .. } => identity,
             Self::Window { identity, .. }
+            | Self::RendererCompleted { identity, .. }
             | Self::Boundaries { identity, .. }
             | Self::ProbeStarted { identity, .. }
             | Self::SuspendRequested { identity }
@@ -317,6 +340,7 @@ impl WorkerControl {
             return invalid("stale worker generation");
         }
         match self {
+            Self::RendererCompleted { receipt, .. } => receipt.validate(),
             Self::ProbeRejected { reason, .. } if reason.len() > 128 => {
                 invalid("oversize probe rejection")
             }
@@ -324,7 +348,7 @@ impl WorkerControl {
                 mode,
                 allocated_bytes,
                 ..
-            } if !mode.expects_termination()
+            } if !mode.has_workload()
                 || (*mode == ProbeMode::BoundedMemory
                     && *allocated_bytes != PROBE_MEMORY_BYTES)
                 || (*mode != ProbeMode::BoundedMemory && *allocated_bytes != 0) =>

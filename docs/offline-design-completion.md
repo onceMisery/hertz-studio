@@ -47,6 +47,21 @@ G3-S 本轮源码绑定构建的普通 stop1 通过：受限 AppContainer/WebVie
 
 `output/offline-integration-20261120/g3s-pressure-candidate/` 绑定当前源码与候选，实测 `nativeMemoryLimitReached=true`、原通知为 10，Job 终止且 `activeProcesses=0`，独立压力期限没有触发。报告的 Job 峰值为 540745728 字节；这证明限额通知和终止发生，不证明进程树从未瞬时超过 512 MiB。原 fatal 规则使 close 在取得完整物理退出证明前拒绝，EXIT 回执也不完整，因此本模式 `passed=false`，不能记成完整内存或 G3-S 资格通过。节点五项夹具检查、38 项 worker 回归及 1 项通知分类反例通过，独立复审已关闭报告竞态。
 
-当前基础网络和强制退出门仍被实际环境阻挡。完整 renderer 网络协议矩阵、重复图形/解码压力仍未实现或未验；它们是后续软件验证缺口，不能描述为缺 token。物理 GPU 归属与长稳另外需要设备证据。`webEnabled` 和完整 G3-S 资格继续关闭；本次不改变机器防火墙配置。
+后续补齐了两个固定 renderer 探针，仍沿配套二进制、原生私有管道和原 Job 执行：
+
+- `renderer-network`：25 条固定路径，覆盖本机 IPv4/IPv6 HTTP/HTTPS、XHR/beacon/EventSource、WS/WSS、WebTransport、WebRTC/STUN、worker/blob worker/shared worker/service worker、图片/iframe/表单、DNS 预取/preconnect，以及重定向初始请求、下载、弹窗、外部协议和导航。父进程持有自有 loopback TCP/UDP 监听器并做正向对照，计数单调累积到进程关闭之后。页面 API 结果、CSP 事件、原生拒绝计数和父监听事实分别保留；超时、接口不存在、成功访问均不能算软件观察通过。
+- `graphics-pressure`：固定八轮 1024² Canvas/ImageBitmap、WebGL 纹理/帧缓冲、PNG ImageDecoder 和 256² VP8 编解码，核对实际像素、输出及关闭；每轮释放 frame/codec/GL 对象，并等待 context-loss 回执。解码超时的迟到 frame 也关闭。原生派发前安装独立二十秒 Job 期限，完成后仍要求原完整自然退出证明。
+
+当前源码绑定原生报告在 `output/offline-integration-20261120/g3s-renderer-verified/candidate-evidence.json`，候选 SHA-256 为 `36b4b4ada13bf9426f3d45c24986178c3404f428c00d3f85658dea2180d8b503`。364 个源码哈希逐项复核匹配，运行前后二进制一致：普通启动和图形八轮通过，图形 Job 峰值 249712640 字节，七个进程均取得完整 NEW/EXIT 和物理自然退出，期限未触发。这是有界重复图形/解码软件证据，不是 GPU 物理显存、停止阈值或长稳资格。
+
+同候选网络探针仍为 **failed**：WebRTC 在 `setLocalDescription` 阶段超时（实际 2254 ms），其余 24 条得到拒绝或已派发记录；观察到十八条 CSP 事件、两次原生导航拒绝、一次弹窗拒绝、一次下载拒绝和两次资源拒绝。三个自有监听器均为零，十二个进程完整自然退出，但静默监听不能弥补 WebRTC 未完成，也不能推翻先前原生 TCP/UDP 返回成功的反例。WebRTC 超时后冻结诊断阶段、关闭 peer，迟到 continuation 不再调用已关闭对象。外部协议本次由导航层拒绝，`LaunchingExternalUriScheme` 计数为零，不宣称该回调已覆盖。
+
+真实 Chrome 七组回归覆盖正常图形、缺少 codec、迟到解码帧、网络路径，以及 WebRTC 三个阶段的迟到结果；原生回执四项验证覆盖缺项/重复、成功访问、超时/不可用、阶段未完成、消息/代际边界和监听事实不被二次采样抹掉。普通 Chrome 的本地连接确有到达，报告明确不把它当 AppContainer 隔离证据。审查关闭了遗漏终态过滤与迟到阶段改写问题。`g3s-renderer-final` 是迟到修复前的旧源候选，不能用于证明当前修复；当前结论只使用上述 `g3s-renderer-verified`。
+
+复现入口为 `node scripts/check-wallpaper-renderer-probes.js`（使用既有 `PLAYWRIGHT_MODULE`）和 `node scripts/check-wallpaper-sandbox-native.js --build --renderer-only --output-dir <独立证据目录>`；`--extended` 包含全部原有压力与新探针，`--target-dir` 可指定专用构建缓存，但仍须重新构建并核对全部源码。
+
+本增量最终 worker 回归 43 项通过、1 项显式 Job 诊断默认忽略；定向格式检查、五项原固定工作负载夹具和 359 个检查入口登记通过。桌面 crate 的全部 target/feature Clippy 成功，保留既有社区与测试风格告警，新探针没有新增告警。日志为 `renderer-worker-verified.log`、`renderer-clippy-verified.log` 和 `renderer-browser-verified.log`。
+
+当前基础网络和强制退出门仍未通过。私网/公网路由、实际系统 DNS、TLS/QUIC/STUN 握手及重定向完整链没有被本地尝试覆盖；物理 GPU 归属/有效采样及停止阈值、目标设备与长稳也未取得资格。以上不能描述为缺 token，更不能将探针已实现写成 G3-S 全部通过。`webEnabled` 和完整 G3-S 资格继续关闭；本次不改变机器防火墙配置。
 
 视频录制的原 256 MiB 固定预留与 128 MiB 页面额度冲突已经修复。较大的来源配合竖屏/1080p 仍可能超出 64 MiB 解码工作区；现在在采集前给出可行动的拒绝信息，缩小窗口后可重试。较广工程、草稿及模板浏览器流程通过，草稿夹具改为符合实际格式校验的 PNG，并等待异步导入和租约释放。源式容量、系统真实音频与设备资格的区别见[视频导出](video-export.md)。
