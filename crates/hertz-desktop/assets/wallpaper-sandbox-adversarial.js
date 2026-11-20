@@ -24,6 +24,24 @@
     }
     window.__hertzBoundedProbeMemory = blocks;
     started(64 * 1024 * 1024);
+  } else if (mode === 'memoryLimit') {
+    const blocks = window.__hertzBoundedProbeMemory = [];
+    started();
+    // The native whole-Job cap remains 512 MiB. This fixed maximum attempts to
+    // cross it without relying on page self-report as enforcement evidence.
+    const allocate = () => {
+      if (blocks.length >= 40) return;
+      try {
+        const block = new Uint8Array(16 * 1024 * 1024);
+        for (let offset = 0; offset < block.length; offset += 4096) block[offset] = 0x5a;
+        blocks.push(block);
+        setTimeout(allocate, 20);
+      } catch (_) {
+        // JS allocation refusal alone is not a native Job-limit receipt.
+        window.__hertzBoundedProbeAllocationStopped = true;
+      }
+    };
+    setTimeout(allocate, 50);
   } else if (mode === 'messageFlood') {
     started();
     for (let index = 0; index < 192; index++) {

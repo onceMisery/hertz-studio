@@ -273,7 +273,8 @@ impl WorkerManager {
         evidence["probeMode"] = serde_json::to_value(mode)?;
         evidence["g3sQualified"] = serde_json::json!(false);
         evidence["fixedWorkloadLimits"] = serde_json::json!({"busyMilliseconds":PROBE_BUSY_MS,
-            "touchedAllocationBytes":PROBE_MEMORY_BYTES,"pageFloodFrames":192,"suspendDeadlineMilliseconds":2000});
+            "touchedAllocationBytes":PROBE_MEMORY_BYTES,"memoryLimitAttemptBytes":PROBE_MEMORY_LIMIT_BYTES,
+            "memoryLimitDeadlineMilliseconds":10000,"pageFloodFrames":192,"suspendDeadlineMilliseconds":2000});
         if mode != ProbeMode::Startup {
             evidence["gate"] = serde_json::json!("G3-S-offline-partial");
         }
@@ -282,6 +283,7 @@ impl WorkerManager {
             ProbeMode::OsBoundaries => "native sibling canary read/write/create, excluded inherited file, parent harmful handle access, IPv4 loopback TCP/UDP; full browser/network matrix remains unqualified",
             ProbeMode::BusySuspend => "fixed 8s JS loop, native TrySuspend attempt and independent 2s owned-Job termination; callback alone never proves suspension",
             ProbeMode::BoundedMemory => "fixed 64MiB touched JS allocation, native Job peak commit growth and owned-Job termination; 512MiB limit enforcement and GPU pressure remain unqualified",
+            ProbeMode::MemoryLimit => "fixed maximum 640MiB touched JS allocation with 10s independent deadline; only original Job memory-limit notification proves enforcement, strict lifecycle qualification remains required",
             ProbeMode::MessageFlood => "fixed 192 valid page frames exceed native page rate bucket and terminate owned Job; private pipe fuzz matrix remains separate",
         });
         evidence["parentBinary"] = serde_json::to_value(&parent_binary.identity)?;
@@ -344,13 +346,25 @@ impl WorkerManager {
         let mut workload_dispatched = None::<Instant>;
         let mut suspend_at = None::<Instant>;
         let mut suspend_guard = None;
+        let mut pressure_guard = None;
         let mut suspend_requested = false;
         let mut expected_termination = false;
         let result = (|| -> Result<()> {
             loop {
+                if mode == ProbeMode::MemoryLimit && launch.job.memory_limit_observed() {
+                    expected_termination = true;
+                    evidence["nativeMemoryLimitReached"] = serde_json::json!(true);
+                    evidence["nativeMemoryLimitSample"] = launch.job.workload_sample()?;
+                    break;
+                }
                 launch.job.observation_health()?;
                 if Instant::now() > deadline {
                     bail!("restricted worker startup/close deadline");
+                }
+                if mode == ProbeMode::MemoryLimit
+                    && workload_dispatched.is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
+                {
+                    bail!("fixed memory pressure ended without a native Job memory-limit notification");
                 }
                 if mode == ProbeMode::BusySuspend
                     && suspend_at.is_none()
@@ -574,6 +588,12 @@ impl WorkerManager {
                                 if mode.expects_termination() {
                                     evidence["workloadBefore"] = launch.job.workload_sample()?;
                                     workload_dispatched = Some(Instant::now());
+                                    if mode == ProbeMode::MemoryLimit {
+                                        pressure_guard =
+                                            Some(launch.job.deadline(
+                                                Instant::now() + Duration::from_secs(10),
+                                            )?);
+                                    }
                                     writer.send(ParentControl::RunProbe {
                                         identity: bootstrap.identity.clone(),
                                     })?;
@@ -668,6 +688,9 @@ impl WorkerManager {
         if let Some(guard) = suspend_guard {
             evidence["suspendDeadlineTerminatedJob"] = serde_json::json!(guard.finish()?);
         }
+        if let Some(guard) = pressure_guard {
+            evidence["pressureDeadlineTerminatedJob"] = serde_json::json!(guard.finish()?);
+        }
         evidence["exit"] = match exit {
             Ok(value) => value,
             Err(error) => {
@@ -677,6 +700,18 @@ impl WorkerManager {
         evidence["processLifecycle"] = launch.job.observation_evidence().unwrap_or_else(
             |error| serde_json::json!({"error":format!("{error:#}"),"observationIncomplete":true}),
         );
+        if mode == ProbeMode::MemoryLimit {
+            // IOCP may report the limit after the loop's check but before EOF
+            // or an observer-health failure. Copy the final original receipt
+            // regardless of that race; this does not alter close qualification.
+            evidence["nativeMemoryLimitReached"] =
+                serde_json::json!(launch.job.memory_limit_observed());
+            if launch.job.memory_limit_observed() && evidence["nativeMemoryLimitSample"].is_null() {
+                evidence["nativeMemoryLimitSample"] = launch.job.workload_sample().unwrap_or_else(
+                    |error| serde_json::json!({"unavailable":format!("{error:#}")}),
+                );
+            }
+        }
         evidence["nativeQualificationClean"] = serde_json::json!(launch.job.qualification_clean());
         evidence["expectedProbeTermination"] = serde_json::json!(expected_termination);
         let close_passed = probe_close_passed(mode, expected_termination, &evidence);
@@ -685,6 +720,7 @@ impl WorkerManager {
                 && close_passed
                 && evidence["exit"]["activeProcesses"] == 0
                 && evidence["deadlineTerminatedJob"] == false
+                && evidence["pressureDeadlineTerminatedJob"] != true
         );
         if let Err(error) = result {
             evidence["error"] = serde_json::json!(format!("{error:#}"));

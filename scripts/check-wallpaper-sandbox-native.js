@@ -54,12 +54,12 @@ if (options.includes('--self-test')) {
   const assert = require('node:assert/strict');
   const vm = require('node:vm');
   const source = fs.readFileSync(path.join(root, 'crates/hertz-desktop/assets/wallpaper-sandbox-adversarial.js'), 'utf8');
-  const exercise = (mode) => {
+  const exercise = (mode, globals = {}) => {
     const messages = [];
     let elapsed = 0;
     const window = { chrome: { webview: { postMessage: body => messages.push(JSON.parse(body)) } } };
     const context = vm.createContext({ window, innerWidth: 640, innerHeight: 480,
-      setTimeout: callback => callback(), performance: { now: () => (elapsed += 1000) } });
+      setTimeout: callback => callback(), performance: { now: () => (elapsed += 1000) }, ...globals });
     vm.runInContext(`(${source})(${JSON.stringify(mode)})`, context, { timeout: 2000 });
     return { messages, window, elapsed };
   };
@@ -78,8 +78,15 @@ if (options.includes('--self-test')) {
   assert.equal(flood.messages.length, 193);
   assert.equal(flood.messages[0].type, 'probeStarted');
   assert.ok(flood.messages.slice(1).every(message => message.type === 'probeReady' && message.width === 640 && message.height === 480));
+  const allocations = [];
+  class SparseArray { constructor(length) { this.length = this.byteLength = length; allocations.push(this); } }
+  const pressure = exercise('memoryLimit', { Uint8Array: SparseArray });
+  assert.equal(pressure.messages.length, 1); assert.equal(pressure.messages[0].allocatedBytes, 0);
+  assert.equal(allocations.length, 40);
+  assert.equal(allocations.reduce((sum, block) => sum + block.length, 0), 640 * 1024 * 1024);
+  for (const block of allocations) assert.equal(Object.keys(block).length - 2, block.length / 4096);
   assert.throws(() => exercise('arbitrary-source'), /Unknown fixed qualification workload/);
-  console.log('4 fixed workload fixture checks passed; this is not native G3-S evidence.');
+  console.log('5 fixed workload fixture checks passed; this is not native G3-S evidence.');
   process.exit(0);
 }
 
@@ -139,7 +146,7 @@ let startup = null;
 try { startup = readJson(path.join(candidate, 'startup-report.json')); } catch (error) { startup = { passed: false, error: actual.error || `Current native report absent: ${error}` }; }
 const probes = [];
 if (extended) {
-  for (const mode of ['os-boundaries', 'busy-suspend', 'bounded-memory', 'message-flood']) {
+  for (const mode of ['os-boundaries', 'busy-suspend', 'bounded-memory', 'memory-limit', 'message-flood']) {
     // Each mode owns one fresh profile, process tree and report. Earlier failures
     // stay visible; a successful later mode never substitutes for their evidence.
     const directory = path.join(candidate, mode);
@@ -170,7 +177,7 @@ const facts = {
   startup, probes, webEnabled: false, g3sQualified: false,
   remainingQualification: [
     'Browser HTTP/HTTPS, IPv6/private/public, DNS, WebSocket, WebTransport, WebRTC/STUN, worker/service-worker, redirects and downloads matrix',
-    'Whole-tree memory-limit violation, repeated canvas/decoder allocation and independently attributed physical GPU pressure/stop thresholds',
+    'Whole-tree memory-limit qualification and strict exit barrier, repeated canvas/decoder allocation and independently attributed physical GPU pressure/stop thresholds',
     'Long-running pressure and environment qualification; these bounded local probes do not grant product Web execution'
   ],
   passed: actual.exitCode === 0 && startup.passed === true && direct.exitCode !== 0 && direct.exitCode !== null

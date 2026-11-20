@@ -862,6 +862,7 @@ struct JobObservation {
     retain_only: Arc<AtomicBool>,
     fatal: Arc<AtomicBool>,
     fatal_receipt: Arc<OnceLock<String>>,
+    limit_message: Arc<OnceLock<u32>>,
     #[cfg(test)]
     test_delay: Arc<ObserverDelay>,
     #[cfg(test)]
@@ -1034,6 +1035,8 @@ impl JobObservation {
         let thread_fatal = fatal.clone();
         let fatal_receipt = Arc::new(OnceLock::new());
         let thread_fatal_receipt = fatal_receipt.clone();
+        let limit_message = Arc::new(OnceLock::new());
+        let thread_limit_message = limit_message.clone();
         #[cfg(test)]
         let test_packets = Arc::new(Mutex::new(Vec::new()));
         #[cfg(test)]
@@ -1145,7 +1148,10 @@ impl JobObservation {
                             process.exit_receipt = true;
                         }
                         JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => {}
-                        _ => bail!("Job limit or unexpected lifecycle message {message}"),
+                        _ => {
+                            let _ = thread_limit_message.set(message);
+                            bail!("Job limit or unexpected lifecycle message {message}");
+                        }
                     }
                     Ok(())
                 })();
@@ -1238,6 +1244,7 @@ impl JobObservation {
             retain_only,
             fatal,
             fatal_receipt,
+            limit_message,
             #[cfg(test)]
             test_delay,
             #[cfg(test)]
@@ -1605,8 +1612,12 @@ impl Job {
             serde_json::json!({"source":"originalJobCompletionPort","heldObjectLimit":32,
             "totalProcesses":accounting.TotalProcesses,"activeProcesses":accounting.ActiveProcesses,
             "inactiveProcesses":accounting.TotalProcesses.checked_sub(accounting.ActiveProcesses),
-            "fatalObserved":fatal,"jobTerminated":terminated,"failure":failure,"processes":processes}),
+            "fatalObserved":fatal,"jobTerminated":terminated,"failure":failure,"processes":processes,
+            "limitMessage":self.observation.limit_message.get()}),
         )
+    }
+    pub fn memory_limit_observed(&self) -> bool {
+        self.observation.limit_message.get() == Some(&JOB_OBJECT_MSG_JOB_MEMORY_LIMIT)
     }
     #[cfg(test)]
     pub fn wait_observed_exit(&self, deadline: Instant) -> Result<()> {
@@ -2779,6 +2790,34 @@ mod tests {
             "inject message into original native IOCP",
         )
         .unwrap();
+    }
+    #[test]
+    fn memory_limit_receipt_is_distinct_and_does_not_relax_fatal_exit() {
+        for message in [
+            JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT,
+            JOB_OBJECT_MSG_JOB_MEMORY_LIMIT,
+        ] {
+            let job = Job::create().unwrap();
+            unsafe {
+                assert_ne!(
+                    windows_sys::Win32::System::IO::PostQueuedCompletionStatus(
+                        job.observation.test_port.0,
+                        message,
+                        JOB_COMPLETION_KEY,
+                        null()
+                    ),
+                    0
+                );
+            }
+            wait_flag(&job.observation.fatal);
+            assert_eq!(
+                job.memory_limit_observed(),
+                message == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT
+            );
+            assert_eq!(job.observation_evidence().unwrap()["limitMessage"], message);
+            assert!(!job.qualification_clean());
+            assert!(job.observation_health().is_err());
+        }
     }
     #[test]
     fn fatal_receipt_survives_main_table_lock_before_termination() {

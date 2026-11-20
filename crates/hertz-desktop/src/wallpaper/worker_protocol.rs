@@ -11,6 +11,7 @@ pub const RESOURCE_STREAM_LIMIT: usize = 1024 * 1024;
 pub const RESOURCE_CONCURRENCY: usize = 8;
 pub const CONTROL_QUEUE_FRAMES: usize = 32;
 pub const PROBE_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+pub const PROBE_MEMORY_LIMIT_BYTES: u64 = 640 * 1024 * 1024;
 pub const PROBE_BUSY_MS: u64 = 8_000;
 // Rust 1.88 does not count the anonymous const assertion as a live reference.
 #[allow(dead_code)]
@@ -26,6 +27,7 @@ pub enum ProbeMode {
     OsBoundaries,
     BusySuspend,
     BoundedMemory,
+    MemoryLimit,
     MessageFlood,
 }
 impl ProbeMode {
@@ -35,6 +37,7 @@ impl ProbeMode {
             "os-boundaries" => Ok(Self::OsBoundaries),
             "busy-suspend" => Ok(Self::BusySuspend),
             "bounded-memory" => Ok(Self::BoundedMemory),
+            "memory-limit" => Ok(Self::MemoryLimit),
             "message-flood" => Ok(Self::MessageFlood),
             _ => invalid("unknown fixed qualification probe"),
         }
@@ -42,7 +45,7 @@ impl ProbeMode {
     pub fn expects_termination(self) -> bool {
         matches!(
             self,
-            Self::BusySuspend | Self::BoundedMemory | Self::MessageFlood
+            Self::BusySuspend | Self::BoundedMemory | Self::MemoryLimit | Self::MessageFlood
         )
     }
 }

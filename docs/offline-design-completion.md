@@ -43,6 +43,10 @@ G3-S 本轮源码绑定构建的普通 stop1 通过：受限 AppContainer/WebVie
 - TCP connect 与 UDP send 返回成功。本机 Domain、Private、Public 防火墙配置均关闭；即使父监听器当时没有取得数据，也不能据此推翻成功返回或判定隔离成立。
 - 忙循环、64 MiB 触页和消息洪泛的强制 Job 终止最终都观测到七个物理进程退出，但没有完整 EXIT 消息，因此按原严格门判失败。单进程对照中自然退出和 `TerminateProcess` 有 EXIT，`TerminateJobObject` 缺 EXIT；没有伪造回执或改用 PID 扫描降低证明要求。较早的一次内存探针另曾出现 GPU 进程十秒退出超时，不能用最后一次成功退出抹掉该风险。
 
-当前基础网络和强制退出门已被实际环境阻挡。完整 renderer 网络协议矩阵、512 MiB 硬上限触发、重复图形/解码压力仍未实现或未验；它们是后续软件验证缺口，不能描述为缺 token。物理 GPU 归属与长稳另外需要设备证据。`webEnabled` 和完整 G3-S 资格继续关闭；本次不改变机器防火墙配置。
+合回后继续补充 `--extended` 的 `memory-limit` 固定模式：最多 40 块 × 16 MiB、逐 4 KiB 触页，原 Job 512 MiB 限额不变，原生派发前设置独立十秒 Job 终止期限。只接受原 completion port 的 `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT`（10）作为命中事实；页面异常、进程限额消息（9）或单纯内存峰值不能替代。IOCP 与控制管道退出的竞态由最终汇总读取原生不可变回执解决，所有严格退出判定保持。
+
+`output/offline-integration-20261120/g3s-pressure-candidate/` 绑定当前源码与候选，实测 `nativeMemoryLimitReached=true`、原通知为 10，Job 终止且 `activeProcesses=0`，独立压力期限没有触发。报告的 Job 峰值为 540745728 字节；这证明限额通知和终止发生，不证明进程树从未瞬时超过 512 MiB。原 fatal 规则使 close 在取得完整物理退出证明前拒绝，EXIT 回执也不完整，因此本模式 `passed=false`，不能记成完整内存或 G3-S 资格通过。节点五项夹具检查、38 项 worker 回归及 1 项通知分类反例通过，独立复审已关闭报告竞态。
+
+当前基础网络和强制退出门仍被实际环境阻挡。完整 renderer 网络协议矩阵、重复图形/解码压力仍未实现或未验；它们是后续软件验证缺口，不能描述为缺 token。物理 GPU 归属与长稳另外需要设备证据。`webEnabled` 和完整 G3-S 资格继续关闭；本次不改变机器防火墙配置。
 
 视频录制的原 256 MiB 固定预留与 128 MiB 页面额度冲突已经修复。较大的来源配合竖屏/1080p 仍可能超出 64 MiB 解码工作区；现在在采集前给出可行动的拒绝信息，缩小窗口后可重试。较广工程、草稿及模板浏览器流程通过，草稿夹具改为符合实际格式校验的 PNG，并等待异步导入和租约释放。源式容量、系统真实音频与设备资格的区别见[视频导出](video-export.md)。
