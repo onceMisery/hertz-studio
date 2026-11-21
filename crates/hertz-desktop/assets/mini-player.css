@@ -4,7 +4,9 @@
    面板中性色与设置中心同族（暖石墨）；宠物素材是内容层，颜色归素材。 */
 :root {
   --scale: 1;
-  --radius: 28px;
+  /* 与 native 的 MINI_CAPSULE_RADIUS 同源：胶囊高度按 --scale 放大时，
+     圆角也一起放大，窗口 region 才不会露出黑色直角。 */
+  --radius: calc(28px * var(--scale));
   --out: cubic-bezier(.22, 1, .36, 1);
 }
 * { box-sizing: border-box; }

@@ -96,6 +96,21 @@ const PREVIEW_LEASE: Duration = Duration::from_secs(15);
 /// 页面每 2 s 心跳；可见状态下超过这个时间没有有效心跳就按渲染停摆重建。
 const HEARTBEAT_STALE: Duration = Duration::from_secs(10);
 
+/// 把界面令牌按 query 规则转义后再拼进兜底 URL。正常令牌是十六进制，
+/// 这里只是不让异常字符把链接截断。
+fn encode_query(value: &str) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(byte as char);
+        } else {
+            let _ = write!(output, "%{byte:02X}");
+        }
+    }
+    output
+}
+
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum UserEvent {
@@ -4142,6 +4157,7 @@ impl App {
         std::thread::spawn(move || {
             let result = crate::mini_feed::MiniFeed::new(profile)
                 .and_then(|feed| feed.control(&payload))
+                .map(|_| ())
                 .map_err(|error| format!("{error:#}"));
             let _ = proxy.send_event(UserEvent::MiniControl(generation, result));
         });
@@ -4184,11 +4200,17 @@ impl App {
                     if stop.load(Ordering::Relaxed) || cancelled.load(Ordering::Relaxed) {
                         bail!("恢复请求已取消");
                     }
-                    feed.control(&payload)?;
+                    let reply = feed.control(&payload)?;
+                    // 服务有原生主窗口时已经当面请求过焦点：不要再用浏览器兜底，
+                    // 否则会在默认浏览器里多开一个没有会话的界面。
+                    let native_focus = reply
+                        .get("native")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
                     if stop.load(Ordering::Relaxed) || cancelled.load(Ordering::Relaxed) {
                         bail!("恢复请求已取消");
                     }
-                    if !restored {
+                    if !restored && !native_focus {
                         let discovery = crate::bridge::read_discovery(&profile)?;
                         if stop.load(Ordering::Relaxed)
                             || cancelled.load(Ordering::Relaxed)
@@ -4197,7 +4219,23 @@ impl App {
                         {
                             bail!("播放来源已切换");
                         }
-                        native::open_url(&format!("http://127.0.0.1:{}/", discovery.port))?;
+                        // 兜底也必须带着界面令牌：裸地址会落到「这份页面没有凭据」。
+                        let token = crate::bridge::read_key(
+                            std::path::Path::new(profile.data_dir()),
+                            "token",
+                            "界面",
+                        )
+                        .ok()
+                        .filter(|token| !token.is_empty());
+                        let url = match token {
+                            Some(token) => format!(
+                                "http://127.0.0.1:{}/?token={}",
+                                discovery.port,
+                                encode_query(&token)
+                            ),
+                            None => format!("http://127.0.0.1:{}/", discovery.port),
+                        };
+                        native::open_url(&url)?;
                     }
                     Ok(())
                 })

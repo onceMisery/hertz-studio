@@ -311,16 +311,20 @@ pub(crate) fn set_silhouette_region(hwnd: HWND, runs: &[i32], scale: f64) {
 }
 
 /// 胶囊/悬停/peek 态：圆角矩形 region（radius 为逻辑像素）。
+/// width/height 已经是物理像素（desired_rect 已乘过 DPI），这里不能再乘一次；
+/// CreateRoundRectRgn 的末两参是椭圆直径，传 2r 才会得到半径 r 的四角。
 pub(crate) fn set_roundrect_region(hwnd: HWND, width: i32, height: i32, radius: f64, scale: f64) {
+    let (w, h, diameter) = roundrect_geometry(width, height, radius, scale);
     unsafe {
-        let (w, h) = (
-            (f64::from(width) * scale).ceil() as i32,
-            (f64::from(height) * scale).ceil() as i32,
-        );
-        let r = ((radius * scale).round() as i32).max(1);
-        let region = CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r);
+        let region = CreateRoundRectRgn(0, 0, w + 1, h + 1, diameter, diameter);
         SetWindowRgn(hwnd, region, 1);
     }
+}
+
+/// 纯几何：物理宽高原样使用，逻辑圆角按 DPI 换成物理直径。
+fn roundrect_geometry(width: i32, height: i32, radius: f64, scale: f64) -> (i32, i32, i32) {
+    let diameter = ((radius * scale).round() as i32).max(1) * 2;
+    (width.max(1), height.max(1), diameter)
 }
 
 /// 清除 region：恢复整窗矩形。
@@ -423,4 +427,18 @@ pub(crate) fn uninstall(hwnd: HWND) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&(hwnd as isize));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::roundrect_geometry;
+
+    #[test]
+    fn capsule_region_uses_physical_bounds_and_true_radius() {
+        // 100%：268x56 的胶囊，圆角直径 56（半径 28 = 半高，端头是半圆）。
+        assert_eq!(roundrect_geometry(268, 56, 28.0, 1.0), (268, 56, 56));
+        // 150%：物理宽高已经是 402x84，不能再乘一次 DPI；圆角直径 84。
+        assert_eq!(roundrect_geometry(402, 84, 28.0, 1.5), (402, 84, 84));
+        assert_eq!(roundrect_geometry(0, 0, 28.0, 1.0), (1, 1, 56));
+    }
 }

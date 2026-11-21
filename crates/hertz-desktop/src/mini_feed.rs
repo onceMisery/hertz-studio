@@ -323,7 +323,7 @@ impl MiniFeed {
     }
 
     /// 小窗上的播控。走窄口，凭据不离开本机（与歌词播控同一形态）。
-    pub(crate) fn control(&self, payload: &serde_json::Value) -> Result<()> {
+    pub(crate) fn control(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let discovery = bridge::read_discovery(&self.profile)?;
         if discovery.desktop_mini_protocol != Some(PROTOCOL)
             // --data-dir 绑定 custom profile 到这份 discovery 目录，与轮询路径
@@ -350,7 +350,9 @@ impl MiniFeed {
         if !response.status().is_success() {
             bail!("小窗播控返回 {}", response.status());
         }
-        Ok(())
+        Ok(response
+            .json::<serde_json::Value>()
+            .unwrap_or_else(|_| serde_json::json!({ "ok": true })))
     }
 }
 

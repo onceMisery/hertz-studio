@@ -244,8 +244,8 @@ pub(crate) async fn control(
     }
     // restore 只是个界面信号，与播放代际无关，但仍须属于当前服务会话。
     if request.action == "restore" {
-        request_restore(state).await?;
-        return Ok(json!({ "ok": true }));
+        let native = request_restore(state).await?;
+        return Ok(json!({ "ok": true, "native": native }));
     }
 
     let player = state.audio.snapshot();
@@ -295,8 +295,17 @@ fn control_stale() -> ApiError {
 
 /// 小窗请求回到主窗口。走既有的 `/v1/ui/notice` 广播：主界面那条 WS 本来就
 /// 在消费 `expand-capsule`，小窗只是多一个发起方，不新增订阅协议。
-pub(crate) async fn request_restore(state: &Arc<AppState>) -> Result<(), ApiError> {
-    crate::routes::broadcast_ui_notice(state, "expand-capsule").await
+///
+/// 独立桌面版的主窗口是原生窗口，浏览器侧那条 `expand-capsule` 只能展开页面胶囊，
+/// 不能把窗口从托盘/隐藏态拿回来。这里同时走一次原生的 focus 握手；返回
+/// `true` 表示当前服务有原生主窗口，桌面小窗据此不要再开浏览器兜底。
+pub(crate) async fn request_restore(state: &Arc<AppState>) -> Result<bool, ApiError> {
+    let window = state.native_window.get();
+    if let Some(window) = window {
+        let _ = window.request_focus(&state.server_instance_id());
+    }
+    crate::routes::broadcast_ui_notice(state, "expand-capsule").await?;
+    Ok(window.is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +434,7 @@ mod tests {
             control(&state, request("restore", state.server_instance_id()))
                 .await
                 .unwrap(),
-            json!({ "ok": true })
+            json!({ "ok": true, "native": false })
         );
         assert!(
             matches!(notices.try_recv().unwrap(), crate::state::WsEvent::UiNotice { action } if action == "expand-capsule")

@@ -356,7 +356,14 @@ fn browser_title_matches(title: &str, text: &str) -> bool {
 }
 
 fn main_browser_matches(hwnd: HWND, title: &str) -> bool {
-    if title.is_empty() || !title.to_ascii_lowercase().contains("hertz-studio") {
+    let lowered = title.to_ascii_lowercase();
+    // 页面标题是「曲名 · hertz-studio」，原生窗口标题是「HertzStudio Music Player」，
+    // 两种写法都要认，否则「回到主窗口」会一直判成没找到。
+    if title.is_empty()
+        || !(lowered.contains("hertz-studio")
+            || lowered.contains("hertz studio")
+            || lowered.contains("hertzstudio"))
+    {
         return false;
     }
     let mut class = [0u16; 128];
@@ -366,8 +373,18 @@ fn main_browser_matches(hwnd: HWND, title: &str) -> bool {
         let text_len = GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32);
         let class = String::from_utf16_lossy(&class[..class_len.max(0) as usize]);
         let text = String::from_utf16_lossy(&text[..text_len.max(0) as usize]);
-        matches!(class.as_str(), "Chrome_WidgetWin_1" | "MozillaWindowClass")
-            && browser_title_matches(title, &text)
+        // 独立桌面版的主窗口是 Tao 原生窗口（class = "Window Class"），
+        // 不是浏览器；只认浏览器类会把「回到主窗口」永远判成没找到。
+        let class_matches = matches!(
+            class.as_str(),
+            "Chrome_WidgetWin_1" | "MozillaWindowClass" | "Window Class"
+        );
+        // 原生主窗口的标题由宿主设置，WebView 的 document.title 不一定同步到
+        // 窗口标题；两个都认，避免窗口明明已经回来了仍被判成没找到。
+        class_matches
+            && (browser_title_matches(title, &text)
+                || (class == "Window Class"
+                    && text.eq_ignore_ascii_case("HertzStudio Music Player")))
     }
 }
 
