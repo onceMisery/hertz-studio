@@ -233,23 +233,42 @@ html[data-skin="hertz"] #bar-sub { grid-column: 2; font-size: 11px; align-self: 
 html[data-skin="hertz"] #bar-sub:empty::after { content: '选择一首，开始聆听'; }
 .hz-bar-center { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; min-width: 0; gap: 5px; }
 html[data-skin="hertz"] .bar-summary { grid-column: 1; grid-row: 1; }
-html[data-skin="hertz"] .bar-controls { gap: 14px; }
-html[data-skin="hertz"] .ctrl { color: var(--muted); background: none; box-shadow: none; border: 0; width: 32px; height: 32px; min-width: 32px; }
+html[data-skin="hertz"] .bar-controls { gap: 18px; }
+/* 图标按钮精修：透明的圆面 + hover 时一圈发丝线，Magic UI 的 ghost 按钮语言。
+   只在皮肤作用域内动 .ctrl（base 层的 38px 圆钮另有舞台页在共享，不动）。 */
+html[data-skin="hertz"] .ctrl {
+  color: var(--muted); background: none; box-shadow: none; border: 0;
+  width: 34px; height: 34px; min-width: 34px; border-radius: 50%;
+  transition: color 160ms var(--ease), background 160ms var(--ease),
+              box-shadow 160ms var(--ease), transform 80ms var(--ease-out);
+}
+html[data-skin="hertz"] .ctrl:hover { color: var(--text); background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
+html[data-skin="hertz"] .ctrl:active { transform: scale(0.92); }
+html[data-skin="hertz"] .ctrl:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px color-mix(in srgb, var(--accent-2) 55%, transparent);
+}
 html[data-skin="hertz"] .ctrl-primary { width: 39px; height: 39px; min-width: 39px; color: var(--bg); background: var(--text); box-shadow: none; }
 html[data-skin="hertz"] .bar-controls .ctrl svg { width: 19px; height: 19px; }
-html[data-skin="hertz"] #stop { width: 26px; min-width: 26px; }
-html[data-skin="hertz"] #mode { font-size: 10px; padding: 4px 7px; border: 0; color: var(--muted); background: transparent; }
+html[data-skin="hertz"] #stop { width: 30px; min-width: 30px; }
+html[data-skin="hertz"] #mode {
+  font-size: 10px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); background: transparent;
+  transition: color 160ms var(--ease), background 160ms var(--ease);
+}
+html[data-skin="hertz"] #mode:hover { color: var(--text); background: var(--hover); }
 html[data-skin="hertz"] .bar-progress { gap: 10px; padding: 0; display: flex; }
 html[data-skin="hertz"] .bar-time { font-size: 10px; order: 2; }
 html[data-skin="hertz"] .progress-wrap { flex: 1; }
 html[data-skin="hertz"] #progress { height: 3px; }
-html[data-skin="hertz"] .bar-right { grid-column: 3; grid-row: 1; justify-self: end; gap: 5px; }
+html[data-skin="hertz"] .bar-right { grid-column: 3; grid-row: 1; justify-self: end; gap: 11px; }
 html[data-skin="hertz"] #bar-player-expand { display: none; }
 html[data-skin="hertz"] #top-more-menu #bar-pin-toggle { display: flex; width: 100%; justify-content: flex-start; border: 0; background: transparent; border-radius: 8px; }
-html[data-skin="hertz"] .bar-volume { display: flex; gap: 8px; }
+html[data-skin="hertz"] .bar-volume { display: flex; gap: 10px; padding-left: 14px; margin-left: 2px; border-left: 1px solid var(--line); }
 html[data-skin="hertz"] .bar-volume > .hint { display: none; }
-html[data-skin="hertz"] .bar-volume input { width: 70px; }
-html[data-skin="hertz"] #sleep-timer { border: 0; background: none; padding: 6px; }
+html[data-skin="hertz"] .bar-volume input { width: 76px; }
+html[data-skin="hertz"] #sleep-timer { border: 0; background: none; padding: 7px 9px; border-radius: 999px; transition: color 160ms var(--ease), background 160ms var(--ease), box-shadow 160ms var(--ease); }
+html[data-skin="hertz"] #sleep-timer:hover { color: var(--text); background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
 /* 独立队列投影；管理操作仍在原队列页面。 */
 .hz-queue-pane { min-height: 0; min-width: 0; width: 336px; display: flex; flex-direction: column; padding: 28px 20px; border-left: 1px solid var(--line); background: var(--bg); z-index: 46; }
 .hz-queue-pane[hidden], .hz-queue-scrim[hidden] { display: none; }

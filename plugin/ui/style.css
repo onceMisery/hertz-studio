@@ -1901,6 +1901,32 @@ body.is-capsule .bar-restore, body.s3d-open .bar-restore { display: none; }
 
 /* Range 滑条的基础实现在 components/form.css（含 webkit/moz 轨道与拇指）。 */
 
+/* ---------- 悬浮说明（components/tooltip.js）：原生 title 的玻璃升级版 ---------- */
+/* 单例节点挂在 body 下，样式只认 token，浅/深主题各随各的变量走。 */
+.ui-tooltip {
+  position: fixed;
+  z-index: 999;
+  max-width: 260px;
+  padding: 6px 11px;
+  border-radius: var(--r-sm, 8px);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-solid, var(--panel)) 92%, transparent);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  transition: opacity var(--dur-fast, 0.16s) var(--ease),
+              transform var(--dur-fast, 0.16s) var(--ease);
+}
+.ui-tooltip.is-in { opacity: 1; transform: translateY(0); }
+
+
 /* ---------- 右键菜单 ---------- */
 
 .menu {

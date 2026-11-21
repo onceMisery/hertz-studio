@@ -201,6 +201,7 @@ ui_assets! {
     "/components/button.css", CSS => const COMPONENT_BUTTON_CSS: &str = edition_ui!("components/button.css");
     "/components/form.css", CSS => const COMPONENT_FORM_CSS: &str = edition_ui!("components/form.css");
     "/components/popup.js", JS => const COMPONENT_POPUP_JS: &str = edition_ui!("components/popup.js");
+    "/components/tooltip.js", JS => const COMPONENT_TOOLTIP_JS: &str = edition_ui!("components/tooltip.js");
     // 应用外壳：工作区模式与公共 chrome 显隐；index.html 排在 style.css 之后。
     "/shell/shell.css", CSS => const SHELL_CSS: &str = edition_ui!("shell/shell.css");
     "/shell/shell.js", JS => const SHELL_JS: &str = edition_ui!("shell/shell.js");
