@@ -14,12 +14,16 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, RGN_OR, SetWindowRgn,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumChildWindows, GetCursorPos, GetWindowLongPtrW,
-    GetWindowRect, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC,
-    GWL_EXSTYLE, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, WM_NCHITTEST, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    GetWindowRect, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos,
+    GWLP_WNDPROC,
+    GWL_EXSTYLE, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCHITTEST, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 /// 一扇窗的命中状态。坐标一律是物理像素，换算在 Rust 侧做完，wndproc 里只比大小。
@@ -130,6 +134,12 @@ unsafe extern "system" fn mini_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // WM_ERASEBKGND 一律自己"擦完"：默认过程会拿类刷子把重定向位图刷白，
+    // 宠物态的透明区域就可能定格成白底（resize 后 DWM 重分派位图时尤甚）。
+    // 页面自己铺满全部内容，底下没有任何需要系统擦的东西。
+    if msg == 0x0014 {
+        return 1;
+    }
     if msg == WM_NCHITTEST {
         let map = chrome_map().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(chrome) = map.get(&(hwnd as isize)) {
@@ -273,6 +283,49 @@ pub(crate) fn set_topmost(hwnd: HWND, on: bool) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
+}
+
+/// 剪影 region：`runs` 是页面逐行扫描出的不透明区段，平铺 [y, x0, x1]
+/// （素材像素坐标，含端点），`scale` 折算 DPI 与用户缩放。SetWindowRgn 把
+/// 窗口硬裁成素材形状——区域外的部分**不存在**（不绘制、不吃点击），
+/// 不透明窗口的白/黑底色从机制上就露不出来，与 WebView2 合成器无关。
+/// SetWindowRgn 接管 region 所有权，无需手动释放。
+pub(crate) fn set_silhouette_region(hwnd: HWND, runs: &[i32], scale: f64) {
+    unsafe {
+        let region = CreateRectRgn(0, 0, 0, 0);
+        let mut index = 0;
+        while index + 2 < runs.len() {
+            let (y, x0, x1) = (runs[index], runs[index + 1], runs[index + 2]);
+            index += 3;
+            let cell = CreateRectRgn(
+                (f64::from(x0) * scale).floor() as i32,
+                (f64::from(y) * scale).floor() as i32,
+                (f64::from(x1 + 1) * scale).ceil() as i32,
+                (f64::from(y + 1) * scale).ceil() as i32,
+            );
+            CombineRgn(region, region, cell, RGN_OR);
+            DeleteObject(cell);
+        }
+        SetWindowRgn(hwnd, region, 1);
+    }
+}
+
+/// 胶囊/悬停/peek 态：圆角矩形 region（radius 为逻辑像素）。
+pub(crate) fn set_roundrect_region(hwnd: HWND, width: i32, height: i32, radius: f64, scale: f64) {
+    unsafe {
+        let (w, h) = (
+            (f64::from(width) * scale).ceil() as i32,
+            (f64::from(height) * scale).ceil() as i32,
+        );
+        let r = ((radius * scale).round() as i32).max(1);
+        let region = CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r);
+        SetWindowRgn(hwnd, region, 1);
+    }
+}
+
+/// 清除 region：恢复整窗矩形。
+pub(crate) fn clear_region(hwnd: HWND) {
+    unsafe { SetWindowRgn(hwnd, std::ptr::null_mut(), 1) };
 }
 
 pub(crate) fn move_window(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {

@@ -89,6 +89,8 @@ mod wallpaper_runtime;
 const POLL_IDLE: Duration = Duration::from_millis(500);
 const POLL_ERROR: Duration = Duration::from_secs(1);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+/// 小窗胶囊态的圆角半径（逻辑像素），与 mini-player.css 的 --radius 同值。
+const MINI_CAPSULE_RADIUS: f64 = 28.0;
 use crate::management::STALE_AFTER;
 const PREVIEW_LEASE: Duration = Duration::from_secs(15);
 /// 页面每 2 s 心跳；可见状态下超过这个时间没有有效心跳就按渲染停摆重建。
@@ -873,10 +875,26 @@ struct App {
     mini_cover: MiniCover,
     /// 桌宠素材目录的签名（文件名+大小+mtime 哈希）。变化即触发热重载。
     mini_skin_signature: Option<u64>,
+    /// 小窗形状：Pending（剪影未上报，窗口不出场）→ Runs（宠物剪影）/
+    /// Rect（素材读不出 alpha，回退整盒）。见 apply_mini_region。
+    mini_silhouette: MiniSilhouette,
+    /// 剪影未就绪时 Show 被扣下，剪影一到即走完整出场。
+    mini_pending_show: bool,
     mini_runtime: MiniRuntime,
     mini_context_menu: Option<Menu>,
     mini_restore_pending: Option<MiniRestoreRequest>,
     proxy: EventLoopProxy<UserEvent>,
+}
+
+/// 小窗的可见形状来源（页面剪影驱动 SetWindowRgn，见 apply_mini_region）。
+#[derive(Clone, Debug, PartialEq)]
+enum MiniSilhouette {
+    /// 剪影未上报：宠物窗保持隐藏，避免整窗黑方一闪。
+    Pending,
+    /// 素材剪影（[y,x0,x1] 平铺，素材像素坐标）。
+    Runs(Vec<i32>),
+    /// 素材读不出 alpha：整盒矩形。
+    Rect,
 }
 
 /// 小窗来源线程与事件循环之间的共享开关。
@@ -3614,19 +3632,7 @@ impl App {
     fn apply_mini_action(&mut self, action: MiniAction, target: &EventLoopWindowTarget<()>) {
         match action {
             MiniAction::None => {}
-            MiniAction::Show => {
-                if self.ensure_mini(target) {
-                    if let Some(hwnd) = self.mini_hwnd() {
-                        native::show_no_activate(hwnd);
-                    }
-                    self.place_mini();
-                    if let Some(hwnd) = self.mini_hwnd() {
-                        self.mini_host.push_window_style(hwnd as isize);
-                    }
-                    self.mini_send_all();
-                    self.sync_tray();
-                }
-            }
+            MiniAction::Show => self.show_mini(target),
             MiniAction::Hide => {
                 self.cancel_mini_restore();
                 if let Some(hwnd) = self.mini_hwnd() {
@@ -3642,6 +3648,7 @@ impl App {
                 if let Some(hwnd) = self.mini_hwnd() {
                     self.mini_host.push_window_style(hwnd as isize);
                 }
+                self.apply_mini_region();
                 self.mini_send_config();
             }
             MiniAction::NotifyRestore => {
@@ -3651,12 +3658,76 @@ impl App {
         self.mini_sync_runtime();
     }
 
+    /// 窗口形状：宠物态用页面剪影，胶囊/悬停/peek 用圆角矩形。剪影未上报时
+    /// 不动 region——宠物窗此刻应当还扣着不出场（见 show_mini 的扣场）。
+    fn apply_mini_region(&self) {
+        let Some(surface) = self.mini.as_ref() else {
+            return;
+        };
+        let dpi = native::window_dpi(surface.hwnd).max(1);
+        let scale = f64::from(dpi) / 96.0 * self.mini_host.scale;
+        if self.mini_host.pet && !self.mini_host.pet_hover {
+            match &self.mini_silhouette {
+                MiniSilhouette::Runs(runs) => {
+                    mini_native::set_silhouette_region(surface.hwnd, runs, scale)
+                }
+                MiniSilhouette::Rect => mini_native::clear_region(surface.hwnd),
+                MiniSilhouette::Pending => {}
+            }
+        } else if let Some((_, _, width, height)) = self.mini_host.rect {
+            mini_native::set_roundrect_region(
+                surface.hwnd,
+                width,
+                height,
+                MINI_CAPSULE_RADIUS,
+                scale,
+            );
+        } else {
+            mini_native::clear_region(surface.hwnd);
+        }
+    }
+
+    /// 小窗的完整出场：建窗（如缺）→ 显示 → 控制器可见 → 放置 → 样式 → 同步。
+    /// 宠物态且剪影未上报时不出场（整窗黑方会闪一下），扣场到剪影到达。
+    fn show_mini(&mut self, target: &EventLoopWindowTarget<()>) {
+        if self.ensure_mini(target) {
+            if self.config.mini.pet
+                && !self.mini_host.pet_hover
+                && matches!(self.mini_silhouette, MiniSilhouette::Pending)
+            {
+                self.mini_pending_show = true;
+                return;
+            }
+            if let Some(hwnd) = self.mini_hwnd() {
+                native::show_no_activate(hwnd);
+            }
+            if let Some(surface) = self.mini.as_ref() {
+                let _ = surface.webview.set_visible(true);
+            }
+            self.place_mini();
+            if let Some(hwnd) = self.mini_hwnd() {
+                self.mini_host.push_window_style(hwnd as isize);
+            }
+            self.mini_send_all();
+            self.sync_tray();
+        }
+    }
+
     /// 按需创建小窗。返回 false 表示创建失败（已记日志），状态机保持现状。
     fn ensure_mini(&mut self, target: &EventLoopWindowTarget<()>) -> bool {
         if self.mini.is_some() {
             return true;
         }
-        match create_mini(target, self.proxy.clone(), self.mini_cover.clone()) {
+        // 宠物态窗体按内置皮肤默认尺寸诞生：首个 place 与诞生尺寸一致，
+        // 可见前没有任何 resize（隐藏期 resize 会竞态丢失 DWM 逐像素 alpha，
+        // 白底；可见后的 resize 由 place 后的补丁链兜底）。非宠物态用配置
+        // 几何，同理首 place 无尺寸变化。
+        let (width, height) = if self.config.mini.pet {
+            (56.0, 56.0)
+        } else {
+            (self.mini_host.geometry.width, self.mini_host.geometry.height)
+        };
+        match create_mini(target, self.proxy.clone(), self.mini_cover.clone(), (width, height)) {
             Ok(surface) => {
                 // 必须在 WebView 建好之后再装命中处理：WebView2 的子窗那时才存在，
                 // 而它才是 WM_NCHITTEST 的第一到达点（设计 §6.2）。
@@ -3692,6 +3763,7 @@ impl App {
         };
         mini_native::move_window(surface.hwnd, x, y, width, height);
         self.mini_host.rect = Some((x, y, width, height));
+        self.apply_mini_region();
     }
 
     fn mini_send_all(&self) {
@@ -3890,6 +3962,10 @@ impl App {
             width: Option<f64>,
             #[serde(default)]
             height: Option<f64>,
+            #[serde(default)]
+            runs: Option<Vec<i32>>,
+            #[serde(default)]
+            full: Option<bool>,
         }
         let Ok(command) = serde_json::from_str::<Command>(body) else {
             log("ignore malformed mini page command");
@@ -3906,6 +3982,23 @@ impl App {
                 if let Some(hwnd) = self.mini_hwnd() {
                     let dpi = native::window_dpi(hwnd).max(1);
                     mini_native::set_hit_regions(hwnd, &command.regions, dpi);
+                }
+            }
+            "silhouette" => {
+                // 页面逐行扫描出的素材剪影（[y,x0,x1] 平铺，素材像素坐标）。
+                // full=true = 素材读不出 alpha（跨域污染），回退整盒矩形。
+                self.mini_silhouette = if command.full.unwrap_or(false) {
+                    MiniSilhouette::Rect
+                } else {
+                    match command.runs.filter(|runs| !runs.is_empty()) {
+                        Some(runs) => MiniSilhouette::Runs(runs),
+                        None => MiniSilhouette::Rect,
+                    }
+                };
+                self.apply_mini_region();
+                if self.mini_pending_show {
+                    self.mini_pending_show = false;
+                    self.show_mini(target);
                 }
             }
             "drag-begin" => {
@@ -6178,6 +6271,8 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
         mini_cover_version: 0,
         mini_cover: Arc::new(std::sync::Mutex::new(None)),
         mini_skin_signature: None,
+        mini_silhouette: MiniSilhouette::Pending,
+        mini_pending_show: false,
         mini_runtime: MiniRuntime::default(),
         mini_context_menu: None,
         mini_restore_pending: None,
@@ -7675,13 +7770,17 @@ fn create_mini(
     target: &EventLoopWindowTarget<()>,
     proxy: EventLoopProxy<UserEvent>,
     cover: MiniCover,
+    initial_size: (f64, f64),
 ) -> Result<MiniSurface> {
     let icon = window_icon()?;
+    // 窗体按目标尺寸诞生且可见前不改尺寸（虽已不依赖逐像素透明，仍免去
+    // 无谓的重排），形状交给页面剪影驱动的 SetWindowRgn。
     let window = WindowBuilder::new()
         .with_title("Hertz 小窗")
         .with_window_icon(Some(icon))
+        .with_inner_size(tao::dpi::LogicalSize::new(initial_size.0, initial_size.1))
         .with_decorations(false)
-        .with_transparent(true)
+        .with_transparent(false)
         .with_resizable(false)
         .with_visible(false)
         .with_focused(false)
@@ -7693,23 +7792,32 @@ fn create_mini(
     let page = mini_page_html().into_bytes();
     let cover_in_handler = Arc::clone(&cover);
     let page_proxy = proxy.clone();
-    let mut web_context = WebContext::new(Some(config::webview_dir()));
-    let webview = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_transparent(true)
+    // 小窗的数据目录独享（与歌词窗分开），避免加入已运行浏览器进程后的
+    // 各种合成器差异。
+    let mut web_context = WebContext::new(Some(config::webview_dir().join("mini")));
+    // 窗体不透明 + 黑底：WebView2 的逐像素透明底色 put 有竞态（157 实测
+    // ~1/3 概率整窗刷白，任何时机/任何方式的补 put 都救不回来），宠物形状
+    // 改由 SetWindowRgn 剪影裁剪保证（mini_native::set_silhouette_region，
+    // GDI 级确定性）。剪影内部素材自身的空隙读作黑底，观感是自然阴影。
+    let webview_builder = WebViewBuilder::new_with_web_context(&mut web_context)
+        .with_transparent(false)
+        .with_background_color((0, 0, 0, 255))
         // 页面要 fetch 同源的皮肤文件（pet.json / 帧图片），NavigateToString 的
         // origin 取不到 hertz://，所以整页走自定义协议（与壁纸/设置窗同一招）。
         .with_custom_protocol(WALLPAPER_PROTOCOL.to_string(), move |_id, request| {
             mini_protocol_response(&page, request.uri().path(), &cover_in_handler)
         })
-        .with_url(MINI_PAGE_URL)
         .with_ipc_handler(move |request| {
             let body = request.body();
             if body.len() <= 4096 {
                 let _ = page_proxy.send_event(UserEvent::MiniPage(body.clone()));
             }
-        })
+        });
+    let webview = webview_builder
+        .with_url(MINI_PAGE_URL)
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建小窗 WebView 失败：{error}"))?;
+    let _ = webview.set_visible(false);
     Ok(MiniSurface {
         window,
         webview,

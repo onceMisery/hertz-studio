@@ -326,7 +326,10 @@ impl MiniFeed {
     pub(crate) fn control(&self, payload: &serde_json::Value) -> Result<()> {
         let discovery = bridge::read_discovery(&self.profile)?;
         if discovery.desktop_mini_protocol != Some(PROTOCOL)
-            || discovery.edition.as_deref() != Some(self.profile.edition())
+            // --data-dir 绑定 custom profile 到这份 discovery 目录，与轮询路径
+            // 同一规矩：服务可能是 full/standard 任意一家，不能按字面比对。
+            || (self.profile.edition() != "custom"
+                && discovery.edition.as_deref() != Some(self.profile.edition()))
             || discovery.server_instance_id.as_deref() != payload["session"].as_str()
         {
             bail!("播放来源已变化，请等待重新同步");
@@ -354,6 +357,37 @@ impl MiniFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
+
+    #[test]
+    fn control_edition_gate_tolerates_custom_profile() {
+        // custom profile 与 full 服务共库共发现文件（用户实际部署形态）：
+        // 轮询路径放行 custom，播控门槛必须同一规矩——否则回主窗口/播控
+        // 全部报「播放来源已变化」（2026-11-21 实测故障）。
+        let dir = std::env::temp_dir().join(format!("mini-feed-gate-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        serde_json::to_writer(
+            std::fs::File::create(dir.join("vmusicd.json")).unwrap(),
+            &serde_json::json!({
+                "pid": 1, "port": 1, "version": "test", "protocol_version": 1,
+                "edition": "full", "server_instance_id": "session",
+                "desktop_mini_protocol": 1
+            }),
+        )
+        .unwrap();
+        let feed = MiniFeed::new(config::standalone(dir.clone(), "custom")).unwrap();
+        let message = feed
+            .control(&serde_json::json!({ "action": "restore", "session": "session" }))
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(
+            !message.contains("播放来源已变化"),
+            "custom profile must pass the edition gate, got: {message}"
+        );
+        assert!(message.contains("desktop-mini-key") || message.contains("小窗"), "gate passed, failed later at key read: {message}");
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn clock_advances_only_while_playing() {

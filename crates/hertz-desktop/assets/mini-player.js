@@ -108,6 +108,7 @@
     img.addEventListener('load', () => {
       document.body.removeAttribute('data-art-failed');
       scheduleHitRegions();
+      sendSilhouette();
     });
 
     function setSkin(manifest) {
@@ -154,6 +155,8 @@
       }
       if (!def) {
         document.body.setAttribute('data-art-failed', '');
+        // 连素材都画不出来：整盒剪影（native 回退成完整矩形窗口）。
+        ipc({ cmd: 'silhouette', full: true, width: 56, height: 56 });
         scheduleHitRegions();
         return;
       }
@@ -400,6 +403,49 @@
       round((bounds.maxX - bounds.minX + 1) * scale),
       round((bounds.maxY - bounds.minY + 1) * scale),
     ];
+  }
+
+  // 剪影行区段（元素内逻辑像素坐标）：native 据此 SetWindowRgn 把窗口裁成
+  // 素材的真实形状。窗口本体是不透明黑底——WebView2 的逐像素透明底色 put
+  // 有竞态（157 实测 ~1/3 概率整窗刷白且对页面/重建均不可控），region 是
+  // GDI 级确定性机制；region 外的底色根本不存在，内部空隙读作黑（阴影感）。
+  // alpha ≥ 96 的像素算实心；采样失败（跨域污染等）报 full:true 回退整盒。
+  const silhouetteCache = new Map();
+  function petSilhouetteRuns(img) {
+    const url = img.getAttribute('src');
+    if (!url || !img.naturalWidth || !img.naturalHeight) return null;
+    if (!silhouetteCache.has(url)) {
+      const naturalWidth = img.naturalWidth, naturalHeight = img.naturalHeight;
+      let runs = null;
+      try {
+        opaqueCanvas.width = naturalWidth;
+        opaqueCanvas.height = naturalHeight;
+        const context = opaqueCanvas.getContext('2d', { willReadFrequently: true });
+        context.clearRect(0, 0, naturalWidth, naturalHeight);
+        context.drawImage(img, 0, 0);
+        const data = context.getImageData(0, 0, naturalWidth, naturalHeight).data;
+        runs = [];
+        for (let y = 0; y < naturalHeight; y += 1) {
+          let runStart = -1;
+          for (let x = 0; x <= naturalWidth; x += 1) {
+            const alpha = x < naturalWidth ? data[(y * naturalWidth + x) * 4 + 3] : 0;
+            if (alpha >= 96 && runStart < 0) runStart = x;
+            if (alpha < 96 && runStart >= 0) { runs.push(y, runStart, x - 1); runStart = -1; }
+          }
+        }
+      } catch (_) { runs = null; }
+      silhouetteCache.set(url, runs);
+    }
+    return silhouetteCache.get(url);
+  }
+
+  function sendSilhouette() {
+    const img = $('pet-art');
+    const runs = petSilhouetteRuns(img);
+    // [y,x0,x1] 平铺；scale 由 native 按窗口 DPI 换算。元素盒与剪影像素
+    // 1:1（object-fit:contain 且窗口按皮肤尺寸开）。
+    if (runs) ipc({ cmd: 'silhouette', runs, width: img.naturalWidth, height: img.naturalHeight });
+    else ipc({ cmd: 'silhouette', full: true, width: img.naturalWidth || 56, height: img.naturalHeight || 56 });
   }
 
   // --- 拖拽 -----------------------------------------------------------------
