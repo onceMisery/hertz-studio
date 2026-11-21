@@ -243,27 +243,67 @@ mod tests {
 
         // 退化行只在在线侧登记，本地行不在此列。
         let pending = list_degraded_online(&pool, 40).await.unwrap();
-        assert_eq!(pending, vec![("online:netease:189602".into(), "netease".into(), "189602".into())]);
+        assert_eq!(
+            pending,
+            vec![(
+                "online:netease:189602".into(),
+                "netease".into(),
+                "189602".into()
+            )]
+        );
 
         // 自愈读：能按 track_id 找回这一行。
-        let old = find_by_track(&pool, "online:netease:189602").await.unwrap().unwrap();
+        let old = find_by_track(&pool, "online:netease:189602")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(old.title, "189602");
 
         // 修复：只补缺失字段。
-        let healed = fill_missing(&pool, "online:netease:189602", "真实歌名", Some("真实歌手"),
-            Some("真实专辑"), Some("https://cover"), Some(210_000)).await.unwrap();
+        let healed = fill_missing(
+            &pool,
+            "online:netease:189602",
+            "真实歌名",
+            Some("真实歌手"),
+            Some("真实专辑"),
+            Some("https://cover"),
+            Some(210_000),
+        )
+        .await
+        .unwrap();
         assert_eq!(healed, 1);
-        let row = find_by_track(&pool, "online:netease:189602").await.unwrap().unwrap();
+        let row = find_by_track(&pool, "online:netease:189602")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.title, "真实歌名");
         assert_eq!(row.artist.as_deref(), Some("真实歌手"));
         assert_eq!(row.cover_url.as_deref(), Some("https://cover"));
 
         // 已是好数据时不再命中（无竞争、不重复写），本地行也绝不被误改。
-        let again = fill_missing(&pool, "online:netease:189602", "另一个名字", Some("别人"),
-            None, None, None).await.unwrap();
+        let again = fill_missing(
+            &pool,
+            "online:netease:189602",
+            "另一个名字",
+            Some("别人"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(again, 0);
-        assert_eq!(find_by_track(&pool, "online:netease:189602").await.unwrap().unwrap().title, "真实歌名");
-        let touched = fill_missing(&pool, "local-2", "本地歌", Some("歌手"), None, None, None).await.unwrap();
+        assert_eq!(
+            find_by_track(&pool, "online:netease:189602")
+                .await
+                .unwrap()
+                .unwrap()
+                .title,
+            "真实歌名"
+        );
+        let touched = fill_missing(&pool, "local-2", "本地歌", Some("歌手"), None, None, None)
+            .await
+            .unwrap();
         assert_eq!(touched, 0);
     }
 
