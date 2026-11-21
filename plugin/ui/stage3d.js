@@ -492,10 +492,15 @@
     '      normal.xy = direction*sqrt(max(0.0,1.0-normal.z*normal.z));',
     '      coverSpacing = 2.55*sqrt(2.0*PI*(1.0+1.0/reference)/(count-frontCount));',
     '    }',
-    // 按球面弧长贴图：原先用参考相机的投影坐标，正好抵消了球面曲率，
-    // 静止时只剩一张圆形照片。前后半球共用连续的径向映射，不引入经线接缝。
+    // 封面贴图 = 平面投影（主）+ 球面弧长（辅）的径向混合，前后半球连续无接缝。
+    // 纯平面（参考相机投影）会把静止画面退化成一张圆照片——curvature 的下界
+    // 就是钉这个的；纯弧长则把封面中心放大 ~2 倍、正面只铺得下封面中央 40%
+    // 半径，外圈 60% 全卷到背面，封面完全认不出来（用户实测）。
+    // 0.6 弧长 + 0.4 平面：曲率落在 ~0.11（桌面）/ ~0.08（竖屏），仍在
+    // check-cover-sphere 的 (0.06,0.22) 带内，中心放大 ≤1.4 倍，整张封面可见。
     '    float arc = acos(clamp(abs(normal.z),0.0,1.0));',
-    '    vec2 artUv = 0.5+direction*arc/PI;',
+    '    vec2 flatUv = normal.xy*projection*0.5/(reference-normal.z);',
+    '    vec2 artUv = 0.5+mix(direction*arc*(1.0/PI),flatUv,0.4);',
     '    vec3 art = textureLod(uArt,0.5+(artUv-0.5)*uArtScale,uArtLod).rgb;',
     '    color = mix(mix(colorA,colorB,artUv.x*0.65+artUv.y*0.35),art,uHasArt);',
     '    float yaw = sin(t*0.19)*0.035*uCoverMotion;',
