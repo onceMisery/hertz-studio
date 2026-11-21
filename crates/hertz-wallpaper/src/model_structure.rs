@@ -1524,11 +1524,11 @@ impl SkinGraph {
         if self.depths[left] < self.depths[right] {
             std::mem::swap(&mut left, &mut right);
         }
-        let difference = self.depths[left] - self.depths[right];
-        for level in 0..13 {
-            if difference & (1 << level) != 0 {
-                left = self.ancestors[left][level];
-            }
+        let mut difference = self.depths[left] - self.depths[right];
+        while difference != 0 {
+            let level = difference.trailing_zeros() as usize;
+            left = self.ancestors[left][level];
+            difference &= difference - 1;
         }
         if left == right {
             return left;

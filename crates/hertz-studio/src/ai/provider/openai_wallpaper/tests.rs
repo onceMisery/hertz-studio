@@ -351,10 +351,20 @@ async fn compatible_wallpaper_runner_quotes_once_validates_and_replays_both_type
             } else {
                 assert!(artifact.is_none());
             }
-            let usage = vmusic_store::ai_jobs::find_usage_entry(&state.db, &job.job_id)
-                .await
-                .unwrap()
-                .unwrap();
+            let usage = tokio::time::timeout(Duration::from_secs(8), async {
+                loop {
+                    if let Some(usage) =
+                        vmusic_store::ai_jobs::find_usage_entry(&state.db, &job.job_id)
+                            .await
+                            .unwrap()
+                    {
+                        break usage;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
             assert_eq!(usage.usage_state, "unpriced");
             let reported: Value =
                 serde_json::from_str(usage.reported_usage.as_deref().unwrap()).unwrap();

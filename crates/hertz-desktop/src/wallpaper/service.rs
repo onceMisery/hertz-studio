@@ -2868,6 +2868,26 @@ mod tests {
         });
         let service = LibraryService::start(root.path().to_path_buf(), probe);
         service.set_settings_owner(7);
+        // The initial maintenance wake holds the content writer; finish it
+        // before the one-shot import so it cannot fail with budget_busy.
+        let warm = call(
+            &service,
+            request("raw-warm", "wallpaper.library.list", json!({})),
+            7,
+        );
+        assert_eq!(warm["ok"], true, "{warm}");
+        let maintenance_deadline = Instant::now() + Duration::from_secs(5);
+        while !service
+            .state
+            .initial_candidate_maintenance_complete
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < maintenance_deadline,
+                "initial candidate maintenance did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let token = service
             .state
             .tokens

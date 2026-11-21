@@ -218,10 +218,7 @@ impl EpochBuffer {
         self.seq_high = Some(sequence);
         self.expected_next = end;
         self.buffered_frames = total;
-        if new_frames == 0 {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(new_frames != 0)
     }
 
     /// 下一帧应呈现的帧号（剩余缓冲的起点）。

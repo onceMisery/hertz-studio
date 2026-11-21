@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
+#[cfg(windows)]
 use crate::{
     ai::{facade, jobs},
     routes,

@@ -57,6 +57,8 @@ struct Proof {
     deadline: Instant,
     binding: Option<NativeBinding>,
     request_id: Option<String>,
+    // Read only by the Windows desktop-host confirmation path.
+    #[cfg(all(windows, feature = "desktop-host"))]
     acceptance_id: Option<String>,
 }
 
@@ -109,6 +111,7 @@ impl ProofStore {
                 deadline: Instant::now() + Duration::from_secs(PROOF_SECONDS),
                 binding: None,
                 request_id: None,
+                #[cfg(all(windows, feature = "desktop-host"))]
                 acceptance_id: None,
             },
         );
