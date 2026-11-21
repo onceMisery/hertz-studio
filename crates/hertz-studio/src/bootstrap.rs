@@ -337,6 +337,8 @@ pub async fn boot(
         }
     }
     spawn_session_saver(state.clone());
+    // 历史自愈：把上一会话退化成平台 id 的在线历史行补回真实元数据（detach）。
+    state.spawn_history_repair_sweep();
     // DSP 即时下发（播放时再按曲目追加 track_gain）。
     let _ = state
         .audio

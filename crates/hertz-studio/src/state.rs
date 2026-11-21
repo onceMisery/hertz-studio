@@ -3072,6 +3072,7 @@ impl AppState {
 
     async fn record_track_commit(&self, track_id: &str, generation: usize) {
         self.record_history(track_id).await;
+        self.spawn_online_meta_enrichment(track_id);
         if self.play_generation.load(Ordering::Relaxed) != generation
             || self.audio.snapshot().track_id.as_deref() != Some(track_id)
         {
@@ -3175,12 +3176,161 @@ impl AppState {
             tracing::warn!("写播放历史失败: {error}");
         }
     }
+
+    /// 提交后补在线元数据（detach）：恢复会话的起播只有 id，online_meta 没有
+    /// 快照，历史只能退化成平台 id。起播成功后后台拉一次单曲详情，写回
+    /// online_meta 与历史行——之后重播、接力、打卡就都有完整元数据了。
+    /// 失败只记日志：这是装饰性修复，绝不打扰播放链路。
+    fn spawn_online_meta_enrichment(&self, track_id: &str) {
+        let Some((source, id)) = crate::online::split_virtual_id(track_id) else {
+            return;
+        };
+        let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        let track_id = track_id.to_string();
+        tokio::spawn(async move {
+            if state.online_meta.lock().await.get(&track_id).is_some() {
+                return;
+            }
+            let ctx = crate::routes::online_ctx(&state);
+            let detail = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::online::detail(&ctx, &source, &id),
+            )
+            .await
+            {
+                Ok(Ok(detail)) => detail,
+                Ok(Err(error)) => {
+                    tracing::debug!("补在线元数据失败（{source}:{id}）: {error:?}");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!("补在线元数据超时（{source}:{id}）");
+                    return;
+                }
+            };
+            state
+                .remember_online_meta(
+                    track_id.clone(),
+                    OnlineMetaSnap {
+                        title: detail.title,
+                        artist: Some(detail.artist).filter(|v| !v.trim().is_empty()),
+                        album: Some(detail.album).filter(|v| !v.trim().is_empty()),
+                        cover: detail.cover.filter(|v| !v.trim().is_empty()),
+                        duration_ms: (detail.duration_ms > 0).then_some(detail.duration_ms),
+                        rg_gain_db: None,
+                        rg_peak: None,
+                        origin: Some(OnlineOrigin {
+                            label: crate::online::find(&source)
+                                .map(|provider| provider.label.to_string()),
+                            source,
+                            id,
+                        }),
+                    },
+                )
+                .await;
+            if let Err(error) = state.write_history(&track_id).await {
+                tracing::debug!("补写播放历史失败（{track_id}）: {error}");
+            }
+        });
+    }
+
+    /// 启动时修复退化历史行（detach）：上一会话「重启后起播」写下过标题 =
+    /// 平台 id、歌手/封面全空的在线行。逐条拉单曲详情补齐元数据与 online_meta，
+    /// 补过的行在本次修复里不会再被读到（fill_missing 只命中退化行）。
+    /// 失败只跳过；有条数上限与间隔，绝不给平台刷接口。
+    pub(crate) fn spawn_history_repair_sweep(&self) {
+        let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let pending = match crate::history::list_degraded_online(&state.db, 40).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::debug!("读取退化历史行失败: {error}");
+                    return;
+                }
+            };
+            if pending.is_empty() {
+                return;
+            }
+            tracing::info!("开始修复退化播放历史：{} 条", pending.len());
+            let ctx = crate::routes::online_ctx(&state);
+            for (track_id, source, ref_id) in pending {
+                let detail = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    crate::online::detail(&ctx, &source, &ref_id),
+                )
+                .await
+                {
+                    Ok(Ok(detail)) => detail,
+                    Ok(Err(error)) => {
+                        tracing::debug!("历史修复跳过（{track_id}）: {error:?}");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::debug!("历史修复超时（{track_id}）");
+                        continue;
+                    }
+                };
+                state
+                    .remember_online_meta(
+                        track_id.clone(),
+                        OnlineMetaSnap {
+                            title: detail.title.clone(),
+                            artist: Some(detail.artist.clone()).filter(|v| !v.trim().is_empty()),
+                            album: Some(detail.album.clone()).filter(|v| !v.trim().is_empty()),
+                            cover: detail.cover.clone().filter(|v| !v.trim().is_empty()),
+                            duration_ms: (detail.duration_ms > 0).then_some(detail.duration_ms),
+                            rg_gain_db: None,
+                            rg_peak: None,
+                            origin: Some(OnlineOrigin {
+                                label: crate::online::find(&source)
+                                    .map(|provider| provider.label.to_string()),
+                                source: source.clone(),
+                                id: ref_id.clone(),
+                            }),
+                        },
+                    )
+                    .await;
+                let healed = crate::history::fill_missing(
+                    &state.db,
+                    &track_id,
+                    &detail.title,
+                    Some(detail.artist.as_str()).filter(|v| !v.trim().is_empty()),
+                    Some(detail.album.as_str()).filter(|v| !v.trim().is_empty()),
+                    detail.cover.as_deref().filter(|v| !v.trim().is_empty()),
+                    (detail.duration_ms > 0).then_some(detail.duration_ms),
+                )
+                .await;
+                match healed {
+                    Ok(n) if n > 0 => tracing::debug!("历史已修复（{track_id}）"),
+                    Ok(_) => {}
+                    Err(error) => tracing::debug!("历史修复写入失败（{track_id}）: {error}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        });
+    }
     pub(crate) async fn write_history(&self, track_id: &str) -> Result<(), String> {
         if let Some((source, ref_id)) = crate::online::split_virtual_id(track_id) {
             let metadata = self.online_meta.lock().await.get(track_id).cloned();
+            // online_meta 是内存快照：重启后恢复会话的起播不经过 /online/play，
+            // 这里会拿不到。此时先从历史里同一首曲的旧行把元数据捞回来——
+            // 上一会话写过的好数据绝不能被「平台 id」退化行覆盖。
             let (title, artist, album, cover, duration) = match metadata {
                 Some(m) => (m.title, m.artist, m.album, m.cover, m.duration_ms),
-                None => (ref_id.clone(), None, None, None, None),
+                None => match crate::history::find_by_track(&self.db, track_id).await {
+                    Ok(Some(old)) if old.title != ref_id => (
+                        old.title,
+                        old.artist,
+                        old.album,
+                        old.cover_url,
+                        old.duration_ms.map(|v| v.max(0) as u64),
+                    ),
+                    _ => (ref_id.clone(), None, None, None, None),
+                },
             };
             crate::history::upsert(
                 &self.db,

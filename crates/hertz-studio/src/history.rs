@@ -77,6 +77,68 @@ pub async fn upsert(pool: &SqlitePool, e: HistoryEntry<'_>) -> Result<(), String
     Ok(())
 }
 
+/// 按曲目 id 读单条历史。写历史自愈用：online_meta 缺快照时（重启后恢复
+/// 会话起播），把同一首曲上一会话写下的元数据捞回来，不让退化行覆盖好数据。
+pub async fn find_by_track(
+    pool: &SqlitePool,
+    track_id: &str,
+) -> Result<Option<HistoryItem>, String> {
+    sqlx::query_as::<_, HistoryItem>(
+        "SELECT id, track_id, source, ref_id, title, artist, album, cover_url, \
+         duration_ms, played_at FROM play_history WHERE track_id = ?1",
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// 退化在线行（元数据缺失、标题退成了平台 id）的来源与 ref。本地行不在列：
+/// 它们的 cover_url/duration 本来就是 None，不是退化。
+pub async fn list_degraded_online(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<(String, String, String)>, String> {
+    sqlx::query_as(
+        "SELECT track_id, source, ref_id FROM play_history \
+         WHERE source != 'local' AND artist IS NULL AND cover_url IS NULL \
+         AND duration_ms IS NULL AND title = ref_id \
+         ORDER BY played_at DESC LIMIT ?1",
+    )
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// 只补缺失字段：把退化行修正为真实元数据。行已被并发写成好数据（或已补过）
+/// 时 WHERE 不命中，天然无竞争；played_at 不动，历史顺序保持原样。
+pub async fn fill_missing(
+    pool: &SqlitePool,
+    track_id: &str,
+    title: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+    cover_url: Option<&str>,
+    duration_ms: Option<u64>,
+) -> Result<u64, String> {
+    let result = sqlx::query(
+        "UPDATE play_history SET title=?2, artist=?3, album=?4, cover_url=?5, duration_ms=?6 \
+         WHERE track_id=?1 AND source != 'local' AND artist IS NULL \
+         AND cover_url IS NULL AND duration_ms IS NULL AND title=ref_id",
+    )
+    .bind(track_id)
+    .bind(title)
+    .bind(artist)
+    .bind(album)
+    .bind(cover_url)
+    .bind(duration_ms.map(|v| v as i64))
+    .execute(pool)
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(result.rows_affected())
+}
+
 /// 分页 + 来源筛选 + 标题/歌手/专辑搜索。返回 (条目, 命中总数)。
 ///
 /// 500 条上限之外的旧记录因此可达：UI 用 offset 翻页，不靠单次大查询。
@@ -153,6 +215,56 @@ mod tests {
             cover_url: None,
             duration_ms: Some(200_000),
         }
+    }
+
+    #[tokio::test]
+    async fn find_by_track_and_fill_missing_repair_degraded_rows() {
+        let pool = db().await;
+        // 退化行：标题 = 平台 id、歌手/封面全空（重启后恢复会话起播写下的那种）。
+        let degraded = HistoryEntry {
+            track_id: "online:netease:189602",
+            source: "netease",
+            ref_id: "189602",
+            title: "189602",
+            artist: None,
+            album: None,
+            cover_url: None,
+            duration_ms: None,
+        };
+        upsert(&pool, degraded).await.unwrap();
+        let mut local = entry(2);
+        local.track_id = "local-2";
+        local.source = "local";
+        local.ref_id = "local-2";
+        local.title = "local-2";
+        local.artist = None;
+        local.duration_ms = None;
+        upsert(&pool, local).await.unwrap();
+
+        // 退化行只在在线侧登记，本地行不在此列。
+        let pending = list_degraded_online(&pool, 40).await.unwrap();
+        assert_eq!(pending, vec![("online:netease:189602".into(), "netease".into(), "189602".into())]);
+
+        // 自愈读：能按 track_id 找回这一行。
+        let old = find_by_track(&pool, "online:netease:189602").await.unwrap().unwrap();
+        assert_eq!(old.title, "189602");
+
+        // 修复：只补缺失字段。
+        let healed = fill_missing(&pool, "online:netease:189602", "真实歌名", Some("真实歌手"),
+            Some("真实专辑"), Some("https://cover"), Some(210_000)).await.unwrap();
+        assert_eq!(healed, 1);
+        let row = find_by_track(&pool, "online:netease:189602").await.unwrap().unwrap();
+        assert_eq!(row.title, "真实歌名");
+        assert_eq!(row.artist.as_deref(), Some("真实歌手"));
+        assert_eq!(row.cover_url.as_deref(), Some("https://cover"));
+
+        // 已是好数据时不再命中（无竞争、不重复写），本地行也绝不被误改。
+        let again = fill_missing(&pool, "online:netease:189602", "另一个名字", Some("别人"),
+            None, None, None).await.unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(find_by_track(&pool, "online:netease:189602").await.unwrap().unwrap().title, "真实歌名");
+        let touched = fill_missing(&pool, "local-2", "本地歌", Some("歌手"), None, None, None).await.unwrap();
+        assert_eq!(touched, 0);
     }
 
     #[tokio::test]
