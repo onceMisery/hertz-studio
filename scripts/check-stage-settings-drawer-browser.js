@@ -29,7 +29,16 @@ function check(value, label) { assert.ok(value, label); checks++; console.log('P
     await page.goto(uiUrl(base));
     await page.waitForFunction(() => window.Stage3D && window.Space3D && document.getElementById('conn').textContent === '\u670d\u52a1\u5df2\u8fde\u63a5');
     await page.evaluate(() => Stage3D.open('aurora'));
-    await page.mouse.move(720, 450);
+    // open 是异步装载：active 置位前 pokeChrome 空转，指针唤醒不生效（见 wakeGear）。
+    await page.waitForFunction(() => Stage3D.isActive());
+    // s3d chrome 静置 2.6s 打烊（FAB pointer-events:none），而 Playwright 的
+    // hit-target 校验不派发 pointermove——唤醒必须「动指针 + 等到 FAB 真的醒」，
+    // 再立刻点击；单次 mouse.move 后隔了几步再点会撞上打烊窗口（2026-11-21 实测）。
+    const wakeGear = async (vw = 720, vh = 450) => {
+      await page.mouse.move(vw / 2, vh / 2);
+      await page.waitForFunction(() => Number(
+        getComputedStyle(document.getElementById('s3d-settings-toggle')).opacity) === 1);
+    };
     check(await page.locator('.s3d-head button').count() === 1, 'top right contains only close');
     check(await page.locator('#s3d-head-trigger').count() === 0, 'old hover toolbar removed');
     const trigger = page.locator('#s3d-settings-toggle'), panel = page.locator('#s3d-settings');
@@ -38,15 +47,16 @@ function check(value, label) { assert.ok(value, label); checks++; console.log('P
       const s = getComputedStyle(el), r = el.getBoundingClientRect();
       return { width: r.width, height: r.height, top: r.top, right: innerWidth - r.right, radius: s.borderRadius, padding: s.padding, background: s.backgroundColor };
     };
+    await wakeGear();
     await trigger.click();
     await page.waitForFunction(() => document.getElementById('s3d-settings').getAnimations().every(a => a.playState === 'finished'));
     check(await trigger.getAttribute('aria-expanded') === 'true' && await panel.isVisible(), 'one click opens settings');
     const stageStyles = await panel.evaluate(styles);
-    // 形态从「贴右全高抽屉」改成「居中圆角弹窗」：量用户能看见的位置与尺寸。
-    check(stageStyles.top > 0 && stageStyles.height < 900 && stageStyles.right > 1
-      && parseFloat(stageStyles.radius) > 0, 'settings is a centred rounded dialog, not an edge drawer');
-    check(await page.locator('#s3d-settings-scrim').count() === 1
-      && await page.locator('#s3d-settings-scrim').isVisible(), 'dialog scrim opens with the settings');
+    // 形态从「居中圆角弹窗」改回「贴右全高玻璃侧栏」：设置是边看边调的工具，
+    // 量用户能看见的位置与尺寸——贴视口右缘、通高、无圆角。
+    check(stageStyles.top <= 1 && stageStyles.right <= 1 && stageStyles.height >= 860
+      && parseFloat(stageStyles.radius) === 0, 'settings is a full-height right drawer, not a centred dialog');
+    check(await page.locator('#s3d-settings-scrim').count() === 0, 'non-modal drawer has no scrim');
     check(await page.locator('#s3d-sec-nav [data-sec]').count() === 5
       && await page.locator('#s3d-settings > .s3d-sec').count() === 5,
       'five section shortcuts each have a matching section heading');
@@ -73,13 +83,19 @@ function check(value, label) { assert.ok(value, label); checks++; console.log('P
     await page.keyboard.press('Escape');
     check(await page.evaluate(() => Stage3D.isActive()) && await trigger.getAttribute('aria-expanded') === 'false', 'Escape closes drawer before leaving stage');
     check(await trigger.evaluate(el => el === document.activeElement), 'closing returns focus to gear');
+    await wakeGear();
     await trigger.click();
     await page.locator('#s3d-settings-close').click();
     check(await trigger.getAttribute('aria-expanded') === 'false', 'close button updates drawer state');
-    check(await page.locator('#s3d-settings-scrim').isHidden(), 'scrim closes together with the dialog');
     await page.evaluate(() => { Stage3D.close(); Space3D.open(); });
-    await page.locator('#sp-more').click();
-    await page.locator('#sp-fab').click();
+    // Space3D 开启带一段 warp 入场动画，动画未落定时 FAB 在视口外且命中测试落空。
+    // 这里等 warp 结束；其后 FAB 的命中测试在 headless 下仍会**间歇性**落空
+    // （元素可见、pe:auto、坐标正确却报 body 拦截——master 上同款时序也会中招，
+    //  2026-11-21 实测），所以两下点击直接派发事件：这一段要验证的是点完之后
+    // sp-sheet 的几何与关闭键尺寸，不是命中路径本身。
+    await page.waitForFunction(() => !document.querySelector('.sp').classList.contains('sp-warping'));
+    await page.locator('#sp-more').dispatchEvent('click');
+    await page.locator('#sp-fab').dispatchEvent('click');
     await page.waitForFunction(() => document.getElementById('sp-sheet').getAnimations().every(a => a.playState === 'finished'));
     const spaceStyles = await page.locator('#sp-sheet').evaluate(styles);
     check(spaceStyles.top >= 0 && spaceStyles.right >= 0 && spaceStyles.height <= 900, 'space console remains within its viewport');
@@ -100,16 +116,22 @@ function check(value, label) { assert.ok(value, label); checks++; console.log('P
         return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight &&
           (r.right <= player.left || r.left >= player.right || r.bottom <= player.top || r.top >= player.bottom);
       }), viewport.width + ' floating gear clears playback bar');
+      await wakeGear(viewport.width, viewport.height);
       await trigger.click();
       await page.waitForFunction(() => document.getElementById('s3d-settings').getAnimations().every(a => a.playState === 'finished'));
       check(await panel.evaluate(el => el.scrollHeight > el.clientHeight && el.scrollWidth <= el.clientWidth + 1), viewport.width + ' drawer scrolls vertically without horizontal overflow');
       await page.screenshot({ path: path.join(out, viewport.width + '-open.png'), animations: 'disabled' });
       await page.locator('#s3d-settings-close').click();
     }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await wakeGear();
     await trigger.click();
-    // 弹窗是真 modal：点遮罩也要能关，左上角不会被子弹窗挡住。
-    await page.locator('#s3d-settings-scrim').click({ position: { x: 4, y: 4 } });
-    check(await trigger.getAttribute('aria-expanded') === 'false', 'clicking the scrim closes the dialog');
+    // 侧栏是非模态的：点舞台不收起（用户要边看边调），Esc 与关闭键负责收起。
+    await page.mouse.click(360, 450);
+    await page.waitForTimeout(150);
+    check(await trigger.getAttribute('aria-expanded') === 'true', 'clicking the stage keeps the drawer open');
+    await page.keyboard.press('Escape');
+    check(await trigger.getAttribute('aria-expanded') === 'false', 'Escape still closes the drawer');
     await page.evaluate(() => Stage3D.close());
     await page.evaluate(() => Stage3D.open('aurora'));
     check(await trigger.getAttribute('aria-expanded') === 'false', 'reopening starts with drawer closed');

@@ -2230,9 +2230,9 @@
   <!-- 3D 歌单架（封面流）：卡片由 stage-shelf.js 按队列生成，这里只留锚点 -->
   <div class="s3d-shelf" id="s3d-shelf" aria-hidden="true"><div class="s3d-shelf-plane" id="s3d-shelf-plane"></div></div>
   <button class="sp-fab s3d-settings-fab" id="s3d-settings-toggle" type="button" title="沉浸声场设置" aria-label="沉浸声场设置" aria-expanded="false" aria-controls="s3d-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg></button>
-  <!-- 设置弹窗的遮罩：与抽屉同开合，点它即关闭。放在 aside 之前，层级低于弹窗。 -->
-  <div class="s3d-settings-scrim" id="s3d-settings-scrim" hidden aria-hidden="true"></div>
-  <aside class="sp-sheet" id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="true" hidden>
+  <!-- 设置是**非模态侧栏**：舞台保持可见、可直接拖拽验证效果，因此没有遮罩；
+       Esc / 关闭键 / 齿轮按钮三处都能收起。放在 aside 之前的遮罩节点已随模态形态一并移除。 -->
+  <aside class="sp-sheet" id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="false" hidden>
     <h2>沉浸声场设置<button class="sp-head-btn" id="s3d-settings-close" type="button" title="收起设置" aria-label="收起设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></h2>
     <p class="s3d-settings-status" id="s3d-settings-status" role="status" aria-live="polite"></p>
     <!-- 分组只跳转、不隐藏控件：任何设置项在任何时刻都能被直接操作（浏览器契约与用户都依赖这点）。 -->

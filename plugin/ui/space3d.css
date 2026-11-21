@@ -1335,29 +1335,22 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn) svg { width: 19px; height: 19px; }
 
 /* ---------------------------------------------------------------------------
- * 沉浸声场设置：居中弹窗（data-terminal，seed 351370453）
+ * 沉浸声场设置：右侧非模态玻璃侧栏
  *
  * 只覆盖 #s3d-settings，#space3d 的右侧抽屉沿用上面那套 .sp-sheet 规则，两边互不干扰。
- * 形态上从「贴边抽屉」改成「居中对话框」：宽出的一倍空间用来把「标签 / 控件」
- * 排成两列，一屏能读完的设置项从十来个变成二十多个；分组导航只滚动、不隐藏控件，
- * 所以任何自动验收脚本和用户都能直接点到任意一项。
+ * 形态从「居中对话框」改回「贴边侧栏」：设置是边看边调的工具——舞台必须始终可见、
+ * 可以直接拖拽验证每项效果，所以没有遮罩、不挡点击，Esc / 关闭键 / 齿轮三处收起。
+ * 开合动效沿用共享 .sp-sheet 的滑入滑出，这里只覆盖底色与栅格。
  *
+ * 面板底是半透明玻璃（舞台从面板下透出来），但吸顶标题与分组导航保持**不透明**——
+ * 滚过的行不能透上来糊住标题（check-stage-settings-browser 的既有契约量的是 alpha=1）。
  * 配色全部由 --sp-* / --bg 令牌派生；强调色只出现在 1px 线上（当前分组、字段聚焦、
- * 灰显说明的引导线）与开关轨道，彩色面积控制在 3% 以内。表面靠亮度分层，不叠渐变、
- * 不叠发光，也不用 backdrop blur 假装高级；只有这张真正浮起来的对话框有阴影。
+ * 灰显说明的引导线）与开关轨道，彩色面积控制在 3% 以内；字段用不透明底保证可读性，
+ * 玻璃只交给面板底色这一层。
  * ------------------------------------------------------------------------- */
-.s3d-settings-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-  background: color-mix(in srgb, var(--bg) 76%, transparent);
-}
-.s3d-settings-scrim[hidden] { display: none; }
-
 #s3d-settings {
-  /* 局部令牌：一级面板 / 实心标题栏 / 字段底 / 悬浮态 / 三级文字 */
-  --dlg-ground: color-mix(in srgb, var(--bg) 94%, var(--sp-text));
-  --dlg-solid: var(--bg);
+  /* 局部令牌：吸顶实心带 / 字段底 / 悬浮态 / 三级文字 */
+  --dlg-solid: color-mix(in srgb, var(--bg) 93%, var(--sp-text));
   --dlg-field: color-mix(in srgb, var(--sp-text) 7%, var(--bg));
   --dlg-field-hi: color-mix(in srgb, var(--sp-text) 13%, var(--bg));
   --dlg-ink: var(--sp-text);
@@ -1365,31 +1358,31 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   --dlg-rule: var(--sp-line-soft);
 
   position: fixed;
-  inset: 0;
-  margin: auto;                 /* 居中不靠 transform，位移留给入场动效 */
-  width: min(760px, calc(100vw - 32px));
-  height: min(720px, calc(100dvh - 48px));
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  margin: 0;
+  width: min(400px, 100vw);
   z-index: 21;
-  transform: none;              /* 覆盖共享抽屉的 translateX(106%) */
-  border: 1px solid var(--dlg-rule);
-  border-radius: 18px;
-  background: var(--dlg-ground);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, .46);
-  padding: 0 28px 32px;
+  border: 0;
+  border-left: 1px solid var(--dlg-rule);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(30px) saturate(1.2);
+  -webkit-backdrop-filter: blur(30px) saturate(1.2);
+  box-shadow: -28px 0 72px rgba(0, 0, 0, .4);
+  padding: 0 22px 30px;
   display: grid;
   grid-template-columns: minmax(132px, 34%) minmax(0, 1fr);
   align-items: center;
   align-content: start;
-  column-gap: 18px;
+  column-gap: 16px;
   row-gap: 8px;
   overscroll-behavior: contain;
-  opacity: 0;
-  scale: .975;
-  transition: opacity .26s var(--sp-ease), scale .26s var(--sp-ease);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--sp-text) 22%, transparent) transparent;
 }
-#s3d-settings.sp-show { opacity: 1; scale: 1; transform: none; }
 
 /* 顶层里凡是「标签 + 控件」之外的节点都占满一整行，配对节奏才不会被打散。
    动态插入的 <small class="s3d-setting-note"> 也走这一条。 */
@@ -1417,16 +1410,17 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   position: sticky;
   top: 0;
   z-index: 4;
-  margin: 0 -28px;
-  padding: 22px 28px 18px;
+  margin: 0 -22px;
+  padding: 16px 22px 12px;
   border-bottom: 1px solid var(--dlg-rule);
   background: var(--dlg-solid);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 600;
   letter-spacing: -.01em;
 }
+#s3d-settings h2 .sp-head-btn { width: 36px; height: 36px; border-radius: 9px; }
 
 /* 状态条：一句话说清当前生效的歌词视觉，不再把同一句理由复制到每个控件下面。 */
 #s3d-settings > #s3d-settings-status {
@@ -1449,12 +1443,12 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 /* 分组跳转条：只滚到分组，不切换视图；当前分组用一条 1px 强调线标出。 */
 #s3d-settings > .s3d-sec-nav {
   position: sticky;
-  top: 68px;
+  top: 64px;
   z-index: 3;
   display: flex;
   gap: 4px;
-  margin: 0 -28px;
-  padding: 4px 28px 8px;
+  margin: 0 -22px;
+  padding: 4px 22px 8px;
   overflow-x: auto;
   background: var(--dlg-solid);
   border-bottom: 1px solid var(--dlg-rule);
@@ -1649,11 +1643,10 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 #s3d-settings > .sp-note { margin: 4px 0 0; font-size: 12px; color: var(--dlg-muted); }
 #s3d-settings :disabled { opacity: .55; cursor: not-allowed; }
 
-/* 窄屏：单列，标签与数值并排，分组条横向滚动，触控目标保持 38px 以上。 */
+/* 窄屏：侧栏吃满视口宽，单列，标签与数值并排，分组条横向滚动，触控目标保持 38px 以上。 */
 @media (max-width: 620px) {
   #s3d-settings {
-    width: calc(100vw - 24px);
-    height: calc(100dvh - 24px);
+    width: min(100vw, 430px);
     padding: 0 16px 24px;
     grid-template-columns: minmax(0, 1fr);
     row-gap: 6px;
@@ -1661,9 +1654,10 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   #s3d-settings > label { grid-column: 1 / -1; }
   #s3d-settings > div { grid-template-columns: minmax(0, 1fr); padding: 12px; }
   #s3d-settings > div > label { grid-column: 1 / -1; }
-  #s3d-settings h2 { margin: 0 -16px; padding: 16px 16px 12px; font-size: 18px; }
+  #s3d-settings h2 { margin: 0 -16px; padding: 14px 16px 10px; }
+  #s3d-settings h2 .sp-head-btn { width: 38px; height: 38px; }
   #s3d-settings > #s3d-settings-status { margin: 12px 0 10px; }
-  #s3d-settings > .s3d-sec-nav { top: 54px; margin: 0 -16px; padding: 4px 16px 8px; }
+  #s3d-settings > .s3d-sec-nav { top: 62px; margin: 0 -16px; padding: 4px 16px 8px; }
   #s3d-settings label:not(:has(input[type="checkbox"])) {
     flex-direction: row;
     justify-content: space-between;
@@ -1674,7 +1668,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 }
 @media (prefers-reduced-motion: reduce) {
   #s3d-settings,
-  #s3d-settings.sp-show { transition: none; scale: 1; }
+  #s3d-settings.sp-show { transition-duration: 0s; }
   #s3d-settings input[type="checkbox"][role="switch"],
   #s3d-settings input[type="checkbox"][role="switch"]::before { transition: none; }
 }

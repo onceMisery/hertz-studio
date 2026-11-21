@@ -2568,8 +2568,6 @@
   function setSettings(on) {
     $('s3d-settings').hidden = !on;
     $('s3d-settings').classList.toggle('sp-show', !!on);
-    var scrim = $('s3d-settings-scrim');
-    if (scrim) scrim.hidden = !on;
     $('s3d-settings-toggle').setAttribute('aria-expanded', String(on));
     if (on && queueOpen) setQueuePanel(false);
     if (shelf) shelf.setBlocked(!!on || queueOpen);
@@ -3894,8 +3892,6 @@
     if (chromeTimer) clearTimeout(chromeTimer);
     $('s3d-settings').hidden = true;
     $('s3d-settings').classList.remove('sp-show');
-    var scrim = $('s3d-settings-scrim');
-    if (scrim) scrim.hidden = true;
     $('s3d-settings-toggle').setAttribute('aria-expanded', 'false');
     queueOpen = false;
     root.classList.remove('s3d-queue-open');
@@ -4242,12 +4238,11 @@
     text('s3d-fl-auto-state', '当前由「' + label + '」演出' + note + ' · 已自动切镜 ' + snap.transitionCount + ' 次');
   }
 
-  // 设置弹窗外壳：遮罩点击关闭、分组跳转、滚动时标出当前分组。
+  // 设置面板外壳：分组跳转、滚动时标出当前分组。面板是非模态侧栏，没有遮罩。
   // 分组只改变滚动位置，任何控件都不隐藏 —— 自动验收与用户都能直接点到每一项。
   function bindSettingsShell() {
     var panel = $('s3d-settings');
     var nav = $('s3d-sec-nav');
-    var scrim = $('s3d-settings-scrim');
     if (!panel || !nav) return;
     var jumpTarget = '';
     function mark(id) {
@@ -4293,10 +4288,6 @@
     panel.addEventListener('wheel', releaseJump, { passive: true });
     panel.addEventListener('touchstart', releaseJump, { passive: true });
     panel.addEventListener('keydown', releaseJump);
-    if (scrim) scrim.addEventListener('click', function () {
-      setSettings(false);
-      $('s3d-settings-toggle').focus();
-    });
     syncCurrent();
   }
 

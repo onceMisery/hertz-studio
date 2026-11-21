@@ -58,22 +58,24 @@ for (const id of ['s3d-fl-accents', 's3d-fl-atmosphere', 's3d-fl-halation']) {
 const hiddenLyrics = Settings.resolve({ visual: 'sonnet', background: 'solid', lyrics: false, webgl: true });
 assert.equal(hiddenLyrics.rows['s3d-reactivity'].enabled, false); count++;
 
-// ---- 设置弹窗：形态、分组、遮罩接线，以及「设置项一个不少」 ----
+// ---- 设置面板：形态（右侧非模态玻璃侧栏）、分组、接线，以及「设置项一个不少」 ----
 // 只切新增的那一节 CSS，避免就近正则抓到共享抽屉里同名的旧声明。
 const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 const allCss = fs.readFileSync(path.join(web, 'space3d.css'), 'utf8');
-const dialogCss = allCss.slice(allCss.indexOf('沉浸声场设置：居中弹窗'));
-assert.ok(dialogCss.length > 2000, 'dialog style block exists'); count++;
-assert.match(dialogCss, /#s3d-settings\s*\{[^}]*position:\s*fixed[^}]*margin:\s*auto/,
-  'dialog is centred by margin auto, not by a transform that the drawer would fight'); count++;
-assert.match(dialogCss, /grid-template-columns:\s*minmax\(132px, 34%\) minmax\(0, 1fr\)/,
+const drawerCss = allCss.slice(allCss.indexOf('沉浸声场设置：右侧非模态玻璃侧栏'));
+assert.ok(drawerCss.length > 2000, 'drawer style block exists'); count++;
+assert.match(drawerCss, /#s3d-settings\s*\{[^}]*position:\s*fixed[^}]*right:\s*0[^}]*bottom:\s*0/,
+  'settings docks to the right viewport edge, full height'); count++;
+assert.match(drawerCss, /grid-template-columns:\s*minmax\(132px, 34%\) minmax\(0, 1fr\)/,
   'field grid has a label column and a control column'); count++;
-assert.match(dialogCss, /\.s3d-settings-scrim\s*\{[^}]*position:\s*fixed/,
-  'scrim is a viewport-sized layer'); count++;
-assert.match(html, /<div class="s3d-settings-scrim" id="s3d-settings-scrim" hidden/,
-  'scrim node exists and starts hidden'); count++;
-assert.match(html, /id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="true" hidden/,
-  'settings announces itself as a modal dialog'); count++;
+assert.match(drawerCss, /backdrop-filter:\s*blur/,
+  'panel body is translucent glass so the stage shows through while tuning'); count++;
+assert.doesNotMatch(drawerCss, /\.s3d-settings-scrim/,
+  'non-modal drawer has no scrim layer'); count++;
+assert.doesNotMatch(html, /s3d-settings-scrim/,
+  'scrim node was removed together with the modal form'); count++;
+assert.match(html, /id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="false" hidden/,
+  'settings announces itself as a non-modal dialog'); count++;
 const shortcuts = (html.match(/data-sec="s3d-sec-/g) || []).length;
 const sections = (html.match(/class="s3d-sec" id="s3d-sec-/g) || []).length;
 assert.equal(shortcuts, 5, 'five section shortcuts'); count++;
@@ -98,7 +100,8 @@ assert.match(source, /panel\.addEventListener\('wheel', releaseJump/,
   'manual wheel releases the jump highlight'); count++;
 assert.match(source, /panel\.clientHeight >= panel\.scrollHeight - 4/,
   'scrolling to the bottom marks the last section'); count++;
-assert.match(source, /scrim\.hidden = !on/, 'scrim follows setSettings'); count++;
+assert.doesNotMatch(source, /s3d-settings-scrim/,
+  'the non-modal drawer no longer drives a scrim'); count++;
 assert.match(source, /shownReasons\[setting\.reason\]/, 'duplicate availability reasons collapse to one'); count++;
 assert.doesNotMatch(source, /note\.hidden = setting\.enabled;/,
   'old per-control reason repetition is gone'); count++;
