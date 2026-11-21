@@ -128,6 +128,11 @@ impl TrustStore {
         Ok(owner)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn close_for_test(&self) {
+        self.pool.close_shared().await;
+    }
+
     pub(super) async fn row(&self, id: &str) -> Result<SourceRow, JobError> {
         super::network::canonical_uuid(id)?;
         // Retain the predicate on the materializing query as well as the scalar

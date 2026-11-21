@@ -87,6 +87,17 @@ impl AdmittedPool {
         Ok(())
     }
 
+    /// Close the shared SQLx pool behind an already-shared handle. The next
+    /// read-only inspection of this database must not observe a live WAL.
+    #[cfg(test)]
+    pub(crate) async fn close_shared(&self) {
+        self.pool
+            .as_ref()
+            .expect("admitted SQLite pool is usable until close")
+            .close()
+            .await;
+    }
+
     /// Explicit receipt: `SqlitePool::close` closes idle connections, and the
     /// OS probe covers checked-out and detached raw connections alike. The
     /// handle is dropped before the wait so the pool's RootOwner admission is

@@ -105,7 +105,10 @@ impl Fixture {
                 PreparedFont::after_qualification(reference, input, proof).unwrap(),
             );
         }
+        // Later calls reopen this directory; the trust pool must not leave a
+        // WAL behind for the next read-only inspection.
         library.pool().close().await;
+        library.trust().close_for_test().await;
         fonts
     }
 }
