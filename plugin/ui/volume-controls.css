@@ -1,6 +1,6 @@
-/* Original range inputs, presented as compact vertical controls on every surface. */
-html[data-skin="hertz"] .hz-volume-control,
-html[data-skin="hertz"] #np-modal .np-volume.hz-volume-control {
+/* Original range inputs, presented as compact vertical controls on every surface.
+   np-modal 播放页除外：它走下面的横向内联变体（.hz-volume-inline）。 */
+html[data-skin="hertz"] .hz-volume-control {
   display: flex; align-items: center; justify-content: center; flex: none;
   width: 40px; min-width: 40px; gap: 0;
 }
@@ -59,8 +59,39 @@ html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute svg { width: 18px; heig
 html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute::after { display: none; }
 html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute:is(:hover, [aria-pressed="true"]) { background: color-mix(in srgb, currentColor 10%, transparent); }
 #stage3d:has(#s3d-volume-panel:popover-open) .s3d-player { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+/* —— 横向内联变体（np-modal 播放页）：静音键 + 常驻横向滑条，不弹竖向面板 ——
+   播放页页脚把它排在播放控件行的右端（见 skin.hertz.css 的 .np-footer 栅格）。 */
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  width: min(100%, 200px);
+}
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range {
+  appearance: none; -webkit-appearance: none;
+  display: block; flex: 1; min-width: 0; width: 100%; height: 18px;
+  margin: 0; padding: 0; border: 0; background: transparent;
+  cursor: pointer; touch-action: none; accent-color: currentColor;
+}
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range::-webkit-slider-runnable-track {
+  height: 4px; border: 0; border-radius: 4px;
+  background: linear-gradient(to right, var(--text) var(--hz-volume-fill, 80%), color-mix(in srgb, var(--text) 18%, transparent) var(--hz-volume-fill, 80%));
+}
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4px;
+  border: 0; border-radius: 50%; background: var(--text); box-shadow: none;
+}
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range::-moz-range-track {
+  height: 4px; border: 0; border-radius: 4px;
+  background: linear-gradient(to right, var(--text) var(--hz-volume-fill, 80%), color-mix(in srgb, var(--text) 18%, transparent) var(--hz-volume-fill, 80%));
+}
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range::-moz-range-thumb {
+  width: 12px; height: 12px; border: 0; border-radius: 50%; background: var(--text); box-shadow: none;
+}
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range:focus-visible { outline: 1px solid var(--text); outline-offset: 3px; border-radius: 4px; }
 @media (max-width: 899px) {
-  html[data-skin="hertz"] #np-modal .np-volume.hz-volume-control { width: 40px; justify-self: end; }
+  html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline { width: min(100%, 240px); justify-content: center; }
+}
+@media (max-width: 899px) {
+  html[data-skin="hertz"] .hz-volume-control { width: 40px; }
 }
 @media (prefers-reduced-transparency: reduce) {
   html[data-skin="hertz"] .hz-volume-panel { background: var(--panel-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }

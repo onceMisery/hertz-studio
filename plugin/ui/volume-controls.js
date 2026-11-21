@@ -11,12 +11,14 @@
   }
   function paint(control, value) {
     var amount = Math.round(Math.max(0, Math.min(100, Number(value) || 0)));
-    control.output.textContent = amount + '%';
+    if (control.output) control.output.textContent = amount + '%';
     control.range.setAttribute('aria-valuetext', amount + '%');
     control.range.style.setProperty('--hz-volume-fill', amount + '%');
-    control.trigger.setAttribute('aria-label', '音量 ' + amount + '%');
-    control.trigger.title = '音量 ' + amount + '%';
-    control.trigger.classList.toggle('is-muted', amount === 0);
+    if (control.trigger) {
+      control.trigger.setAttribute('aria-label', '音量 ' + amount + '%');
+      control.trigger.title = '音量 ' + amount + '%';
+      control.trigger.classList.toggle('is-muted', amount === 0);
+    }
     if (control.mute) {
       control.mute.title = amount ? '静音' : '取消静音';
       control.mute.setAttribute('aria-label', control.mute.title);
@@ -114,6 +116,27 @@
       node.addEventListener('focusout', function () { deferClose(control); });
     });
   }
+  // 横向内联变体（np-modal 播放页）：静音键 + 常驻横向滑条直接摆在宿主里，
+  // 不注入竖向弹出面板——播放页的页脚有它自己的栅格位置（transport 右端）。
+  // 其余表面积（底栏 / 声场）空间紧凑，继续用「图标 + 竖向弹出」。
+  function mountInline(id, muteId) {
+    var range = document.getElementById(id); if (!range) return;
+    var host = range.parentElement;
+    if (host.tagName === 'LABEL') {
+      var replacement = document.createElement('div'); replacement.className = host.className;
+      while (host.firstChild) replacement.appendChild(host.firstChild);
+      host.replaceWith(replacement); host = replacement;
+    }
+    host.classList.add('hz-volume-control', 'hz-volume-inline');
+    var mute = muteId && document.getElementById(muteId);
+    Array.from(host.children).forEach(function (node) { if (node !== range && node !== mute) node.remove(); });
+    if (mute && mute.nextElementSibling !== range) host.insertBefore(mute, range);
+    range.classList.add('hz-volume-range', 'hz-volume-range-inline');
+    range.removeAttribute('aria-orientation');
+    var control = { range: range, trigger: null, panel: null, mute: mute, output: null, mode: '', inline: true };
+    range.addEventListener('input', function (event) { if (event.target === range) paint(control, range.value); });
+    controls.push(control); paint(control, range.value);
+  }
   function mountSpace() {
     var range = document.getElementById('sp-volume'), trigger = document.getElementById('sp-volume-toggle');
     var panel = document.getElementById('sp-volume-panel'); if (!range || !trigger || !panel) return;
@@ -125,7 +148,7 @@
     }).observe(panel, { attributes: true, attributeFilter: ['class'] });
   }
   function init() {
-    mount('volume'); mount('np-volume', 'np-mute'); mount('s3d-volume'); mountSpace();
+    mount('volume'); mountInline('np-volume', 'np-mute'); mount('s3d-volume'); mountSpace();
     document.addEventListener('pointerdown', function (event) {
       if (opened && !opened.panel.contains(event.target) && !opened.trigger.contains(event.target)) close(false);
     }, true);
