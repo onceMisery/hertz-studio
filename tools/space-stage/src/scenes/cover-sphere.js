@@ -82,12 +82,46 @@ void main(){
  #include <colorspace_fragment>
 }`;
 
+// 封面尘埃：球壳上的 1 万颗颗粒直接采样封面颜色，深色封面也能靠颗粒读出图案，
+// 而不是一圈和封面无关的白点。尺寸按设备像素比给到 1px 以上，低 DPR 也不糊成噪点。
+const grainVertex = `
+uniform sampler2D uCover,uPrevCover;
+uniform float uHasCover,uHasPrev,uMix,uTime,uBass,uPixel;
+varying vec3 vColor;
+varying float vTwinkle;
+${coverUv}
+void main(){
+ vec3 n=normalize(position);
+ vec2 uv=coverUv(n);
+ vec3 cur=uHasCover>.5?textureLod(uCover,uv,3.0).rgb:vec3(0.0);
+ vec3 prev=uHasPrev>.5?textureLod(uPrevCover,uv,3.0).rgb:cur;
+ vec3 art=mix(prev,cur,uMix);
+ // 抬暗部：深色封面不会被球面吞掉，亮部保持封面原色。
+ vec3 lifted=pow(clamp(art+.1,0.0,1.0),vec3(.72))*1.08;
+ vColor=mix(vec3(.46,.76,.84),lifted,max(uHasCover,uHasPrev));
+ vTwinkle=.72+.28*sin(uTime*1.7+n.y*11.0+n.x*7.0);
+ vec4 mv=modelViewMatrix*vec4(position,1.0);
+ gl_PointSize=uPixel*(1.2+uBass*.5)*vTwinkle;
+ gl_Position=projectionMatrix*mv;
+}`;
+const grainFragment = `
+varying vec3 vColor;
+varying float vTwinkle;
+void main(){
+ float r=length(gl_PointCoord-.5)*2.0;
+ if(r>1.0)discard;
+ float alpha=(1.0-smoothstep(.4,1.0,r))*.62*vTwinkle;
+ gl_FragColor=vec4(vColor,alpha);
+ #include <tonemapping_fragment>
+ #include <colorspace_fragment>
+}`;
+
 export function createCoverSphere(ctx) {
   const T = ctx.THREE, group = root(ctx), globe = new T.Group(); group.add(globe);
   const resources = ctx.services.spatialResources || createSpatialResources(T), local = !ctx.services.spatialResources;
   const field = createField(ctx, globe, { depth: 0, radius: 3.0 });
   const uniforms = { ...field.uniforms, uCover: { value: null }, uPrevCover: { value: null }, uHasCover: { value: 0 }, uHasPrev: { value: 0 },
-    uMix: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 }, uMotion: { value: .6 } };
+    uMix: { value: 1 }, uTime: { value: 0 }, uBass: { value: 0 }, uMotion: { value: .6 }, uPixel: { value: 1 } };
   const geometry = own(ctx, constructedGeometry(T, ctx.scope, 'SphereGeometry', [3.2, 96, 64]));
   const surfaceMesh = new T.Mesh(geometry, own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: vertex, fragmentShader: surface })));
   globe.add(surfaceMesh);
@@ -100,10 +134,11 @@ export function createCoverSphere(ctx) {
   const positions = new Float32Array(count * 3); grainPlan.cpuReady(arrayBytes);
   for (let i = 0; i < count; i++) {
     const y = 1 - 2 * (i + .5) / count, r = Math.sqrt(1 - y * y), a = i * 2.39996323;
-    positions.set([Math.cos(a) * r * 3.207, y * 3.207, Math.sin(a) * r * 3.207], i * 3);
+    positions.set([Math.cos(a) * r * 3.235, y * 3.235, Math.sin(a) * r * 3.235], i * 3);
   }
   const grains = own(ctx, new T.BufferGeometry()); grains.setAttribute('position', grainPlan.upload(new T.BufferAttribute(positions, 3)));
-  const grainsMaterial = own(ctx, new T.PointsMaterial({ color: 0xe4f5f0, size: .012, transparent: true, opacity: .13, depthWrite: false }));
+  const grainsMaterial = own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: grainVertex, fragmentShader: grainFragment,
+    transparent: true, depthWrite: false, blending: T.AdditiveBlending }));
   globe.add(new T.Points(grains, grainsMaterial));
 
   declaredArrayPayload(ctx.scope,192*3,'Cover sphere orbit numeric source and typed backing',4,2);
@@ -151,6 +186,7 @@ export function createCoverSphere(ctx) {
       uniforms.uCover.value = entry?.texture || null; uniforms.uHasCover.value = entry?.texture ? 1 : 0;
       uniforms.uPrevCover.value = prev?.texture || null; uniforms.uHasPrev.value = prev?.texture ? 1 : 0; uniforms.uMix.value = fade;
       uniforms.uTime.value = time; uniforms.uBass.value = level(frame, 'bass') * (p.reactivity ?? .7); uniforms.uMotion.value = p.speed ?? .6;
+      uniforms.uPixel.value = ctx.renderer?.getPixelRatio() || 1;
       const pointer = frame.pointer, active = !reduced && pointer?.active;
       if (reduced) { parallax.set(0, 0); spin = 0; spinVel = 0; }
       else {
