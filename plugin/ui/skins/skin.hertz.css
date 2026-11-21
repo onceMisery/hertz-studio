@@ -313,12 +313,12 @@ html[data-skin="hertz"] #np-modal .np-meta { grid-column: 2; grid-row: 2; align-
 html[data-skin="hertz"] #np-modal .np-name { font: 600 44px/1.15 var(--hz-heading); letter-spacing: -1px; }
 html[data-skin="hertz"] #np-modal .np-artist { font-size: 16px; margin-top: 15px; }
 html[data-skin="hertz"] #np-modal #np-favorite { position: absolute; right: 0; bottom: 0; margin: 0; }
-html[data-skin="hertz"] #np-modal .np-footer { grid-column: 2; grid-row: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px 24px; margin: 0; align-items: center; }
-/* 音量挪到播放控件行的右端：静音键 + 常驻横向滑条（volume-controls 的内联变体），
-   不再单独占一行悬在控件下方。进度条独占一行，歌词视图里页脚横贯卡片底部。 */
-html[data-skin="hertz"] #np-modal .np-progress { grid-column: 1 / -1; grid-row: 1; }
-html[data-skin="hertz"] #np-modal .np-transport { grid-column: 2; grid-row: 2; justify-content: center; gap: 20px; }
-html[data-skin="hertz"] #np-modal .np-volume { grid-column: 3; grid-row: 2; justify-self: end; align-self: center; width: min(100%, 200px); }
+html[data-skin="hertz"] #np-modal .np-footer { grid-column: 2; grid-row: 3; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin: 0; align-items: center; justify-items: center; }
+/* 音量单独占一行居中：页脚右列本就被播控挤满，滑条塞在控件行右端会被压成一条缝。
+   进度条 1 行、播控 2 行、音量 3 行；歌词视图里页脚横贯卡片底部。 */
+html[data-skin="hertz"] #np-modal .np-progress { grid-column: 1; grid-row: 1; justify-self: stretch; }
+html[data-skin="hertz"] #np-modal .np-transport { grid-column: 1; grid-row: 2; justify-content: center; gap: 20px; }
+html[data-skin="hertz"] #np-modal .np-volume { grid-column: 1; grid-row: 3; justify-self: center; align-self: center; width: min(100%, 280px); }
 html[data-skin="hertz"] #np-modal .np-ctrl-primary { width: 66px; height: 66px; }
 html[data-skin="hertz"] #np-modal .np-reading { grid-column: 2; grid-row: 4; height: 120px; align-self: start; margin-top: 12px; }
 html[data-skin="hertz"] #np-modal[data-view="cover"] .np-line { font: 22px/1.6 var(--hz-heading); padding-block: 8px; }
@@ -475,7 +475,7 @@ html[data-skin="hertz"] body.room-view .hz-mobile-nav, html[data-skin="hertz"] b
   html[data-skin="hertz"] #np-modal .np-reading { display: none; }
   html[data-skin="hertz"] #np-modal .np-footer { display: flex; flex-direction: column; flex: 0 0 auto; gap: 10px; }
   html[data-skin="hertz"] #np-modal .np-transport { grid-column: auto; grid-row: auto; gap: 12px; }
-  html[data-skin="hertz"] #np-modal .np-volume { grid-column: auto; grid-row: auto; width: min(100%, 240px); justify-self: center; align-self: center; }
+  html[data-skin="hertz"] #np-modal .np-volume { grid-column: auto; grid-row: auto; width: min(100%, 260px); justify-self: center; align-self: center; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-now { display: flex; flex: 0 0 58px; flex-direction: row; gap: 12px; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-art { width: 48px; height: 48px; border-radius: 7px; align-self: center; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-meta { flex: 1; }

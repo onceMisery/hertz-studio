@@ -70,7 +70,7 @@
 #view-room .room-player-quick .btn { font-size:11px; padding:8px 11px; }
 #view-room .room-favorite { display:inline-flex; align-items:center; justify-content:center; width:44px; height:44px; min-width:44px; min-height:44px; opacity:1; border:1px solid var(--line); border-radius:12px; color:var(--muted); background:transparent; }
 #view-room .room-favorite svg { width:20px; height:20px; fill:currentColor; }
-#view-room .room-favorite.is-on { color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, transparent); }
+#view-room .room-favorite.is-on { color:#ff4d6d; background:color-mix(in srgb, #ff4d6d 10%, transparent); }
 #view-room .room-favorite[aria-pressed="mixed"] { border-style:dashed; }
 #view-room .room-song-favorite { flex:0 0 44px; }
 #view-room .room-player-volume { display:grid; grid-template-columns:auto minmax(45px,100px); align-items:center; gap:9px; color:var(--muted); font-size:11px; }

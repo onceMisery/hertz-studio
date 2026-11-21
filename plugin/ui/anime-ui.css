@@ -269,7 +269,7 @@ html:is([data-look="glass"], [data-look="cel"]) :is(.t-sub, .t-album, .t-dur, .t
 html:is([data-look="glass"], [data-look="cel"]) .t-quality { font-size: 10px; }
 html:is([data-look="glass"], [data-look="cel"]) .t-eq i { background: var(--brand); }
 html:is([data-look="glass"], [data-look="cel"]) .t-act { border-radius: 8px; }
-html:is([data-look="glass"], [data-look="cel"]) .fav-act.is-on { color: var(--highlight); }
+html:is([data-look="glass"], [data-look="cel"]) .fav-act.is-on { color: #ff4d6d; }
 html:is([data-look="glass"], [data-look="cel"]) :is(.online-chips, .fav-tabs) { gap: 12px; margin-block: 24px; }
 html:is([data-look="glass"], [data-look="cel"]) :is(.chip, .fav-tab, .daily-modes) { border-radius: 12px; }
 

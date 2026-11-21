@@ -68,9 +68,16 @@
 #np-modal .np-ctrl { width: 44px; height: 44px; min-width: 44px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
 #np-modal .np-ctrl svg { width: 22px; height: 22px; }
 #np-modal .np-ctrl:hover, #np-modal .np-ctrl[aria-pressed="true"], #np-modal .np-ctrl[aria-expanded="true"] { color: var(--text); background: var(--field-bg); }
+/* 收藏红心固定红色，不跟主题强调色走：心形是有语义的收藏符号，
+   换成主题色（这里恰好是白色）就只剩「亮了一下」，读不出「已收藏」。 */
+#np-modal #np-favorite { color: #ff4d6d; }
+#np-modal #np-favorite:hover { color: #ff4d6d; background: color-mix(in srgb, #ff4d6d 12%, transparent); }
+#np-modal #np-favorite[aria-pressed="true"] { color: #ff4d6d; background: color-mix(in srgb, #ff4d6d 12%, transparent); }
+#np-modal #np-favorite[aria-pressed="true"]:hover { background: color-mix(in srgb, #ff4d6d 20%, transparent); }
+#np-modal #np-favorite:disabled { color: var(--muted); }
 #np-modal .np-ctrl-primary { width: 60px; height: 60px; background: var(--text); color: var(--bg); }
 #np-modal .np-ctrl-primary:hover { background: var(--text); color: var(--bg); }
-#np-modal .np-volume { grid-column: 3; justify-self: end; width: min(100%, 180px); gap: 8px; }
+#np-modal .np-volume { grid-column: 1 / -1; grid-row: 3; justify-self: center; width: min(100%, 280px); gap: 12px; }
 #np-modal .np-volume input { min-width: 0; width: 100%; }
 .np-tabs { display: none; gap: 4px; border-radius: 6px; padding: 3px; background: var(--field-bg); }
 .np-tabs button { border: 0; padding: 7px 12px; color: var(--muted); background: transparent; border-radius: 4px; cursor: pointer; }
@@ -131,7 +138,7 @@
   #np-modal .np-art { width: min(100%, 360px, max(80px, calc(100dvh - 420px))); }
   #np-modal .np-footer { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   #np-modal .np-transport { grid-column: 1; gap: 12px; }
-  #np-modal .np-volume { grid-column: 1; justify-self: center; width: 140px; }
+  #np-modal .np-volume { grid-column: 1; justify-self: center; width: min(100%, 240px); }
   #np-stage-mobile { display: inline-flex; }
 }
 @media (max-width: 420px) { #np-modal .np-card { padding-inline: 16px; } #np-modal .np-head { padding-left: 44px; } .np-head-actions { gap: 0; } .np-tabs button { padding-inline: 10px; } #np-modal .np-name { font-size: 22px; } }

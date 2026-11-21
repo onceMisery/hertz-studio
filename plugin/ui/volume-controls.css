@@ -60,10 +60,10 @@ html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute::after { display: none;
 html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute:is(:hover, [aria-pressed="true"]) { background: color-mix(in srgb, currentColor 10%, transparent); }
 #stage3d:has(#s3d-volume-panel:popover-open) .s3d-player { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
 /* —— 横向内联变体（np-modal 播放页）：静音键 + 常驻横向滑条，不弹竖向面板 ——
-   播放页页脚把它排在播放控件行的右端（见 skin.hertz.css 的 .np-footer 栅格）。 */
+   播放页页脚把它单独排在播放控件下面一行（见 skin.hertz.css 的 .np-footer 栅格）。 */
 html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline {
-  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
-  width: min(100%, 200px);
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  width: min(100%, 280px);
 }
 html[data-skin="hertz"] #np-modal .np-volume.hz-volume-inline input.hz-volume-range {
   appearance: none; -webkit-appearance: none;

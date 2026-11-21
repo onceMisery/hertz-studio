@@ -1774,7 +1774,7 @@ body.is-capsule .bar-restore, body.s3d-open .bar-restore { display: none; }
 .bar-summary { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .bar-summary .bar-track { flex: 1; }
 .ctrl.bar-favorite { flex: none; color: var(--muted); }
-.ctrl.bar-favorite.is-on { color: var(--danger, #f0647c); background: rgba(240, 100, 124, 0.10); }
+.ctrl.bar-favorite.is-on { color: #ff4d6d; background: rgba(255, 77, 109, 0.10); }
 .ctrl.bar-favorite:disabled { opacity: 0.4; cursor: default; }
 .ctrl.bar-favorite[aria-busy="true"] { opacity: 0.65; }
 
@@ -2423,11 +2423,12 @@ button:focus-visible, [role="button"]:focus-visible,
    .t-actions 整体是 hover 才显形的，所以已收藏的红心必须自己破例常驻，
    否则「收藏了但看不出来」，收藏这个功能等于没有反馈。 */
 
+/* 红心固定用红色，不跟主题强调色：收藏状态是跨主题一致的语义色。 */
 .fav-act { color: var(--muted); }
 .fav-act.is-on {
   opacity: 1;
-  color: var(--accent-2);
-  background: rgba(0, 245, 212, 0.12);
+  color: #ff4d6d;
+  background: rgba(255, 77, 109, 0.12);
 }
 .track .t-actions .fav-act.is-on { opacity: 1; }
 .track .t-actions .fav-room-append { width:auto; min-height:44px; padding:0 9px; font-size:11px; white-space:nowrap; }
@@ -2446,7 +2447,7 @@ button:focus-visible, [role="button"]:focus-visible,
   .fav-lan .t-dur { grid-column:4; grid-row:1; }
   .track.fav-lan .t-actions { grid-column:3 / -1; grid-row:3; justify-content:flex-start; flex-wrap:wrap; }
 }
-.fav-act.is-on:hover { background: rgba(0, 245, 212, 0.2); }
+.fav-act.is-on:hover { background: rgba(255, 77, 109, 0.2); }
 
 .fav-tabs { display: flex; gap: var(--sp-3); margin: 0 0 var(--sp-5); }
 .fav-head { margin-bottom: var(--sp-3); }
@@ -2476,7 +2477,7 @@ button:focus-visible, [role="button"]:focus-visible,
 }
 .op-card { position: relative; }
 .op-card:hover .op-fav, .op-card:focus-within .op-fav { opacity: 1; }
-.op-fav.is-on { opacity: 1; color: var(--accent-2); background: rgba(10, 10, 10, 0.82); }
+.op-fav.is-on { opacity: 1; color: #ff4d6d; background: rgba(10, 10, 10, 0.82); }
 .op-fav svg { width: 14px; height: 14px; fill: currentColor; }
 
 /* ---------- 每日推荐 ---------- */

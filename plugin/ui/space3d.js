@@ -404,6 +404,30 @@
     root.classList.add('sp-imm-switching');
     immFxTimer = setTimeout(endImmersiveFx, prefs.immersiveFxDur + 80);
   }
+  function fsEl() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
+  function requestImmersiveFs() {
+    try {
+      if (!root || document.fullscreenEnabled === false) return;
+      if (root.requestFullscreen) {
+        var p = root.requestFullscreen();
+        if (p && p.catch) p.catch(function () { /* 被拒就留在页内沉浸 */ });
+      } else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+    } catch (e) { /* 页内沉浸仍可用 */ }
+  }
+  function exitImmersiveFs() {
+    try {
+      if (fsEl() !== root) return;
+      if (document.exitFullscreen) {
+        var p = document.exitFullscreen();
+        if (p && p.catch) p.catch(function () { /* ignore */ });
+      } else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    } catch (e) { /* ignore */ }
+  }
+  // Esc / F11 收回原生全屏时，页内沉浸一起退出：否则只剩一张无 UI、无光标的画面。
+  function syncImmersiveFs() {
+    if (!root) return;
+    if (!fsEl() && root.classList.contains('sp-immersive')) immersive(false);
+  }
   function immersive(value) {
     var on = value == null ? !root.classList.contains('sp-immersive') : value;
     if(on===root.classList.contains('sp-immersive'))return;
@@ -416,12 +440,14 @@
       immersiveNodes.forEach(function(item){item.node.inert=item.inert;});immersiveNodes=[];
     }
     root.classList.toggle('sp-immersive',on);
+    // 沉浸模式就是「全屏 + 隐藏界面」：入口同时申请原生全屏，失败则退回页内全屏。
+    if (on) requestImmersiveFs(); else exitImmersiveFs();
     syncShelf(); syncZodiacHud(); syncPhoenixHud();
-    ['sp-immersive','sp-stage-immersive'].forEach(function(id){$(id).setAttribute('aria-pressed',String(on));});
+    ['sp-immersive','sp-stage-immersive','sp-immersive-head'].forEach(function(id){if($(id))$(id).setAttribute('aria-pressed',String(on));});
     $('sp-immersive-toggle').checked=on;
     if(!on){
       revealPlayer();var target=immersiveFocus;
-      if(!target||!target.isConnected||target.closest('[inert]')||!target.checkVisibility())target=page==='stage'?$('sp-stage-immersive'):$('sp-more');
+      if(!target||!target.isConnected||target.closest('[inert]')||!target.checkVisibility())target=page==='stage'?$('sp-stage-immersive'):($('sp-immersive-head')||$('sp-more'));
       target.focus({preventScroll:true});immersiveFocus=null;
     }
     poke();
@@ -1223,6 +1249,7 @@
     click('sp-autohide',function(){prefs.playerAutoHide=!prefs.playerAutoHide;revealPlayer();scheduleSave();syncPlayer();});
     click('sp-immersive',function(){immersive();});
     click('sp-stage-immersive',function(){immersive();});
+    click('sp-immersive-head',function(){immersive();});
     click('sp-console-toggle',function(){panel('sp-sheet',null,$('sp-console-toggle'));});
     $('sp-immersive-toggle').addEventListener('change',function(){immersive(this.checked);});
     // 设置即改即生效：在飞的切换直接落到终态，下一拍用新参数，避免旧时长残留。
@@ -1277,17 +1304,21 @@
         return;
       }
       if(e.code==='KeyX'){if(!e.repeat)close();e.preventDefault();e.stopImmediatePropagation();return;}
+      // 首页没有舞台工具条，F 也要能进沉浸（原生全屏）；舞台上同样由这里收口。
+      if(e.code==='KeyF'){if(!e.repeat)immersive();e.preventDefault();e.stopImmediatePropagation();return;}
       if(e.code==='Slash'||((e.ctrlKey||e.metaKey)&&e.code==='KeyK')){closePanels();immersive(false);if(global.SpaceHome)SpaceHome.focusSearch();e.preventDefault();e.stopImmediatePropagation();return;}
       if(/^Digit[1-9]$/.test(e.code)){e.preventDefault();e.stopImmediatePropagation();return;}
       if(page!=='stage')return;
       if(camera&&camera.isFreeActive()&&new RegExp(camera.CONSTANTS.FREE_MOVE_CODES).test(e.code)){camera.freeKey(e.code,true);touch();e.preventDefault();e.stopImmediatePropagation();return;}
-      var actions={KeyF:function(){immersive();},KeyQ:function(){panel('sp-playlist',null,$('sp-playlist-toggle'));},KeyK:function(){$('sp-reset-camera').click();},KeyL:function(){toggleLyrics();}};
+      var actions={KeyQ:function(){panel('sp-playlist',null,$('sp-playlist-toggle'));},KeyK:function(){$('sp-reset-camera').click();},KeyL:function(){toggleLyrics();}};
       if(actions[e.code]){if(!e.repeat)actions[e.code]();e.preventDefault();e.stopImmediatePropagation();}
     },true);
     document.addEventListener('keyup',function(e){if(page==='stage'&&camera)camera.freeKey(e.code,false);});
     function pauseInput(){if(page==='closed')return;releaseInput();hideHome();save();}
     global.addEventListener('blur',pauseInput);global.addEventListener('pagehide',pauseInput);
     document.addEventListener('visibilitychange',function(){advancing=false;if(documentHidden()){pauseInput();sceneFxEnd();if(lyricPerformance)lyricPerformance.setPaused(true);}else{touch(300);syncPlayer();}});global.addEventListener('resize',resize);
+    document.addEventListener('fullscreenchange',syncImmersiveFs);
+    document.addEventListener('webkitfullscreenchange',syncImmersiveFs);
   }
   function init(){
     if(initialized)return true;root=$('space3d');if(!root)return false;initialized=true;
