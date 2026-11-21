@@ -282,8 +282,32 @@ mod tests {
     use super::*;
     use crate::wallpaper::library::tempfileish;
 
+    // Root ownership charges a process-global ledger that sibling test modules
+    // also touch in parallel; exact usage assertions need a cold process.
+    fn cold_child(name: &str) -> bool {
+        if std::env::var("HERTZ_ROOT_OWNER_COLD_CHILD").as_deref() == Ok(name) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("HERTZ_ROOT_OWNER_COLD_CHILD", name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "cold child {name} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     #[test]
     fn root_owner_admission_covers_actual_peak_and_refunds_after_physical_release() {
+        if cold_child("root_owner::tests::root_owner_admission_covers_actual_peak_and_refunds_after_physical_release")
+        {
+            return;
+        }
         use crate::wallpaper::budget::{self, measure_requested_heap, PhysicalReleaseCapture};
         use std::alloc::Layout;
         use std::sync::atomic::AtomicUsize;
@@ -392,6 +416,11 @@ mod tests {
 
     #[test]
     fn rejected_and_busy_root_acquisitions_refund_the_prior_charge() {
+        if cold_child(
+            "root_owner::tests::rejected_and_busy_root_acquisitions_refund_the_prior_charge",
+        ) {
+            return;
+        }
         let budget = crate::wallpaper::budget::global();
         let before = budget.usage();
         let missing = tempfileish::temp_dir("root-owner-missing");

@@ -432,6 +432,8 @@ fn same_rate_crossfade_keeps_exact_overlap_positions_and_a_single_finite_epoch()
         })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
+    // Promotion rendering caps the overlap at half the buffered successor
+    // frames; wait for two overlap lengths so the 20 ms position is exact.
     while !worker
         .preparing
         .as_ref()
@@ -439,7 +441,7 @@ fn same_rate_crossfade_keeps_exact_overlap_positions_and_a_single_finite_epoch()
         .renderer
         .as_ref()
         .unwrap()
-        .prepared_next_ready(882)
+        .prepared_next_ready(1_764)
     {
         assert!(
             Instant::now() < deadline,

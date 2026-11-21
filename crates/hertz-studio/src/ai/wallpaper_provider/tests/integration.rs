@@ -138,10 +138,16 @@ async fn ollama_wallpaper_jobs_quote_once_publish_original_artifact_and_replay()
                 "invalid output cannot become a candidate"
             );
         }
-        let usage = store::find_usage_entry(&state.db, &id)
-            .await
-            .unwrap()
-            .unwrap();
+        let usage = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(usage) = store::find_usage_entry(&state.db, &id).await.unwrap() {
+                    break usage;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(usage.accounted_micro_usd, 0);
         assert_eq!(usage.usage_state, "reported");
         let reported: Value =

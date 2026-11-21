@@ -31,7 +31,12 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let parent = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let directory = parent.join(format!("hertz-hub-test-{}", uuid::Uuid::new_v4()));
+        // macOS TMPDIR is long; the unix Signer endpoint stays under 100 chars
+        // only with a short fixture directory name.
+        let directory = parent.join(format!(
+            "hertz-hub-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         std::fs::create_dir(&directory).unwrap();
         let chain = directory.join("authorization.json");
         std::fs::write(&chain, AUTHORIZATION).unwrap();
@@ -46,7 +51,7 @@ impl Fixture {
         );
         #[cfg(unix)]
         let (endpoint, service_identity) = (
-            directory.join("signer.sock").to_str().unwrap().to_owned(),
+            directory.join("s.sock").to_str().unwrap().to_owned(),
             hertz_wallpaper_signer::platform::current_identity()
                 .unwrap()
                 .parse::<u32>()
@@ -133,7 +138,7 @@ impl Fixture {
         drop(self.lease.take());
         let resolved = std::fs::canonicalize(&self.directory).unwrap();
         assert_eq!(resolved.parent(), Some(self.parent.as_path()));
-        assert!(resolved.file_name().unwrap().to_str().unwrap().starts_with("hertz-hub-test-"));
+        assert!(resolved.file_name().unwrap().to_str().unwrap().starts_with("hertz-hub-"));
         std::fs::remove_dir_all(resolved).unwrap();
     }
 }
