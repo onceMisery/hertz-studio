@@ -122,8 +122,8 @@
   // 歌词视图另走 mount('np-volume-lyrics') 的竖向弹层，把这一行省给歌词。
   // 其余表面积（底栏 / 声场）空间紧凑，继续用「图标 + 竖向弹出」。
   function mountInline(id, muteId) {
-    var range = document.getElementById(id); if (!range) return;
-    var host = range.parentElement;
+    var inlineRange = document.getElementById(id); if (!inlineRange) return;
+    var host = inlineRange.parentElement;
     if (host.tagName === 'LABEL') {
       var replacement = document.createElement('div'); replacement.className = host.className;
       while (host.firstChild) replacement.appendChild(host.firstChild);
@@ -131,13 +131,13 @@
     }
     host.classList.add('hz-volume-control', 'hz-volume-inline');
     var mute = muteId && document.getElementById(muteId);
-    Array.from(host.children).forEach(function (node) { if (node !== range && node !== mute) node.remove(); });
-    if (mute && mute.nextElementSibling !== range) host.insertBefore(mute, range);
-    range.classList.add('hz-volume-range', 'hz-volume-range-inline');
-    range.removeAttribute('aria-orientation');
-    var control = { range: range, trigger: null, panel: null, mute: mute, output: null, mode: '', inline: true };
-    range.addEventListener('input', function (event) { if (event.target === range) paint(control, range.value); });
-    controls.push(control); paint(control, range.value);
+    Array.from(host.children).forEach(function (node) { if (node !== inlineRange && node !== mute) node.remove(); });
+    if (mute && mute.nextElementSibling !== inlineRange) host.insertBefore(mute, inlineRange);
+    inlineRange.classList.add('hz-volume-range', 'hz-volume-range-inline');
+    inlineRange.removeAttribute('aria-orientation');
+    var control = { range: inlineRange, trigger: null, panel: null, mute: mute, output: null, mode: '', inline: true };
+    inlineRange.addEventListener('input', function (event) { if (event.target === inlineRange) paint(control, inlineRange.value); });
+    controls.push(control); paint(control, inlineRange.value);
   }
   function mountSpace() {
     var range = document.getElementById('sp-volume'), trigger = document.getElementById('sp-volume-toggle');
@@ -154,14 +154,15 @@
     // 歌词视图的竖向音量：复用播放页那个 canonical range 的提交链路。
     // 自己只负责显示与弹层，input 转发给 #np-volume，避免出现第二条音量写路径。
     var lyrics = mount('np-volume-lyrics');
+    var lyricsRange = lyrics && lyrics.range;
     var source = document.getElementById('np-volume');
-    if (lyrics && source) {
-      lyrics.range.addEventListener('input', function () {
-        if (source.value !== lyrics.range.value) {
-          source.value = lyrics.range.value;
+    if (lyrics && lyricsRange && source) {
+      lyricsRange.addEventListener('input', function () {
+        if (source.value !== lyricsRange.value) {
+          source.value = lyricsRange.value;
           source.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        paint(lyrics, lyrics.range.value);
+        paint(lyrics, lyricsRange.value);
       });
       source.addEventListener('input', function () { paint(lyrics, source.value); });
       var modal = document.getElementById('np-modal');

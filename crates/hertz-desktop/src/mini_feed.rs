@@ -366,7 +366,14 @@ mod tests {
         // custom profile 与 full 服务共库共发现文件（用户实际部署形态）：
         // 轮询路径放行 custom，播控门槛必须同一规矩——否则回主窗口/播控
         // 全部报「播放来源已变化」（2026-11-21 实测故障）。
-        let dir = std::env::temp_dir().join(format!("mini-feed-gate-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "mini-feed-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         serde_json::to_writer(
             std::fs::File::create(dir.join("vmusicd.json")).unwrap(),
@@ -387,7 +394,10 @@ mod tests {
             !message.contains("播放来源已变化"),
             "custom profile must pass the edition gate, got: {message}"
         );
-        assert!(message.contains("desktop-mini-key") || message.contains("小窗"), "gate passed, failed later at key read: {message}");
+        assert!(
+            message.contains("desktop-mini-key") || message.contains("小窗"),
+            "gate passed, failed later at key read: {message}"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

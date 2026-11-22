@@ -15,15 +15,14 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, RGN_OR, SetWindowRgn,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumChildWindows, GetCursorPos, GetWindowLongPtrW,
-    GetWindowRect, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos,
-    GWLP_WNDPROC,
-    GWL_EXSTYLE, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCHITTEST, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    GetWindowRect, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC,
+    GWL_EXSTYLE, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, WM_NCHITTEST, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 /// 一扇窗的命中状态。坐标一律是物理像素，换算在 Rust 侧做完，wndproc 里只比大小。

@@ -209,7 +209,8 @@ for (const [label, constructor] of [
   ['小窗', slice(app, 'fn create_mini(', '\nfn mini_protocol_response(')],
 ]) {
   const source = codeOnly(constructor);
-  assert.match(source, /WebContext::new\(Some\(config::webview_dir\(\)\)\)/,
+  // 小窗用 webview_dir() 下的子目录与歌词/设置窗分开，仍是同一套显式 profile 根。
+  assert.match(source, /WebContext::new\(Some\(config::webview_dir\(\)(?:\.join\([^)]*\))?\)\)/,
     label + '没有使用明确的 desktop profile 根');
   assert.match(source, /WebViewBuilder::new_with_web_context\(&mut web_context\)/,
     label + '没有把明确 context 交给 WebView builder');
