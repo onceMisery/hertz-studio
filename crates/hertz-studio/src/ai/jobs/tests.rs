@@ -797,6 +797,18 @@ async fn await_input_released(state: &Arc<AppState>, id: &str) {
     panic!("worker input still owned after the terminal state");
 }
 
+// 执行槽与 owner 同时释放，但同样晚于终态行提交；满载 runner 上两者间隔可达数秒。
+async fn await_worker_released(state: &Arc<AppState>, id: &str) {
+    for _ in 0..2000 {
+        let owns_input = state.ai_runtime.inputs.lock().await.contains_key(id);
+        if !owns_input && state.ai_runtime.execution_slots.available_permits() == 1 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("worker still owned after the terminal state");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_panics_interrupt_and_settle_according_to_dispatch_state() {
     let (state, handle) = jobs_state().await;
@@ -1218,13 +1230,7 @@ async fn wall_clock_age_does_not_expire_a_live_queued_worker() {
     let usage = await_usage_entry(&state, &job.job_id).await;
     assert_eq!(usage.usage_state, "reported");
     assert_eq!(usage.accounted_micro_usd, 0);
-    assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
-    assert!(!state
-        .ai_runtime
-        .inputs
-        .lock()
-        .await
-        .contains_key(&job.job_id));
+    await_worker_released(&state, &job.job_id).await;
     state.audio.shutdown();
     handle.join().unwrap();
 }
