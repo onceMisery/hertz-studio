@@ -5,7 +5,7 @@
   const systemTheme = matchMedia('(prefers-color-scheme: light)');
 
   const state = {
-    config: { theme: 'auto', scale: 1, opacity: 1, pet: false, locked: false, topmost: true, edgeHide: false, dock: 'none', sung: '' },
+    config: { theme: 'auto', scale: 1, skin: 'orange', opacity: 1, pet: false, locked: false, topmost: true, edgeHide: false, dock: 'none', sung: '' },
     snapshot: null,
     // 拖拽阈值：小于这个位移仍然算点击（走展开），与主界面胶囊一致。
     dragPx: 4,
@@ -58,6 +58,51 @@
       `<g fill="#8a3d12" opacity="${op}" transform="translate(0 ${dy})">` +
       '<ellipse cx="67" cy="35" rx="4" ry="3"/><rect x="69.4" y="20" width="2.6" height="15" rx="1.3"/>' +
       '<path d="M72 20q6.5 2.5 5 9.5c-1.2-3.2-2.8-4.8-5-5.4z"/></g>';
+    // 内置小黄鸭：圆头、大橙嘴、腮红与小呆毛。idle/playing 都是多帧，
+    // 闭嘴 ↔ 张嘴交替做出「砸吧嘴」的节奏，不是一张静止贴图。
+    const duckSvg = body => 'data:image/svg+xml,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 96 96">' +
+      '<defs><radialGradient id="d" cx="34%" cy="22%" r="88%">' +
+      '<stop offset="0" stop-color="#fff0a6"/><stop offset="1" stop-color="#f6c313"/>' +
+      '</radialGradient></defs>' + body + '</svg>');
+    const duckNote = (dy, op = 1) =>
+      `<g fill="#c07a00" opacity="${op}" transform="translate(0 ${dy})">` +
+      '<ellipse cx="80" cy="30" rx="4" ry="3"/><rect x="82.4" y="15" width="2.6" height="15" rx="1.3"/>' +
+      '<path d="M85 15q6.5 2.5 5 9.5c-1.2-3.2-2.8-4.8-5-5.4z"/></g>';
+    const duckEyes = kind => {
+      if (kind === 'happy') return '<path d="M35 37q4-4.8 8 0M53 37q4-4.8 8 0" fill="none" stroke="#3b2a00" stroke-width="2.8" stroke-linecap="round"/>';
+      if (kind === 'closed') return '<path d="M34.5 37.5h9M52.5 37.5h9" stroke="#3b2a00" stroke-width="2.8" stroke-linecap="round"/>';
+      if (kind === 'wide') return '<circle cx="39" cy="37" r="4.8" fill="#3b2a00"/><circle cx="57" cy="37" r="4.8" fill="#3b2a00"/>' +
+        '<circle cx="40.6" cy="35.2" r="1.6" fill="#fff"/><circle cx="58.6" cy="35.2" r="1.6" fill="#fff"/>';
+      return '<circle cx="39" cy="37" r="3.9" fill="#3b2a00"/><circle cx="57" cy="37" r="3.9" fill="#3b2a00"/>' +
+        '<circle cx="40.3" cy="35.5" r="1.3" fill="#fff"/><circle cx="58.3" cy="35.5" r="1.3" fill="#fff"/>';
+    };
+    const duckCheeks = '<ellipse cx="29.5" cy="45" rx="4.8" ry="3" fill="#ff9f43" opacity=".32"/>' +
+      '<ellipse cx="66.5" cy="45" rx="4.8" ry="3" fill="#ff9f43" opacity=".32"/>';
+    const duckTuft = '<path d="M43 18q-1.5-7 4.6-9.4q-1.4 4.2 1 7.2M50.6 15.6q2.2-6 7.4-5q-3.4 2.2-3.6 6.2" fill="#f2b90e"/>';
+    const duckBill = open => open
+      ? '<ellipse cx="48" cy="45" rx="12.4" ry="4.6" fill="#f7a11c"/>' +
+        '<ellipse cx="48" cy="52.4" rx="8.6" ry="5" fill="#9c4409"/>' +
+        '<ellipse cx="48" cy="57.4" rx="9" ry="3.6" fill="#e88712"/>' +
+        '<ellipse cx="48" cy="55" rx="4.2" ry="1.7" fill="#ff8f7a"/>'
+      : '<ellipse cx="48" cy="50" rx="12.4" ry="5" fill="#f7a11c"/>' +
+        '<path d="M40 51.6q8 3.4 16 0" fill="none" stroke="#d97706" stroke-width="1.7" stroke-linecap="round"/>';
+    const duckHead = (eyes, open, dy = 0) =>
+      `<g transform="translate(0 ${dy})"><circle cx="48" cy="40" r="24" fill="url(#d)"/>` +
+      duckTuft + eyes + duckCheeks + duckBill(open) + '</g>';
+    const duckBody = (dy = 0, wings = false) =>
+      `<g transform="translate(0 ${dy})">` +
+      '<ellipse cx="48" cy="68" rx="27" ry="17" fill="url(#d)"/>' +
+      '<path d="M35 84q-7 4-1 5h10q1-3-2-5z" fill="#ef8a1c"/>' +
+      '<path d="M55 84q-7 4-1 5h10q1-3-2-5z" fill="#ef8a1c"/>' +
+      '<ellipse cx="27" cy="67" rx="8" ry="5" fill="#ffe47a" opacity=".9" transform="rotate(-18 27 67)"/>' +
+      '<ellipse cx="69" cy="67" rx="8" ry="5" fill="#ffe47a" opacity=".9" transform="rotate(18 69 67)"/>' +
+      (wings ? '<ellipse cx="15" cy="58" rx="5" ry="11" fill="#ffe47a" transform="rotate(-30 15 58)"/>' +
+        '<ellipse cx="81" cy="58" rx="5" ry="11" fill="#ffe47a" transform="rotate(30 81 58)"/>' : '') +
+      '</g>';
+    const duckFrame = (eyes, open, bodyDy = 0, noteDy = null, wings = false) =>
+      duckSvg(duckBody(bodyDy, wings) + duckHead(eyes, open, bodyDy) +
+        (noteDy == null ? '' : duckNote(noteDy)));
     return {
       playing1: svg(blob(55, 29, 27) + eyesOpen + mouthSing + note(0)),
       playing2: svg(`<g transform="translate(0 -3)">${blob(55, 29.5, 26)}</g>` + eyesHappy + mouthSmile + note(-5)),
@@ -71,19 +116,46 @@
         '<path d="M80 18l2 4 4 2-4 2-2 4-2-4-4-2 4-2z" fill="#ffb066"/>'),
       tap: svg(blob(60, 33, 21.5) + eyesHappy +
         '<ellipse cx="48" cy="66" rx="5" ry="3.6" fill="#3a1d0b"/>' + note(-9)),
+      duck: {
+        // 待机闭嘴单帧：砸吧嘴只留给播放状态。
+        idle1: duckFrame(duckEyes('open'), false, 0, 0.25),
+        // 播放：睁眼 / 眯眼与张嘴 / 闭嘴交替，跟着节拍砸吧嘴。
+        playing1: duckFrame(duckEyes('open'), false, 0),
+        playing2: duckFrame(duckEyes('happy'), true, -2, -4),
+        playing3: duckFrame(duckEyes('open'), true, 0, 0),
+        playing4: duckFrame(duckEyes('happy'), false, -2, -4),
+        drag: duckSvg(duckBody(0, true) + duckHead(duckEyes('wide'), true) + duckNote(0) +
+          '<path d="M80 16l2 4 4 2-4 2-2 4-2-4-4-2 4-2z" fill="#fff2a8"/>'),
+        tap: duckFrame(duckEyes('happy'), true, 0, -9),
+      },
     };
   })();
 
-  const DEFAULT_SKIN = {
-    name: '内置 · 橙团子',
-    size: [56, 56],
-    states: {
-      idle:     { fps: 2, loop: true,  frames: [petArt.idle] },
-      playing:  { fps: 4, loop: true,  frames: [petArt.playing1, petArt.playing2] },
-      dragging: { fps: 6, loop: true,  frames: [petArt.drag] },
-      tap:      { fps: 8, loop: false, frames: [petArt.tap] },
+  const BUILTIN_SKINS = {
+    orange: {
+      name: '内置 · 橙团子',
+      size: [56, 56],
+      states: {
+        idle:     { fps: 2, loop: true,  frames: [petArt.idle] },
+        playing:  { fps: 4, loop: true,  frames: [petArt.playing1, petArt.playing2] },
+        dragging: { fps: 6, loop: true,  frames: [petArt.drag] },
+        tap:      { fps: 8, loop: false, frames: [petArt.tap] },
+      },
+    },
+    duck: {
+      name: '内置 · 小黄鸭',
+      size: [56, 56],
+      states: {
+        idle:     { fps: 2, loop: true,  frames: [petArt.duck.idle1] },
+        playing:  { fps: 7, loop: true,  frames: [petArt.duck.playing1, petArt.duck.playing2, petArt.duck.playing3, petArt.duck.playing4] },
+        dragging: { fps: 6, loop: true,  frames: [petArt.duck.drag] },
+        tap:      { fps: 8, loop: false, frames: [petArt.duck.tap] },
+      },
     },
   };
+  function builtinSkin(name) {
+    return BUILTIN_SKINS[name] || BUILTIN_SKINS.orange;
+  }
 
   const Pet = (() => {
     const STATES = ['idle', 'playing', 'dragging', 'tap'];
@@ -112,17 +184,18 @@
     });
 
     function setSkin(manifest) {
+      const builtin = builtinSkin(state.config.skin);
       const states = {};
       for (const name of STATES) {
-        const fallback = DEFAULT_SKIN.states[name];
-        const candidates = [manifest.states[name], manifest.states.idle, fallback, DEFAULT_SKIN.states.idle];
+        const fallback = builtin.states[name];
+        const candidates = [manifest.states[name], manifest.states.idle, fallback, builtin.states.idle];
         states[name] = [...new Set(candidates.filter(Boolean))].map(def => ({
           fps: Math.min(24, Math.max(1, Math.round(Number(def.fps) || fallback.fps || 6))),
           loop: def.loop === undefined ? fallback.loop !== false : !!def.loop,
           frames: def.frames,
         }));
       }
-      skin = { size: (manifest.size || DEFAULT_SKIN.size).map(clamp), states };
+      skin = { size: (manifest.size || builtin.size).map(clamp), states };
       failedFrames.clear();
       petOpaqueCache.clear();
       cur = null; frame = 0; oneShot = null;
@@ -271,6 +344,7 @@
 
   function applyConfig(value) {
     if (!value) return;
+    const previousSkin = state.config.skin;
     state.config = Object.assign({}, state.config, value);
     const c = state.config;
     const theme = c.theme === 'auto' ? (systemTheme.matches ? 'light' : 'dark') : c.theme;
@@ -282,6 +356,8 @@
     root.style.setProperty('--scale', String(c.scale || 1));
     root.style.setProperty('--opacity', String(c.opacity == null ? 1 : c.opacity));
     scheduleHitRegions();
+    // 换了内置形象：重走一次素材合并，用户素材仍优先，缺失状态回落到新形象。
+    if (c.skin !== previousSkin) Pet.loadUserSkin();
     // 宠物态开关驱动素材动画引擎；皮肤尺寸由 pet-size 上报，这里只管起停。
     if (c.pet) Pet.start(); else Pet.stop();
   }

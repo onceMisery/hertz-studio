@@ -502,6 +502,13 @@
     '    vec2 flatUv = normal.xy*projection*0.5/(reference-normal.z);',
     '    vec2 artUv = 0.5+mix(direction*arc*(1.0/PI),flatUv,0.4);',
     '    vec3 art = textureLod(uArt,0.5+(artUv-0.5)*uArtScale,uArtLod).rgb;',
+    // 浅色封面（白底写真、浅蓝天空）直接采样会在点阵上糊成一片白，整颗球只剩
+    // 高光。用最高 mip 的平均色做一次自动曝光，把封面压回中间调，再补一点
+    // 饱和度；深色封面有平均色下限保护，黑仍是黑。
+    '    vec3 avg = textureLod(uArt,vec2(0.5),8.0).rgb;',
+    '    float avgLum = max(dot(avg,vec3(0.299,0.587,0.114)),0.16);',
+    '    art = clamp(art*(0.55/avgLum),0.0,1.6);',
+    '    art = mix(vec3(dot(art,vec3(0.299,0.587,0.114))),art,1.28);',
     '    color = mix(mix(colorA,colorB,artUv.x*0.65+artUv.y*0.35),art,uHasArt);',
     '    float yaw = sin(t*0.19)*0.035*uCoverMotion;',
     '    normal.xz = mat2(cos(yaw),-sin(yaw),sin(yaw),cos(yaw))*normal.xz;',
@@ -606,10 +613,10 @@
     '    vec3 keyDir = normalize(vec3(-0.65,0.60,0.80));',
     '    float diffuse = max(0.0,dot(normal,keyDir));',
     '    float limb = 0.60+0.40*sqrt(max(0.0,facing));',
-    '    float specular = pow(max(0.0,dot(normal,normalize(keyDir+viewDir))),36.0)*0.16;',
+    '    float specular = pow(max(0.0,dot(normal,normalize(keyDir+viewDir))),36.0)*0.10;',
     '    float rim = pow(1.0-max(0.0,facing),3.0)*smoothstep(-0.15,0.60,dot(normal,keyDir));',
     '    vColor = color*(0.18+0.92*diffuse)*limb',
-    '           +vec3(1.0,0.95,0.86)*specular+vec3(0.40,0.62,0.82)*rim*0.10;',
+    '           +vec3(1.0,0.95,0.86)*specular+vec3(0.40,0.62,0.82)*rim*0.06;',
     '    float diameter = coverSpacing*uProj[1][1]*uViewportHeight*0.5/max(0.1,-mv.z);',
     // 点径只占网格间距的 66%：颗粒之间露出间隙，封面呈点阵粒子感；
     // 1.22 的旧系数会让相邻点搭接成实心球面，把这一层粒子的语言盖掉。
@@ -2995,7 +3002,6 @@
     var sig = JSON.stringify(state);
     if (sig === settingsSignature) return;
     settingsSignature = sig;
-    text('s3d-settings-status', state.label + ' · 可用设置即时生效，灰显项保留原值');
     text('s3d-background-status', state.backgroundNote);
     LYRIC_RENDERERS.forEach(function (def) {
       var id = def.id;

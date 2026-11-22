@@ -76,6 +76,12 @@
     refs.fields.forEach(function (field) {
       var value = draft[field.dataset.dlsField];
       field.setCustomValidity(''); field.removeAttribute('aria-invalid');
+      // 字体是固定选项：旧配置里存过的自定义字体名要补一条选项，否则下拉会显示空白。
+      if (field.id === 'dls-font-family' && value && !Array.prototype.some.call(field.options, function (option) { return option.value === value; })) {
+        var option = document.createElement('option');
+        option.value = option.textContent = String(value);
+        field.appendChild(option);
+      }
       if (field.type === 'checkbox') field.checked = !!value;
       else if (field.type === 'color') field.value = color(value, '#ffffff');
       else field.value = String(value);

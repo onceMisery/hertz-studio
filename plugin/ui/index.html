@@ -571,15 +571,15 @@
                  歌名歌手**不再常驻**（右上那句带过），改成悬停/聚焦时
                  从封面底部浮出——这样右列整块可以留给名言。 -->
             <div class="home-left">
-              <div class="home-art-wrap" id="home-art-wrap" tabindex="0" role="img"
-                   aria-label="当前封面，聚焦显示歌名与歌手">
-                <div class="art-tip" aria-hidden="true">
+              <div class="home-art-wrap" id="home-art-wrap" tabindex="0" role="group"
+                   aria-label="当前封面与继续播放操作">
+                <div class="art-tip">
                   <b id="home-tip-title">—</b><small id="home-tip-artist"></small>
+                  <button class="home-cover-action" id="home-action" type="button">去曲库</button>
                 </div>
                 <img class="home-art" id="home-art" alt="">
               </div>
               <div class="home-actions">
-                <button class="btn primary" id="home-action" type="button">去曲库</button>
                 <button class="btn" id="home-retry" type="button" hidden>重试最近播放</button>
               </div>
             </div>
@@ -1364,7 +1364,7 @@
             <label class="dls-field" for="dls-opacity"><span>不透明度 <output id="dls-opacity-value" for="dls-opacity">100%</output></span><input id="dls-opacity" data-dls-field="opacity" type="range" min="0.25" max="1" step="0.01" value="1"></label>
             <details class="dls-more">
               <summary>更多样式</summary>
-              <label class="dls-field" for="dls-font-family"><span>字体</span><input id="dls-font-family" data-dls-field="fontFamily" type="text" value="Segoe UI" maxlength="256" required aria-describedby="dls-font-note"><small id="dls-font-note">填写这台电脑已安装的字体名称</small></label>
+              <label class="dls-field" for="dls-font-family"><span>字体</span><select id="dls-font-family" data-dls-field="fontFamily" aria-describedby="dls-font-note"><option value="Segoe UI">系统默认（Segoe UI）</option><option value="Microsoft YaHei UI">微软雅黑 UI</option><option value="Microsoft YaHei">微软雅黑</option><option value="DengXian">等线</option><option value="SimSun">宋体</option><option value="SimHei">黑体</option><option value="KaiTi">楷体</option><option value="FangSong">仿宋</option><option value="Segoe UI Variable Display">Segoe UI Variable</option><option value="Arial">Arial</option><option value="Calibri">Calibri</option><option value="Cambria">Cambria</option><option value="Georgia">Georgia</option><option value="Times New Roman">Times New Roman</option><option value="Consolas">Consolas</option></select><small id="dls-font-note">从本机常用字体中选择，应用到桌面后生效</small></label>
               <div class="dls-field-grid">
                 <label class="dls-field" for="dls-theme"><span>文字主题</span><select id="dls-theme" data-dls-field="theme"><option value="auto">跟随系统</option><option value="dark">深色桌面</option><option value="light">浅色桌面</option></select></label>
                 <label class="dls-field" for="dls-surface"><span>歌词底板</span><select id="dls-surface" data-dls-field="surface"><option value="bare">透明</option><option value="glass">磨砂玻璃</option><option value="solid">实色</option></select></label>
@@ -1437,6 +1437,34 @@
           </span>
         </div>
         <p class="hint set-note" id="set-mini-note">桌面宠物随主播放器运行：播放时换形象、悬停展开成播放器、可拖拽贴边。素材文件夹里有命名约定说明，增删素材几秒内自动换装。</p>
+        <div class="set-row">
+          <label for="set-mini-skin">宠物形象</label>
+          <select id="set-mini-skin">
+            <option value="orange">橙团子</option>
+            <option value="duck">小黄鸭</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-mini-scale">宠物大小</label>
+          <select id="set-mini-scale">
+            <option value="0.85">小</option>
+            <option value="1" selected>标准</option>
+            <option value="1.2">大</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-mini-opacity">宠物不透明度</label>
+          <input id="set-mini-opacity" type="range" min="40" max="100" step="5" value="100">
+          <span class="count" id="set-mini-opacity-value">100%</span>
+        </div>
+        <div class="set-row">
+          <label for="set-mini-topmost">总在最前</label>
+          <input id="set-mini-topmost" type="checkbox" role="switch" checked>
+        </div>
+        <div class="set-row">
+          <label for="set-mini-edge-hide">贴边自动隐藏</label>
+          <input id="set-mini-edge-hide" type="checkbox" role="switch">
+        </div>
         <div class="set-row">
           <label for="desktop-calibration-consent">允许从桌面打开播放器校准</label>
           <input id="desktop-calibration-consent" type="checkbox" aria-describedby="desktop-calibration-consent-note">
@@ -2128,6 +2156,10 @@
     <button id="stop" class="ctrl" title="停止" aria-label="停止">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-stop"/></svg>
     </button>
+    <div class="bar-volume">
+      <span class="hint">音量</span>
+      <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
+    </div>
   </div>
 
   <div class="bar-progress">
@@ -2149,10 +2181,6 @@
       <span id="sleep-timer-label" class="st-label" hidden></span>
     </button>
     <button id="mode" class="btn-pill" title="播放模式">列表循环</button>
-    <div class="bar-volume">
-      <span class="hint">音量</span>
-      <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
-    </div>
     <button id="bar-pin-toggle" class="btn-pill bar-pin-toggle" type="button"
             title="收起播放栏" aria-label="收起播放栏" aria-expanded="true" aria-controls="playback-bar">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
@@ -2234,7 +2262,6 @@
        Esc / 关闭键 / 齿轮按钮三处都能收起。放在 aside 之前的遮罩节点已随模态形态一并移除。 -->
   <aside class="sp-sheet" id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="false" hidden>
     <h2>沉浸声场设置<button class="sp-head-btn" id="s3d-settings-close" type="button" title="收起设置" aria-label="收起设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></h2>
-    <p class="s3d-settings-status" id="s3d-settings-status" role="status" aria-live="polite"></p>
     <!-- 分组只跳转、不隐藏控件：任何设置项在任何时刻都能被直接操作（浏览器契约与用户都依赖这点）。 -->
     <nav class="s3d-sec-nav" id="s3d-sec-nav" aria-label="设置分组">
       <button type="button" data-sec="s3d-sec-view" class="is-current" aria-current="true">观看与歌词</button>
@@ -2243,8 +2270,10 @@
       <button type="button" data-sec="s3d-sec-lyrics">歌词舞台</button>
       <button type="button" data-sec="s3d-sec-reset">恢复</button>
     </nav>
-    <h3 class="s3d-sec" id="s3d-sec-view">观看与歌词 <small>布局、歌词视觉与阅读方式</small></h3>
-    <label class="sp-check" for="s3d-lyrics-toggle"><input id="s3d-lyrics-toggle" type="checkbox" role="switch" checked> 显示歌词</label>
+    <div class="s3d-sec-row" id="s3d-sec-view">
+      <h3 class="s3d-sec">观看与歌词 <small>布局、歌词视觉与阅读方式</small></h3>
+      <label class="sp-check" for="s3d-lyrics-toggle"><input id="s3d-lyrics-toggle" type="checkbox" role="switch" checked> 显示歌词</label>
+    </div>
     <button class="sp-btn-line" id="s3d-reset" type="button" title="复位视角" aria-label="复位视角">复位视角</button>
     <button class="sp-btn-line" id="s3d-fs" type="button" title="全屏" aria-label="全屏" aria-pressed="false">进入全屏</button>
     <label for="s3d-layout">聆听布局</label>
@@ -2353,7 +2382,7 @@
       <input id="s3d-fl-halation-t" type="range" min="0" max="1" step="0.05" value="0.5">
     </div>
     <h3 class="s3d-sec" id="s3d-sec-reset">恢复 <small>回到舞台默认，已存工坊作品保留</small></h3>
-    <button class="sp-btn-line" id="s3d-defaults" type="button" aria-describedby="s3d-defaults-note">恢复舞台默认</button>
+    <button class="sp-btn-line" id="s3d-defaults" type="button" aria-describedby="s3d-defaults-note"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>恢复舞台默认</button>
     <p class="sp-note" id="s3d-defaults-note" role="status" aria-live="polite">恢复画面与镜头，保留已存工坊作品。</p>
     <span class="sp-note" id="s3d-motion-note">设置即时生效</span>
   </aside>

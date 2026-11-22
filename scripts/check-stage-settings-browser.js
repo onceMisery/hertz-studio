@@ -113,7 +113,7 @@ async function main() {
           motionDisabled: document.getElementById('s3d-motion').disabled,
           opacityDisabled: document.getElementById('s3d-fl-opacity').disabled,
           layoutDisabled: document.getElementById('s3d-layout').disabled,
-          status: document.getElementById('s3d-settings-status').textContent,
+          status: document.getElementById('s3d-background-status').textContent,
           bg: document.getElementById('s3d-fl-bg').style.background }));
         assert.equal(state.prefs.stanzaVisual, visual);
         assert.equal(state.prefs.stanzaBg, background);

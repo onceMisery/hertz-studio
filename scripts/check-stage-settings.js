@@ -64,9 +64,9 @@ const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 const allCss = fs.readFileSync(path.join(web, 'space3d.css'), 'utf8');
 const drawerCss = allCss.slice(allCss.indexOf('沉浸声场设置：右侧非模态玻璃侧栏'));
 assert.ok(drawerCss.length > 2000, 'drawer style block exists'); count++;
-assert.match(drawerCss, /#s3d-settings\s*\{[^}]*position:\s*fixed[^}]*right:\s*0[^}]*bottom:\s*0/,
-  'settings docks to the right viewport edge, full height'); count++;
-assert.match(drawerCss, /grid-template-columns:\s*minmax\(132px, 34%\) minmax\(0, 1fr\)/,
+assert.match(drawerCss, /#s3d-settings\s*\{[^}]*position:\s*fixed[^}]*top:\s*88px[^}]*right:\s*16px[^}]*bottom:\s*116px/,
+  'settings floats as the same card as the queue (same top/bottom insets)'); count++;
+assert.match(drawerCss, /grid-template-columns:\s*minmax\(132px, 35%\) minmax\(0, 1fr\)/,
   'field grid has a label column and a control column'); count++;
 assert.match(drawerCss, /backdrop-filter:\s*blur/,
   'panel body is translucent glass so the stage shows through while tuning'); count++;
@@ -77,7 +77,7 @@ assert.doesNotMatch(html, /s3d-settings-scrim/,
 assert.match(html, /id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="false" hidden/,
   'settings announces itself as a non-modal dialog'); count++;
 const shortcuts = (html.match(/data-sec="s3d-sec-/g) || []).length;
-const sections = (html.match(/class="s3d-sec" id="s3d-sec-/g) || []).length;
+const sections = (html.match(/class="s3d-sec(?:-row)?" id="s3d-sec-/g) || []).length;
 assert.equal(shortcuts, 5, 'five section shortcuts'); count++;
 assert.equal(sections, shortcuts, 'every shortcut has a section heading'); count++;
 // 分组只跳转、不隐藏：设置项全部留在 DOM，浏览器契约才能直接操作任意一项。
@@ -85,7 +85,7 @@ for (const id of ['s3d-lyrics-toggle', 's3d-reset', 's3d-fs', 's3d-layout', 's3d
   's3d-fl-starborn', 's3d-scene-source', 's3d-coast-tuning', 's3d-zodiac-tuning', 's3d-anime-tuning',
   's3d-shelf-mode', 's3d-workshop', 's3d-reactivity', 's3d-motion', 's3d-bloom', 's3d-fl-common',
   's3d-fl-classic', 's3d-fl-cadenza', 's3d-fl-sonnet', 's3d-fl-tempera', 's3d-defaults',
-  's3d-defaults-note', 's3d-settings-status', 's3d-motion-note']) {
+  's3d-defaults-note', 's3d-motion-note']) {
   assert.ok(html.includes('id="' + id + '"'), '设置项 ' + id + ' 仍在'); count++;
 }
 assert.match(source, /function bindSettingsShell\(\)/, 'shell bindings exist'); count++;

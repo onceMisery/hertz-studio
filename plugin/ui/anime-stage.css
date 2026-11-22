@@ -122,7 +122,7 @@ html:is([data-look="glass"], [data-look="cel"]) .s3d .s3d-settings :is(input, se
 
 html:is([data-look="glass"], [data-look="cel"]) .s3d :is(.s3d-setting-note, .s3d-settings p, .s3d-queue-sub, .s3d-queue-dur) { color: var(--muted); }
 
-html:is([data-look="glass"], [data-look="cel"]) .s3d :is(.s3d-settings-status, .s3d-fl-auto-state) { color: var(--brand); }
+html:is([data-look="glass"], [data-look="cel"]) .s3d .s3d-fl-auto-state { color: var(--brand); }
 
 html:is([data-look="glass"], [data-look="cel"]) .s3d #s3d-defaults {
   border-radius: 12px;

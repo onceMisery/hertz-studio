@@ -100,6 +100,11 @@ body[data-layout="double"] .lyric-group:not([data-distance="0"]):not([data-dista
 body[data-layout="triple"] .lyric-group:not([data-distance="-1"]):not([data-distance="0"]):not([data-distance="1"]) { opacity: 0; }
 .kara { display: inline; position: relative; }
 .kara .base { opacity: .45; }
+/* 整行进度填充：base 与 fill 同宽同换行，fill 由 --p 控制扫过比例。
+   未唱色保持足够可见度，用户才能看清「已唱/未唱」的差别。 */
+.kara.line-kara { display: block; }
+.kara.line-kara .base { opacity: .82; }
+.kara.line-kara .fill { display: block; white-space: pre-wrap; }
 .kara .fill {
   position: absolute; inset: 0; color: var(--lyric-sung, var(--text)); pointer-events: none;
   mask-image: linear-gradient(90deg, #000 calc(var(--p, 0%) - 14px), transparent var(--p, 0%));

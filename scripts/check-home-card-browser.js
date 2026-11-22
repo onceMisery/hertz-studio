@@ -91,11 +91,11 @@ const section = (n) => console.log('\n' + n);
     '两列网格（左定宽 + 右自适应）', geo.cols);
   ok(geo.art && geo.art.w > 100, '封面有实际尺寸', geo.art && geo.art.w + 'px');
   ok(geo.left && geo.art && geo.action
-    && Math.abs(geo.action.l - geo.art.l) <= 2, '按钮左边缘与封面左对齐',
-    geo.art && geo.action ? (geo.action.l - geo.art.l) + 'px' : 'n/a');
-  ok(geo.action && geo.art && geo.action.w > 0 && Math.abs(geo.action.w - geo.art.w) <= 2,
-    '按钮与封面同宽',
-    geo.art && geo.action ? geo.art.w + ' vs ' + geo.action.w : 'n/a');
+    && geo.action.l >= geo.art.l - 1 && geo.action.r <= geo.art.r + 1,
+    '主操作位于封面内部', geo.art && geo.action ? '动作 ' + geo.action.l + '..' + geo.action.r + ' / 封面 ' + geo.art.l + '..' + geo.art.r : 'n/a');
+  ok(geo.action && geo.art && geo.action.t >= geo.art.t && geo.action.b <= geo.art.b + 1,
+    '主操作不溢出封面（浮层收起时也不撑高卡片）',
+    geo.art && geo.action ? '动作底 ' + geo.action.b + ' ≤ 封面底 ' + geo.art.b : 'n/a');
   ok(geo.copy && geo.quote && geo.quoteFill > 70,
     '名言块吃满右列宽度（不再是空列）', geo.quoteFill + '%');
   ok(geo.quote && geo.quote.h > 20, '名言块有实际高度（不是 0）',

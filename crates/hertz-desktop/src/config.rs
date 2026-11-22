@@ -156,6 +156,9 @@ pub(crate) struct MiniConfig {
     /// 尺寸档位（CSS --scale 同源）：0.85 / 1 / 1.2。
     #[serde(default)]
     pub(crate) scale: f64,
+    /// 内置形象：orange（橙团子）/ duck（小黄鸭）。用户素材目录存在时优先用户素材。
+    #[serde(default = "default_mini_skin")]
+    pub(crate) skin: String,
     #[serde(default = "default_mini_opacity")]
     pub(crate) opacity: f64,
     #[serde(default)]
@@ -164,6 +167,10 @@ pub(crate) struct MiniConfig {
 
 fn default_mini_opacity() -> f64 {
     1.0
+}
+
+fn default_mini_skin() -> String {
+    "orange".into()
 }
 
 impl Default for MiniConfig {
@@ -176,6 +183,7 @@ impl Default for MiniConfig {
             edge_hide: false,
             auto_on_main_hidden: false,
             scale: 1.0,
+            skin: default_mini_skin(),
             opacity: 1.0,
             geometry: crate::mini::MiniGeometry::default(),
         }
@@ -689,6 +697,9 @@ fn sanitize_mini(mini: &mut MiniConfig) {
         mini.opacity = default_mini_opacity();
     }
     mini.opacity = mini.opacity.clamp(0.3, 1.0);
+    if !matches!(mini.skin.as_str(), "orange" | "duck") {
+        mini.skin = default_mini_skin();
+    }
     if !mini.geometry.width.is_finite() {
         mini.geometry.width = crate::mini::MiniGeometry::default().width;
     }

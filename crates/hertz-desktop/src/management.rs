@@ -27,6 +27,7 @@ pub(crate) const V2_COMMANDS: &[&str] = &[
     // 小窗播放（桌面宠物）：开关（进/出小窗，宠物态由配置决定）与素材文件夹。
     // 桌面功能只接受独立播放器来源。
     "mini-toggle",
+    "mini-style",
     "open-pet-assets",
 ];
 
@@ -137,6 +138,7 @@ impl Request {
     pub(crate) fn check_value(&self, revision: u64, save_pending: bool) -> Result<(), Value> {
         let fields: &[&str] = match self.command.as_str() {
             "open-center" | "wallpaper-settings" => &["tab"],
+            "mini-style" => &["scale", "opacity", "skin", "alwaysOnTop", "edgeHide"],
             "wallpaper-preview" => &[
                 "enabled",
                 "fps",

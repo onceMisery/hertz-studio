@@ -5947,6 +5947,9 @@ mod tests {
             "wallpaper-preview-renew",
             "wallpaper-apply",
             "profile-switch",
+            "mini-toggle",
+            "mini-style",
+            "open-pet-assets",
         ] {
             assert!(
                 DESKTOP_CONTROL_COMMANDS.contains(&command),

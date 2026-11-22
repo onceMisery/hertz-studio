@@ -156,6 +156,14 @@ const active = h => assetPath(h.art.src);
   assert.equal(fallback.timers.size, 0, 'glyph fallback does not retry failed URLs');
   assert.equal(new Set(fallback.assignments).size, fallback.assignments.length);
 
+  // 内置形象：素材目录为空时也要直接出图，且「橙团子 / 小黄鸭」不是同一张图。
+  const builtinOrange = harness({}, null);
+  builtinOrange.api.applyConfig({ pet: true, skin: 'orange' }); await builtinOrange.settle();
+  const builtinDuck = harness({}, null);
+  builtinDuck.api.applyConfig({ pet: true, skin: 'duck' }); await builtinDuck.settle();
+  assert.ok(builtinOrange.art.src.startsWith('data:') && builtinDuck.art.src.startsWith('data:'), '内置形象无需素材即可出图');
+  assert.notEqual(builtinOrange.art.src, builtinDuck.art.src, '两种内置形象的默认帧不同');
+
   let releaseOld;
   const oldResponse = new Promise(resolve => { releaseOld = resolve; });
   custom.deferManifest(oldResponse);

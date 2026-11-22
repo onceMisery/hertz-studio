@@ -50,7 +50,8 @@
   transition: transform 180ms var(--ease), box-shadow 180ms var(--ease);
 }
 .home-art-wrap:hover,
-.home-art-wrap:focus-visible { transform: translateY(-2px); box-shadow: var(--surface-lift); }
+.home-art-wrap:focus-visible,
+.home-art-wrap:focus-within { transform: translateY(-2px); box-shadow: var(--surface-lift); }
 .home-art-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* ::before 而不是 ::after：它是包裹层的第一个子节点，封面 <img> 在其后绘制，
    有封面时自然被整张图盖住，不需要再判断状态。
@@ -77,7 +78,8 @@
   transition: opacity 180ms var(--ease), transform 180ms var(--ease);
 }
 .home-art-wrap:hover .art-tip,
-.home-art-wrap:focus-visible .art-tip { opacity: 1; transform: translateY(0); }
+.home-art-wrap:focus-visible .art-tip,
+.home-art-wrap:focus-within .art-tip { opacity: 1; transform: translateY(0); pointer-events: auto; }
 .art-tip b {
   display: block; color: #fff; font-size: var(--fs-base); font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -86,6 +88,20 @@
   display: block; color: rgba(255,255,255,.72); font-size: var(--fs-2xs);
   margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 封面浮层里的主操作：与歌名/歌手同一条浮层，悬停封面即可看到并点击。 */
+.home-cover-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-top: var(--sp-2);
+  min-height: 30px; padding: 0 14px;
+  border: 0; border-radius: 999px;
+  background: var(--text); color: var(--bg);
+  font: 500 var(--fs-2xs)/1 var(--font-sans, system-ui, sans-serif);
+  letter-spacing: .02em; cursor: pointer;
+  transition: background 160ms var(--ease), transform 120ms var(--ease);
+}
+.home-cover-action:hover { background: color-mix(in srgb, var(--text) 86%, var(--bg)); }
+.home-cover-action:active { transform: scale(.97); }
+.home-cover-action:disabled { opacity: .6; cursor: default; }
 /* 浅色主题：暗色那套黑渐变在浅底上是一块脏污，整条翻成白底深字。 */
 [data-theme="ios-light"] .art-tip {
   background: linear-gradient(to top, rgba(255,255,255,.95) 42%, rgba(255,255,255,0));

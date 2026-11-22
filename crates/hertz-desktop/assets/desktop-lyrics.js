@@ -526,8 +526,14 @@
         text.appendChild(span);
         state.words.push({ el: span, start: word.startMs, end: word.endMs ?? line.words[i + 1]?.startMs ?? lineEnd(index, line) });
       });
+    } else if (active && state.config.karaoke) {
+      // 没有逐字时间时按整行时长做横向扫过的进度填充：未唱部分保持未唱颜色，
+      // 唱到哪儿填到哪儿。它是行级时间进度，不是伪造的逐字时间轴。
+      const span = makeKara(line.text, false);
+      span.classList.add('line-kara');
+      text.appendChild(span);
+      state.words.push({ el: span, start: line.startMs, end: lineEnd(index, line) });
     } else {
-      // LRC without real word times lights as one line, never a fabricated character timeline.
       text.textContent = line.text;
       if (active) text.style.color = 'var(--lyric-sung, var(--text))';
     }

@@ -1024,3 +1024,48 @@ body.s3d-open #room-global-player { display:none!important; }
   #view-room .room-entry-dialog:has(.room-page-invite) { width:100%; height:calc(100% - 16px); max-height:calc(100% - 16px); margin:16px 0 0; border:1px solid var(--line); border-radius:24px 24px 0 0; }
   #view-room .room-entry-dialog:has(.room-page-invite) .room-entry-dialog-body { padding:16px 16px calc(24px + env(safe-area-inset-bottom,0px)); }
 }
+
+/* 大厅首屏上移：压缩内容区 / 页头 / 空状态的上方留白，把「一起听」
+   主体整块抬到更靠近顶栏的位置。 */
+#view-room .room-content { padding-top:10px; }
+#view-room .room-header { padding-bottom:10px; margin-bottom:14px; }
+#view-room .room-page-lobby>.room-flow-state { padding-top:clamp(8px,2.4vh,28px); }
+
+/* 大厅耳机图标：低频聆听脉冲从圆环向外扩散，图标轻微呼吸；
+   动效只用伪元素与 transform，不改变布局高度。 */
+#view-room .room-page-lobby>.room-flow-state>.room-flow-ring {
+  position:relative; isolation:isolate;
+  animation:room-listen-float 6s ease-in-out infinite;
+}
+#view-room .room-page-lobby>.room-flow-state>.room-flow-ring::before,
+#view-room .room-page-lobby>.room-flow-state>.room-flow-ring::after {
+  content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+  border:1px solid color-mix(in srgb,var(--accent) 42%,transparent);
+  border-radius:50%;
+  animation:room-listen-pulse 3.4s cubic-bezier(.22,1,.36,1) infinite;
+}
+#view-room .room-page-lobby>.room-flow-state>.room-flow-ring::after { animation-delay:1.7s; }
+#view-room .room-page-lobby>.room-flow-state>.room-flow-ring>.room-icon {
+  position:relative; z-index:1;
+  animation:room-listen-breathe 3.4s ease-in-out infinite;
+  filter:drop-shadow(0 0 8px color-mix(in srgb,var(--accent) 40%,transparent));
+}
+@keyframes room-listen-pulse {
+  0% { transform:scale(.9); opacity:0; }
+  30% { opacity:.5; }
+  100% { transform:scale(1.7); opacity:0; }
+}
+@keyframes room-listen-float {
+  0%,100% { transform:translateY(0); }
+  50% { transform:translateY(-4px); }
+}
+@keyframes room-listen-breathe {
+  0%,100% { transform:scale(1); }
+  50% { transform:scale(1.07); }
+}
+@media(prefers-reduced-motion:reduce) {
+  #view-room .room-page-lobby>.room-flow-state>.room-flow-ring,
+  #view-room .room-page-lobby>.room-flow-state>.room-flow-ring::before,
+  #view-room .room-page-lobby>.room-flow-state>.room-flow-ring::after,
+  #view-room .room-page-lobby>.room-flow-state>.room-flow-ring>.room-icon { animation:none; }
+}

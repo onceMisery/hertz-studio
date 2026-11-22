@@ -505,49 +505,66 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 .sp-fab:hover:not(:disabled) { border-color: var(--sp-accent); }
 .sp-fab:active:not(:disabled) { transform: scale(.96); }
 .sp-fab svg { width: 21px; height: 21px; pointer-events: none; }
+/* 二维舞台的左右两块侧栏与三维舞台设置共用一套语言：
+   悬浮圆角玻璃、中性结构线、统一 15px 标题与 34px 关闭键。 */
 .sp-sheet, .sp-playlist {
+  --panel-rule: color-mix(in srgb, var(--sp-text) 9%, transparent);
+  --panel-rule-soft: color-mix(in srgb, var(--sp-text) 6%, transparent);
+  --panel-field: color-mix(in srgb, var(--sp-text) 7%, var(--bg));
+  --panel-field-hi: color-mix(in srgb, var(--sp-text) 13%, var(--bg));
   position: absolute;
-  top: 0;
-  bottom: 0;
-  width: min(380px, 100vw);
+  top: 16px;
+  bottom: 16px;
+  width: min(408px, calc(100vw - 32px));
   z-index: 7;
-  background: var(--sp-glass-strong);
-  backdrop-filter: blur(var(--sp-bar-blur)) saturate(1.25);
-  -webkit-backdrop-filter: blur(var(--sp-bar-blur)) saturate(1.25);
-  padding: 24px 24px 32px;
+  border: 1px solid var(--panel-rule);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(var(--sp-bar-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--sp-bar-blur)) saturate(1.2);
+  box-shadow: 0 28px 72px -32px rgba(0, 0, 0, .62), inset 0 1px 0 rgba(255, 255, 255, .05);
+  padding: 0 22px 28px;
   overflow: auto;
   visibility: hidden;
   transition: transform var(--dur-slow, 0.45s) var(--sp-ease), visibility 0s linear var(--dur-slow, 0.45s);
 }
-.sp-sheet { right: 0; transform: translateX(106%); border-left: 1px solid var(--sp-line); }
-.sp-playlist { left: 0; transform: translateX(-106%); border-right: 1px solid var(--sp-line); }
+.sp-sheet { right: 16px; transform: translateX(calc(100% + 32px)); }
+.sp-playlist { left: 16px; transform: translateX(calc(-100% - 32px)); }
 .sp-sheet.sp-show, .sp-playlist.sp-show {
   visibility: visible;
   transform: translateX(0);
   transition: transform var(--dur-slow, 0.45s) var(--sp-ease), visibility 0s linear 0s;
 }
 .sp-sheet h2, .sp-playlist h2 {
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0;
+  flex: none;
+  margin: 0;
+  padding: 14px 22px 12px;
+  border-bottom: 1px solid var(--panel-rule);
+  background: transparent;
   color: var(--sp-text);
-  margin: 4px 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .01em;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.sp-sheet h2 {
-  position: sticky;
-  top: -24px;
-  z-index: 1;
-  margin: -24px -24px 24px;
-  padding: 20px 24px;
-  border-bottom: 1px solid var(--sp-line-soft);
-  background: var(--sp-glass-strong);
-  backdrop-filter: blur(var(--sp-bar-blur));
-  letter-spacing: 0;
+.sp-sheet h2 .sp-head-btn, .sp-playlist h2 .sp-head-btn {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--sp-muted);
+  touch-action: manipulation;
+  transition: color .18s var(--sp-ease), background .18s var(--sp-ease);
 }
-.sp-sheet h2 .sp-head-btn { width: 40px; height: 40px; flex: none; border-radius: 10px; padding: 0; touch-action: manipulation; }
+.sp-sheet h2 .sp-head-btn:hover, .sp-playlist h2 .sp-head-btn:hover {
+  background: var(--panel-field-hi);
+  color: var(--sp-text);
+}
 .sp-sheet label { display: block; font-size: 13px; line-height: 1.5; color: var(--sp-muted); margin: 20px 0 8px; }
 .sp-sheet select, .sp-sheet input[type="range"] { width: 100%; }
 .sp-sheet select { min-height: 40px; padding: 8px 12px; border: 1px solid var(--sp-line); border-radius: 8px; color: var(--sp-text); background: var(--sp-glass-strong); font-size: 13px; box-shadow: none; }
@@ -1203,20 +1220,256 @@ html #space3d .sp-head > #sp-account.has-avatar {
   .sp-reactor-telemetry dl > div { gap: 5px; padding: 0; margin: 0; border: 0; background: transparent; backdrop-filter: none; }
   .sp-reactor-telemetry p { display: none; }
 }
-#space3d #sp-sheet { z-index: 18; width: min(400px,calc(100% - 20px)); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
-#space3d #sp-sheet h2 { flex: none; position: static; margin: 0; padding: 20px 24px; background: transparent; color: var(--sp-text); }
-.sp-console-tabs { display: flex; flex: none; gap: 4px; padding: 12px 24px; border-bottom: 1px solid var(--sp-line-soft); }
-.sp-console-tabs button { flex: 1; height: 40px; min-width: 0; border: 0; border-radius: 8px; background: transparent; color: var(--sp-muted); font: inherit; font-size: 13px; cursor: pointer; }
-.sp-console-tabs button[aria-selected="true"] { color: var(--sp-text); background: var(--sp-line-soft); box-shadow: inset 0 0 0 1px var(--sp-line); }
-.sp-console-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; padding: 4px 24px 24px; }
-#sp-sheet select { box-sizing: border-box; min-height: 40px; border: 1px solid var(--sp-line); border-radius: 8px; padding: 8px 12px; color: var(--sp-text); background: var(--bg); font: inherit; font-size: 13px; }
-#sp-sheet input[type="range"] { accent-color: var(--sp-accent); }
+#space3d #sp-sheet {
+  z-index: 18;
+  width: min(408px, calc(100% - 32px));
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#space3d #sp-sheet h2 {
+  flex: none;
+  position: static;
+  margin: 0;
+  padding: 14px 22px 12px;
+  border-bottom: 1px solid var(--panel-rule);
+  background: transparent;
+  color: var(--sp-text);
+}
+/* 分组跳转：四等分药丸，和三维舞台设置保持同一套选中语言。 */
+.sp-console-tabs {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  padding: 8px 22px 10px;
+  border-bottom: 1px solid var(--panel-rule);
+}
+.sp-console-tabs button {
+  height: 32px;
+  min-width: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sp-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: color .18s var(--sp-ease), background .18s var(--sp-ease);
+}
+.sp-console-tabs button:hover { color: var(--sp-text); background: var(--panel-rule-soft); }
+.sp-console-tabs button[aria-selected="true"] {
+  color: var(--sp-text);
+  background: color-mix(in srgb, var(--sp-text) 10%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), inset 0 0 0 1px var(--panel-rule-soft);
+}
+.sp-console-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  padding: 14px 22px 24px;
+}
+
+/* 设置项统一成「左标签 + 右控件」，成组的标题/说明/按钮/参数块横跨两列。 */
+#sp-sheet :is(#sp-console-stage, #sp-console-lyrics, #sp-console-camera, #sp-console-display) {
+  display: grid;
+  grid-template-columns: minmax(112px, 34%) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 14px;
+  row-gap: 10px;
+}
+#sp-sheet :is(#sp-console-stage, #sp-console-lyrics, #sp-console-camera, #sp-console-display) > :is(
+  .sp-check, .sp-btn-line, .sp-param-field, .sp-note, .sp-scene-picker, .sp-zodiac-console,
+  #sp-scene-params, #sp-lyric-params, .sp-camera-tools, p, details
+) { grid-column: 1 / -1; }
+
+#sp-sheet .sp-console-scroll label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--sp-text);
+}
+#sp-sheet :is(.sp-check, label:has(input[type="checkbox"])) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  color: var(--sp-text);
+  cursor: pointer;
+  transition: background .18s var(--sp-ease);
+}
+#sp-sheet :is(.sp-check, label:has(input[type="checkbox"])):hover { background: var(--panel-field); }
+#sp-sheet select,
+#sp-sheet input[type="range"] { box-sizing: border-box; width: 100%; margin: 0; }
+#sp-sheet select {
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid var(--panel-rule-soft);
+  border-radius: 9px;
+  color: var(--sp-text);
+  background: var(--panel-field);
+  font: inherit;
+  font-size: 12.5px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+  transition: background .18s var(--sp-ease), border-color .18s var(--sp-ease);
+}
+#sp-sheet select:hover { background: var(--panel-field-hi); }
+#sp-sheet select:focus-visible {
+  border-bottom-color: var(--sp-accent);
+  background: var(--panel-field-hi);
+  outline-offset: 2px;
+}
+
+/* 滑块与开关沿用同一档中性材质，数值只做右对齐等宽标注。 */
+#sp-sheet input[type="range"] {
+  height: 22px;
+  background: transparent;
+  accent-color: var(--sp-text);
+  cursor: pointer;
+}
+#sp-sheet input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sp-text) 26%, transparent);
+}
+#sp-sheet input[type="range"]::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--sp-text);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sp-text) 6%, transparent);
+}
+#sp-sheet input[type="range"]::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sp-text) 26%, transparent);
+}
+#sp-sheet input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--sp-text);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sp-text) 6%, transparent);
+}
+#sp-sheet input[type="checkbox"][role="switch"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 19px;
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sp-text) 16%, transparent);
+  cursor: pointer;
+  transition: background .18s var(--sp-ease), border-color .18s var(--sp-ease);
+}
+#sp-sheet input[type="checkbox"][role="switch"]::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--sp-text);
+  transition: transform .18s var(--sp-ease);
+}
+#sp-sheet input[type="checkbox"][role="switch"]:hover { background: color-mix(in srgb, var(--sp-text) 24%, transparent); }
+#sp-sheet input[type="checkbox"][role="switch"]:checked {
+  background: color-mix(in srgb, var(--sp-accent) 38%, transparent);
+  border-bottom-color: var(--sp-accent);
+}
+#sp-sheet input[type="checkbox"][role="switch"]:checked::before {
+  transform: translateX(15px);
+  background: var(--accent-ink, var(--bg));
+}
+
+/* 动态参数：数值与标签同一行，滑块独占下一行；开关行整行可点。 */
+#sp-sheet .sp-param-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 2px 0;
+  padding: 6px 0;
+  border-top: 1px solid var(--panel-rule-soft);
+}
+#sp-sheet .sp-param-field:first-child { border-top: 0; }
+#sp-sheet .sp-param-field > label {
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  color: var(--sp-text);
+}
+#sp-sheet .sp-param-field > output {
+  position: static;
+  margin: 0;
+  color: color-mix(in srgb, var(--sp-text) 58%, transparent);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+#sp-sheet .sp-param-field > input[type="range"] { grid-column: 1 / -1; margin: 0; }
+#sp-sheet .sp-param-field.is-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 0;
+  border-radius: 9px;
+}
+#sp-sheet .sp-param-field.is-toggle:hover { background: var(--panel-field); }
+#sp-sheet .sp-param-field.is-toggle > input { order: 1; flex: none; margin: 0; }
+#sp-sheet .sp-param-field.is-toggle > label { order: 2; flex: 1; font-size: 12.5px; cursor: pointer; }
+#sp-sheet .sp-param-field.is-toggle > output { display: none; }
+
+#sp-sheet .sp-btn-line {
+  width: 100%;
+  min-height: 34px;
+  margin: 2px 0;
+  padding: 7px 12px;
+  border: 1px solid var(--panel-rule);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--sp-text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .18s var(--sp-ease), border-color .18s var(--sp-ease), transform .12s var(--sp-ease);
+}
+#sp-sheet .sp-btn-line:hover { background: var(--panel-field); border-color: transparent; }
+#sp-sheet .sp-btn-line:active { transform: translateY(1px); }
+#sp-sheet .sp-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.55; color: var(--sp-muted); }
+#sp-sheet .sp-note[hidden] { display: none; }
+#sp-sheet details { margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--panel-rule-soft); }
+#sp-sheet details summary { cursor: pointer; color: var(--sp-text); font-size: 12px; font-weight: 500; }
+#sp-sheet .sp-zodiac-console { padding: 10px 12px; border: 1px solid var(--panel-rule-soft); border-radius: 10px; background: var(--panel-field); }
+#sp-sheet .sp-zodiac-console > strong { font-size: 20px; }
+#sp-sheet .sp-camera-tools { display: flex; justify-content: flex-start; gap: 8px; }
+#sp-sheet .sp-camera-tools .sp-head-btn { width: 34px; height: 34px; border: 1px solid var(--panel-rule-soft); border-radius: 9px; background: transparent; color: var(--sp-muted); }
+#sp-sheet .sp-camera-tools .sp-head-btn:hover { background: var(--panel-field); color: var(--sp-text); }
+#sp-sheet :is(#sp-scene-params, #sp-lyric-params) { margin-top: 6px; }
+#sp-sheet input[type="checkbox"]:not([role="switch"]) { accent-color: var(--sp-accent); }
 #sp-lyric-params.is-disabled { opacity: .4; }
-#sp-sheet :is(#sp-scene-params,#sp-lyric-params) > label:has(+ input[type="checkbox"]) { display: inline-block; width: calc(100% - 32px); margin: 14px 0; color: var(--sp-text); }
-#sp-sheet :is(#sp-scene-params,#sp-lyric-params) > input[type="checkbox"] { vertical-align: middle; }
-#sp-sheet :is(#sp-scene-params,#sp-lyric-params) output { display: block; text-align: right; color: var(--sp-muted); font-size: 11px; }
-#sp-sheet details { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--sp-line-soft); }
-#sp-sheet details summary { cursor: pointer; color: var(--sp-muted); font-size: 12px; }
+
 @media (max-width:580px) { .sp-stage-tools { bottom: max(150px,calc(env(safe-area-inset-bottom) + 150px)); right: 18px; } }
 @media (max-width:800px) { #space3d .sp-bar { width: calc(100% - 24px); gap: 6px; padding: 10px 12px; } #space3d .sp-progress { min-width: 72px; margin-right: 0; } .sp-player-tools { padding-left: 6px; } }
 @media (max-width:580px) {
@@ -1258,13 +1511,72 @@ html #space3d .sp-head > #sp-account.has-avatar {
 #space3d .sp-popover.sp-show:hover, #space3d .sp-popover.sp-show:focus-within { translate: 0 -4px; }
 #space3d .sp-bar .sp-play { background: rgba(255,255,255,.13); color: var(--sp-text); border: 0; box-shadow: none; }
 #space3d .sp-bar .sp-play:hover { box-shadow: var(--sp-relief-raised); }
-#space3d #sp-sheet, #space3d #sp-playlist { top: 86px; bottom: 124px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: color-mix(in srgb,var(--bg) 48%,transparent); box-shadow: 0 24px 56px rgba(0,0,0,.22); backdrop-filter: blur(32px) saturate(1.15); transition: transform .45s var(--sp-ease),translate .4s var(--sp-ease),visibility .45s; }
-#space3d #sp-sheet { right: 20px; bottom: max(160px,calc(env(safe-area-inset-bottom) + 160px)); width: min(420px,calc(100% - 40px)); }
-#space3d #sp-playlist { left: 20px; }
+#space3d #sp-sheet, #space3d #sp-playlist {
+  top: 86px;
+  bottom: 124px;
+  border: 1px solid var(--panel-rule);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  box-shadow: 0 28px 72px -32px rgba(0, 0, 0, .62), inset 0 1px 0 rgba(255, 255, 255, .05);
+  backdrop-filter: blur(32px) saturate(1.18);
+  -webkit-backdrop-filter: blur(32px) saturate(1.18);
+  transition: transform .45s var(--sp-ease), visibility .45s;
+}
+#space3d #sp-sheet {
+  right: 16px;
+  bottom: calc(124px + env(safe-area-inset-bottom, 0px));
+  width: min(408px, calc(100% - 32px));
+}
+#space3d #sp-playlist {
+  left: 16px;
+  width: min(408px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
 #space3d :is(#sp-sheet,#sp-playlist).sp-show { transform: translateX(0); }
 #space3d :is(#sp-sheet,#sp-playlist).sp-show:hover { translate: none; }
-#space3d #sp-sheet select { background: color-mix(in srgb,var(--bg) 20%,transparent); }
-#space3d .sp-console-tabs button[aria-selected="true"] { background: var(--sp-surface-raised); box-shadow: inset 0 0 0 1px var(--sp-line); }
+#space3d #sp-sheet select { background: var(--panel-field); }
+#space3d .sp-console-tabs button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--sp-text) 10%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), inset 0 0 0 1px var(--panel-rule-soft);
+}
+#space3d #sp-playlist h2 { flex: none; }
+#space3d #sp-playlist-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 14px 20px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--sp-text) 22%, transparent) transparent;
+}
+#space3d .sp-playlist .sp-queue-row { margin: 3px 0; padding: 4px 6px; border-radius: 10px; }
+#space3d .sp-playlist .sp-queue-row:hover,
+#space3d .sp-playlist .sp-queue-row:focus-within,
+#space3d .sp-playlist .sp-queue-row:has(.sp-queue-item.is-active) {
+  background: var(--panel-field);
+  border-color: var(--panel-rule-soft);
+  box-shadow: none;
+  transform: none;
+}
+#space3d .sp-playlist .sp-queue-item { padding: 6px 4px; font-size: 12.5px; }
+#space3d .sp-playlist .sp-queue-item small { font-size: 11px; }
+#space3d .sp-playlist .sp-queue-item.is-active { color: var(--sp-accent); }
+#space3d .sp-playlist .sp-queue-row .sp-head-btn {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sp-muted);
+}
+#space3d .sp-playlist .sp-queue-row:hover .sp-head-btn,
+#space3d .sp-playlist .sp-queue-row:focus-within .sp-head-btn {
+  color: var(--sp-text);
+  background: var(--panel-field-hi);
+}
 #space3d .sp-fx-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; padding: 20px 2px 24px; }
 #space3d .sp-card { display: flex; flex-direction: column; border-color: rgba(255,255,255,.13); background: var(--sp-surface); box-shadow: var(--sp-relief); transition: transform .28s var(--sp-ease),box-shadow .28s var(--sp-ease),border-color .2s; }
 #space3d .sp-card img { aspect-ratio: 16 / 10; border-bottom: 1px solid rgba(255,255,255,.1); }
@@ -1346,36 +1658,41 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
  *
  * 面板底是半透明玻璃（舞台从面板下透出来），但吸顶标题与分组导航保持**不透明**——
  * 滚过的行不能透上来糊住标题（check-stage-settings-browser 的既有契约量的是 alpha=1）。
- * 配色全部由 --sp-* / --bg 令牌派生；强调色只出现在 1px 线上（当前分组、字段聚焦、
+ * 材质必须和左侧 .s3d-queue 逐项同源：舞台自己的 --s3d-bg/--s3d-text 才是这块画面的
+ * 基准色，若继续派生自应用主题 --bg/--sp-*，暖白主题下这块面板会变成一张浅色卡片，
+ * 和深色队列并排时像两个产品。强调色只出现在 1px 线上（当前分组、字段聚焦、
  * 灰显说明的引导线）与开关轨道，彩色面积控制在 3% 以内；字段用不透明底保证可读性，
  * 玻璃只交给面板底色这一层。
  * ------------------------------------------------------------------------- */
 #s3d-settings {
-  /* 局部令牌：吸顶实心带 / 字段底 / 悬浮态 / 三级文字 */
-  --dlg-solid: color-mix(in srgb, var(--bg) 93%, var(--sp-text));
-  --dlg-field: color-mix(in srgb, var(--sp-text) 7%, var(--bg));
-  --dlg-field-hi: color-mix(in srgb, var(--sp-text) 13%, var(--bg));
-  --dlg-ink: var(--sp-text);
-  --dlg-muted: color-mix(in srgb, var(--sp-text) 66%, transparent);
+  /* 局部令牌：吸顶实心带 / 字段底 / 悬浮态 / 三级文字，全部锚在舞台底色上。 */
+  --dlg-solid: color-mix(in srgb, var(--s3d-bg) 93%, var(--s3d-text));
+  --dlg-field: color-mix(in srgb, var(--s3d-text) 7%, var(--s3d-bg));
+  --dlg-field-hi: color-mix(in srgb, var(--s3d-text) 13%, var(--s3d-bg));
+  --dlg-ink: var(--s3d-text);
+  --dlg-muted: var(--s3d-muted);
   /* 结构线用中性白，强调色只留给当前分组与聚焦；否则整条侧栏会被主题色染红。 */
-  --dlg-rule: color-mix(in srgb, var(--sp-text) 9%, transparent);
-  --dlg-rule-soft: color-mix(in srgb, var(--sp-text) 6%, transparent);
+  --dlg-rule: rgba(255, 255, 255, .09);
+  --dlg-rule-soft: rgba(255, 255, 255, .06);
   --s3d-head: 61px;
 
   position: fixed;
-  top: 16px;
+  /* 与 .s3d-queue 同一组上下边界：两块玻璃卡并排时高度、圆角和入画位置都对齐。 */
+  top: 88px;
   right: 16px;
-  bottom: 16px;
+  bottom: 116px;
   left: auto;
   margin: 0;
   width: min(408px, calc(100vw - 32px));
   z-index: 21;
-  border: 1px solid var(--dlg-rule);
+  /* 与底部播放控制条同一套舞台玻璃：渐变底 + 1px 冷白边 + 顶缘内高光，
+     面板不再是一块纯黑底，和播放条并排时是同一种材质。 */
+  border: var(--s3d-bar-border);
   border-radius: 18px;
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-  backdrop-filter: blur(30px) saturate(1.2);
-  -webkit-backdrop-filter: blur(30px) saturate(1.2);
-  box-shadow: -18px 0 48px rgba(0, 0, 0, .32), 0 28px 72px -32px rgba(0, 0, 0, .62), inset 0 1px 0 rgba(255, 255, 255, .05);
+  background: var(--s3d-bar-bg);
+  backdrop-filter: blur(var(--s3d-bar-blur)) saturate(1.3);
+  -webkit-backdrop-filter: blur(var(--s3d-bar-blur)) saturate(1.3);
+  box-shadow: var(--s3d-bar-shadow);
   padding: 0 22px 32px;
   display: grid;
   grid-template-columns: minmax(132px, 35%) minmax(0, 1fr);
@@ -1385,7 +1702,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   row-gap: 9px;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--sp-text) 22%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--dlg-ink) 22%, transparent) transparent;
 }
 
 /* 顶层里凡是「标签 + 控件」之外的节点都占满一整行，配对节奏才不会被打散。
@@ -1421,7 +1738,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   background: var(--dlg-solid);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: .01em;
 }
@@ -1437,31 +1754,16 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 #s3d-settings h2 .sp-head-btn:hover { color: var(--dlg-ink); background: var(--dlg-field-hi); }
 #s3d-settings h2 .sp-head-btn:active { transform: scale(.94); }
 
-/* 状态条：一句话说清当前生效的歌词视觉，不再把同一句理由复制到每个控件下面。 */
-#s3d-settings > #s3d-settings-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-self: start;
-  max-width: 100%;
-  margin: 12px 0 4px;
-  padding: 5px 10px 5px 9px;
-  border: 1px solid var(--dlg-rule-soft);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--sp-text) 4%, transparent);
-  font-size: 11.5px;
-  line-height: 1.4;
-  color: var(--dlg-muted);
+/* 滚动条：WebView2 的默认滚动条是浅色轨道，贴在深色玻璃右缘会拉出一条
+   贯穿到底的浅灰带。显式换成细的透明轨道 + 低对比白色把手。 */
+#s3d-settings::-webkit-scrollbar { width: 6px; height: 6px; }
+#s3d-settings::-webkit-scrollbar-track,
+#s3d-settings::-webkit-scrollbar-corner { background: transparent; }
+#s3d-settings::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .10);
 }
-#s3d-settings > #s3d-settings-status:empty { display: none; }
-#s3d-settings > #s3d-settings-status::before {
-  content: '';
-  flex: none;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--brand, var(--sp-accent));
-}
+#s3d-settings::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .18); }
 
 /* 分组跳转条：只滚到分组，不切换视图；当前分组用一枚低对比药丸标出。 */
 #s3d-settings > .s3d-sec-nav {
@@ -1499,16 +1801,48 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 }
 #s3d-settings .s3d-sec-nav button.is-current {
   color: var(--dlg-ink);
-  background: color-mix(in srgb, var(--sp-text) 10%, transparent);
+  background: color-mix(in srgb, var(--dlg-ink) 10%, transparent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), inset 0 0 0 1px var(--dlg-rule-soft);
   border-bottom-color: transparent;
 }
 #s3d-settings .s3d-sec-nav button:focus-visible {
-  outline: 1px solid var(--sp-accent);
+  outline: 1px solid var(--s3d-accent);
   outline-offset: 1px;
 }
 
-/* 分组标题：一句组名 + 一句它管什么，下面一条规则线收住。 */
+/* 分组标题：一句组名 + 一句它管什么，下面一条规则线收住。
+   「显示歌词」贴着组名右缘，和标题共用同一条基线，不再单独占一整行。 */
+#s3d-settings > .s3d-sec-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 26px 0 4px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--dlg-rule);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+#s3d-settings > .s3d-sec-row > .s3d-sec {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  color: var(--dlg-ink);
+}
+#s3d-settings > .s3d-sec-row > .sp-check {
+  flex: none;
+  margin: 0 0 1px;
+  padding: 4px 6px 4px 10px;
+  white-space: nowrap;
+}
 #s3d-settings > .s3d-sec {
   display: grid;
   gap: 3px;
@@ -1520,7 +1854,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   letter-spacing: .05em;
   color: var(--dlg-ink);
 }
-#s3d-settings > .s3d-sec small {
+#s3d-settings .s3d-sec small {
   font-size: 11px;
   font-weight: 400;
   letter-spacing: .01em;
@@ -1547,7 +1881,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   font-weight: 400;
-  color: color-mix(in srgb, var(--sp-text) 58%, transparent);
+  color: var(--dlg-muted);
   font-variant-numeric: tabular-nums;
 }
 #s3d-settings .s3d-setting-inactive { color: var(--dlg-muted); }
@@ -1572,13 +1906,13 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 #s3d-settings input[type="range"]:focus-visible { outline-offset: 2px; }
 #s3d-settings select:focus-visible {
   border-color: var(--dlg-rule);
-  border-bottom-color: var(--sp-accent);
+  border-bottom-color: var(--s3d-accent);
   background-color: var(--dlg-field-hi);
 }
 
 /* 滑块：3px 中性轨道 + 中性把手，数值的可读性交给左列，不靠彩色填充。 */
 #s3d-settings input[type="range"] {
-  --track: color-mix(in srgb, var(--sp-text) 26%, transparent);
+  --track: color-mix(in srgb, var(--dlg-ink) 26%, transparent);
   --music-highlight: var(--dlg-ink);
   height: 24px;
   background: transparent;
@@ -1592,12 +1926,12 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 #s3d-settings input[type="range"]::-webkit-slider-thumb {
   width: 12px; height: 12px; margin-top: -4.5px;
   border: 0; border-radius: 50%; background: var(--dlg-ink);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sp-text) 6%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dlg-ink) 6%, transparent);
   transition: transform .16s var(--sp-ease), box-shadow .16s var(--sp-ease);
 }
 #s3d-settings input[type="range"]:hover::-webkit-slider-thumb {
   transform: scale(1.1);
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--sp-text) 8%, transparent);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--dlg-ink) 8%, transparent);
 }
 #s3d-settings input[type="range"]:active::-webkit-slider-thumb { transform: scale(.95); }
 #s3d-settings input[type="range"]::-moz-range-track {
@@ -1608,7 +1942,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
 #s3d-settings input[type="range"]::-moz-range-thumb {
   width: 12px; height: 12px; border: 0;
   border-radius: 50%; background: var(--dlg-ink);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sp-text) 6%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dlg-ink) 6%, transparent);
 }
 
 /* 开关：ON 态用品牌强调色的淡轨道 + 一条 1px 底线，OFF 态完全中性。 */
@@ -1622,7 +1956,7 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   margin: 0;
   border: 1px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--sp-text) 16%, transparent);
+  background: color-mix(in srgb, var(--dlg-ink) 16%, transparent);
   cursor: pointer;
   transition: background .18s var(--sp-ease), border-color .18s var(--sp-ease);
 }
@@ -1637,19 +1971,19 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   background: var(--dlg-ink);
   transition: transform .18s var(--sp-ease);
 }
-#s3d-settings input[type="checkbox"][role="switch"]:hover { background: color-mix(in srgb, var(--sp-text) 24%, transparent); }
+#s3d-settings input[type="checkbox"][role="switch"]:hover { background: color-mix(in srgb, var(--dlg-ink) 24%, transparent); }
 #s3d-settings input[type="checkbox"][role="switch"]:checked {
-  background: color-mix(in srgb, var(--sp-accent) 38%, transparent);
-  border-bottom-color: var(--sp-accent);
+  background: color-mix(in srgb, var(--s3d-accent) 38%, transparent);
+  border-bottom-color: var(--s3d-accent);
 }
 #s3d-settings input[type="checkbox"][role="switch"]:checked::before {
   transform: translateX(15px);
-  background: var(--accent-ink, var(--bg));
+  background: var(--s3d-bg);
 }
 #s3d-settings input[type="checkbox"][role="switch"]:active::before { transform: scale(.92); }
 #s3d-settings input[type="checkbox"][role="switch"]:checked:active::before { transform: translateX(15px) scale(.92); }
 #s3d-settings input[type="checkbox"][role="switch"]:focus-visible {
-  outline: 1px solid var(--sp-accent);
+  outline: 1px solid var(--s3d-accent);
   outline-offset: 2px;
 }
 #s3d-settings label:has(input[type="checkbox"]) {
@@ -1707,21 +2041,35 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   border-color: transparent;
   border-radius: 10px;
   background: var(--dlg-ink);
-  color: var(--bg);
+  color: var(--s3d-bg);
   font-size: 12.5px;
   font-weight: 600;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .55);
 }
 #s3d-settings #s3d-workshop:hover {
-  background: color-mix(in srgb, var(--dlg-ink) 88%, var(--bg));
+  background: color-mix(in srgb, var(--dlg-ink) 88%, var(--s3d-bg));
   border-color: transparent;
 }
 #s3d-settings #s3d-defaults {
-  border-color: transparent;
-  background: transparent;
-  color: var(--dlg-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  margin: 4px 0 2px;
+  border: 1px solid var(--dlg-rule);
+  border-radius: 10px;
+  background: var(--dlg-field);
+  color: var(--dlg-ink);
+  font-size: 12.5px;
+  font-weight: 500;
 }
-#s3d-settings #s3d-defaults:hover { color: var(--dlg-ink); background: var(--dlg-field); }
+#s3d-settings #s3d-defaults svg { width: 15px; height: 15px; color: var(--dlg-muted); }
+#s3d-settings #s3d-defaults:hover {
+  border-color: var(--dlg-rule);
+  background: var(--dlg-field-hi);
+}
+#s3d-settings #s3d-defaults:active { transform: translateY(1px); }
 
 /* 灰显理由：同一句只在面板里出现一次，其余控件用 title 承载；左侧一条中性线。 */
 #s3d-settings .s3d-setting-note {
@@ -1752,7 +2100,6 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   #s3d-settings > div > label { grid-column: 1 / -1; }
   #s3d-settings h2 { margin: 0 -16px; padding: 14px 16px 12px; }
   #s3d-settings h2 .sp-head-btn { width: 34px; height: 34px; }
-  #s3d-settings > #s3d-settings-status { margin: 10px 0 6px; }
   #s3d-settings > .s3d-sec-nav { margin: 0 -16px; padding: 8px 16px 10px; }
   #s3d-settings > :is(#s3d-reset, #s3d-fs) { grid-column: 1 / -1; }
   #s3d-settings label:not(:has(input[type="checkbox"])) {

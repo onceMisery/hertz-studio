@@ -148,6 +148,13 @@
       tipTitle: find('home-tip-title'), tipArtist: find('home-tip-artist') };
     el.action.addEventListener('click', activate);
     el.retry.addEventListener('click', refreshRecent);
+    // 鼠标点过封面或浮层按钮后，焦点会留在浮层里；指针移出时把这类
+    // 「鼠标焦点」清掉，否则 :focus-within 会让歌名/按钮一直挂着。
+    // 键盘 Tab 进来的焦点带 :focus-visible，不在这里清，浮层保持可见。
+    el.wrap.addEventListener('pointerleave', function () {
+      var active = document.activeElement;
+      if (active && el.wrap.contains(active) && !active.matches(':focus-visible')) active.blur();
+    });
     // 封面浮层里的歌名/歌手：与状态行同源，改一处两处都要跟。
     if (el.tipTitle) {
       el.tipTitle.textContent = '—';

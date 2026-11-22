@@ -85,6 +85,12 @@ const ui = {
   setMiniToggle: $('set-mini-toggle'),
   setMiniAssets: $('set-mini-assets'),
   setMiniNote: $('set-mini-note'),
+  setMiniSkin: $('set-mini-skin'),
+  setMiniScale: $('set-mini-scale'),
+  setMiniOpacity: $('set-mini-opacity'),
+  setMiniOpacityValue: $('set-mini-opacity-value'),
+  setMiniTopmost: $('set-mini-topmost'),
+  setMiniEdgeHide: $('set-mini-edge-hide'),
 // form:end
   setLyricStaff: $('set-lyric-staff'),
   setLyricStaffPattern: $('set-lyric-staff-pattern'),
@@ -829,8 +835,28 @@ async function resolveCover(url) {
 
 // Controlled raster consumers borrow the retained source across decode/upload.
 // The ordinary synchronous URL API remains unchanged for DOM presentation.
+//
+// 图片解码自己走的 fetch 受页面 CSP 约束：connect-src 只放行 'self'，
+// 网易云 / QQ 的远程封面在 <img> 里能显示（img-src 放行 https），但纹理与
+// 取色画布拿不到。独立形态下这里改走同源代理，把远程图换成 data URL，
+// 与插件形态的解析结果对齐；代理失败时退回原地址，由调用方按无封面降级。
+async function proxyRemoteCover(url, signal) {
+  const path = '/v1/online/cover?url=' + encodeURIComponent(url) + '&' + urlCredential();
+  const res = await fetch(path, { signal });
+  if (!res.ok) return null;
+  const payload = await res.json();
+  if (!payload || typeof payload.data !== 'string' || !payload.data) return null;
+  const type = typeof payload.content_type === 'string' && /^image\//i.test(payload.content_type)
+    ? payload.content_type : 'image/jpeg';
+  return 'data:' + type + ';base64,' + payload.data;
+}
+
 resolveCover.borrow = async function (url, resources, signal) {
-  const resolved = await resolveCover(url);
+  let resolved = await resolveCover(url);
+  if (resolved && transport.kind !== 'dbx' && isRemoteCoverUrl(resolved) && !(signal && signal.aborted)) {
+    try { resolved = (await proxyRemoteCover(resolved, signal)) || resolved; }
+    catch (_) { /* 代理不可用时保留原地址，调用方按无封面降级。 */ }
+  }
   if (signal && signal.aborted) return { url: resolved, accounted: false };
   return retainCoverSource(resolved, resources) || { url: resolved, accounted: false };
 };
@@ -8290,6 +8316,13 @@ function initBarVisibility() {
   const STORE_KEY = 'vmusic.bar.pinned.v1';
   let collapsed = false;
   try { collapsed = localStorage.getItem(STORE_KEY) === '0'; } catch (e) { /* 本次会话仍可操作 */ }
+  // 指针离开原生窗口时自动淡出播放栏，把高度让给内容；回到窗口即恢复。
+  // 手动收起（.is-hidden）是另一条状态，互不覆盖。
+  let pointerDown = false;
+  const barAutoHide = (on) => {
+    if (!bar) return;
+    document.body.classList.toggle('bar-auto-hidden', Boolean(on) && !collapsed);
+  };
 
   function sync() {
     const hidden = collapsed;
@@ -8302,6 +8335,7 @@ function initBarVisibility() {
 
   function setCollapsed(value) {
     collapsed = value;
+    barAutoHide(false);
     try { localStorage.setItem(STORE_KEY, collapsed ? '0' : '1'); } catch (e) { /* 本次会话仍可操作 */ }
     sync();
     // 收起后焦点移到可见的恢复入口，键盘操作不会丢在隐藏的播放栏中。
@@ -8311,6 +8345,23 @@ function initBarVisibility() {
   toggleBtn.addEventListener('click', () => setCollapsed(true));
   restoreBtn.addEventListener('click', () => setCollapsed(false));
   document.addEventListener('skin:changed', sync);
+  const showBar = () => barAutoHide(false);
+  document.documentElement.addEventListener('mouseenter', showBar);
+  // 任何指针移动都恢复（部分 WebView 在窗口重新获得指针时不派发 mouseenter）。
+  document.addEventListener('pointermove', showBar, { passive: true });
+  document.documentElement.addEventListener('mouseleave', () => {
+    let popoverOpen = false;
+    try { popoverOpen = !!document.querySelector(':popover-open'); } catch (_) { /* 旧内核不支持，按无弹层处理 */ }
+    if (pointerDown || collapsed || popoverOpen) return;
+    barAutoHide(true);
+  });
+  // 拖拽/调节时不移开视线：按下指针期间始终保持可见。
+  document.addEventListener('pointerdown', () => { pointerDown = true; showBar(); }, true);
+  document.addEventListener('pointerup', () => { pointerDown = false; }, true);
+  document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+  // 键盘 Tab 进入播放栏时恢复（鼠标点击留下的焦点不算，交给 CSS 的 :focus-visible）。
+  document.addEventListener('focusin', (event) => { if (bar.contains(event.target)) showBar(); });
+  window.addEventListener('focus', showBar);
   sync();
 }
 
@@ -10548,6 +10599,24 @@ async function startApp() {
     const applyMiniStatus = (mini) => {
       if (!mini || !ui.setMiniToggle) return;
       ui.setMiniToggle.textContent = mini.visible ? '关闭小窗' : '开启小窗';
+      if (ui.setMiniSkin && typeof mini.skin === 'string' && mini.skin) ui.setMiniSkin.value = mini.skin;
+      if (ui.setMiniScale && Number.isFinite(mini.scale)) {
+        const scale = String(mini.scale);
+        const known = Array.prototype.some.call(ui.setMiniScale.options, (option) => option.value === scale);
+        if (!known) {
+          const option = document.createElement('option');
+          option.value = option.textContent = scale;
+          ui.setMiniScale.appendChild(option);
+        }
+        ui.setMiniScale.value = scale;
+      }
+      if (ui.setMiniOpacity && Number.isFinite(mini.opacity)) {
+        const percent = Math.round(mini.opacity * 100);
+        ui.setMiniOpacity.value = String(percent);
+        if (ui.setMiniOpacityValue) ui.setMiniOpacityValue.textContent = percent + '%';
+      }
+      if (ui.setMiniTopmost && typeof mini.topmost === 'boolean') ui.setMiniTopmost.checked = mini.topmost;
+      if (ui.setMiniEdgeHide && typeof mini.edgeHide === 'boolean') ui.setMiniEdgeHide.checked = mini.edgeHide;
     };
     const probeMiniStatus = () => {
       transport.post('/v1/desktop/control', { command: 'status' })
@@ -10571,6 +10640,30 @@ async function startApp() {
           .then(() => toast('已打开桌宠素材文件夹'))
           .catch((err) => toast(errText('打开素材文件夹失败', err), 'error'));
       };
+    }
+    // 宠物外观：大小 / 不透明度 / 置顶 / 贴边隐藏，改一项存一项。
+    const applyMiniStyle = (patch) => {
+      wallpaperControl('mini-style', patch)
+        .then((result) => applyMiniStatus(result && result.mini))
+        .catch((err) => { toast(errText('保存桌面宠物设置失败', err), 'error'); probeMiniStatus(); });
+    };
+    if (ui.setMiniSkin) {
+      ui.setMiniSkin.onchange = () => applyMiniStyle({ skin: ui.setMiniSkin.value });
+    }
+    if (ui.setMiniScale) {
+      ui.setMiniScale.onchange = () => applyMiniStyle({ scale: Number(ui.setMiniScale.value) });
+    }
+    if (ui.setMiniOpacity) {
+      ui.setMiniOpacity.oninput = () => {
+        if (ui.setMiniOpacityValue) ui.setMiniOpacityValue.textContent = ui.setMiniOpacity.value + '%';
+      };
+      ui.setMiniOpacity.onchange = () => applyMiniStyle({ opacity: Number(ui.setMiniOpacity.value) / 100 });
+    }
+    if (ui.setMiniTopmost) {
+      ui.setMiniTopmost.onchange = () => applyMiniStyle({ alwaysOnTop: ui.setMiniTopmost.checked });
+    }
+    if (ui.setMiniEdgeHide) {
+      ui.setMiniEdgeHide.onchange = () => applyMiniStyle({ edgeHide: ui.setMiniEdgeHide.checked });
     }
     probeMiniStatus();
   }

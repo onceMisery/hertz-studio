@@ -3740,9 +3740,17 @@ impl App {
         let (width, height) = if self.config.mini.pet {
             (56.0, 56.0)
         } else {
-            (self.mini_host.geometry.width, self.mini_host.geometry.height)
+            (
+                self.mini_host.geometry.width,
+                self.mini_host.geometry.height,
+            )
         };
-        match create_mini(target, self.proxy.clone(), self.mini_cover.clone(), (width, height)) {
+        match create_mini(
+            target,
+            self.proxy.clone(),
+            self.mini_cover.clone(),
+            (width, height),
+        ) {
             Ok(surface) => {
                 // 必须在 WebView 建好之后再装命中处理：WebView2 的子窗那时才存在，
                 // 而它才是 WM_NCHITTEST 的第一到达点（设计 §6.2）。
@@ -3792,6 +3800,7 @@ impl App {
         let payload = serde_json::json!({
             "theme": "auto",
             "scale": mini.scale,
+            "skin": mini.skin.as_str(),
             "opacity": mini.opacity,
             "sung": self.config.lyrics.sung_color.as_str(),
             "pet": mini.pet,
@@ -4855,6 +4864,43 @@ impl App {
                 self.schedule_save();
                 self.sync_tray();
             }
+            "mini-style" => {
+                let Some(patch) = value.and_then(|value| value.as_object()) else {
+                    return pipe_error("invalid_value");
+                };
+                if let Some(scale) = patch.get("scale").and_then(|value| value.as_f64()) {
+                    if !(0.85..=1.2).contains(&scale) {
+                        return pipe_error("invalid_value");
+                    }
+                    self.config.mini.scale = scale;
+                    self.mini_host.scale = scale;
+                }
+                if let Some(opacity) = patch.get("opacity").and_then(|value| value.as_f64()) {
+                    if !(0.3..=1.0).contains(&opacity) {
+                        return pipe_error("invalid_value");
+                    }
+                    self.config.mini.opacity = opacity;
+                }
+                if let Some(skin) = patch.get("skin").and_then(|value| value.as_str()) {
+                    if !matches!(skin, "orange" | "duck") {
+                        return pipe_error("invalid_value");
+                    }
+                    self.config.mini.skin = skin.to_string();
+                }
+                if let Some(on) = patch.get("alwaysOnTop").and_then(|value| value.as_bool()) {
+                    self.config.mini.always_on_top = on;
+                    self.mini_host.always_on_top = on;
+                }
+                if let Some(on) = patch.get("edgeHide").and_then(|value| value.as_bool()) {
+                    self.config.mini.edge_hide = on;
+                }
+                self.config.sanitize();
+                self.mini_send_config();
+                self.apply_mini_action(MiniAction::ApplyWindowStyle, target);
+                self.place_mini();
+                self.schedule_save();
+                self.sync_tray();
+            }
             "open-pet-assets" => {
                 self.open_pet_assets();
             }
@@ -5305,6 +5351,10 @@ impl App {
                 "peek": self.mini_host.phase == MiniPhase::Peeking,
                 "reopen": self.config.mini.reopen,
                 "scale": self.config.mini.scale,
+                "skin": self.config.mini.skin,
+                "opacity": self.config.mini.opacity,
+                "topmost": self.config.mini.always_on_top,
+                "edgeHide": self.config.mini.edge_hide,
                 "supported": true,
             },
             "diagnostics": {
@@ -7788,6 +7838,9 @@ const PET_ASSETS_README: &str = r#"Hertz 桌面宠物 · 素材约定
 
 把这个文件夹里的图片作为你的桌面宠物：小窗开着时增删或替换文件，宠物几秒内自动换装
 （若没刷新，托盘里关掉再勾上一次小窗即可）。
+
+不想用素材时，设置 → 桌面 → 桌面宠物 → 宠物形象 可切换内置形象
+「橙团子 / 小黄鸭」；素材目录里的图片始终优先于内置形象。
 
 文件命名（全部小写）：
   idle.png            待机/暂停时的形象（单帧）
