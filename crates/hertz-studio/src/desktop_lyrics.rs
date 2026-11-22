@@ -712,19 +712,23 @@ mod tests {
     ) {
         let db = state.borrow().db.clone();
         db.close().await;
-        // SQLx can report the pool closed while a return task still closes its SQLite
-        // worker. Wait for actual pool accounting before deleting Windows DB files.
-        // Poll on a timer instead of yield_now: with the suite's parallelism, cooperating
-        // spinners starve the closer future on a small runner, so no deadline would hold.
-        tokio::time::timeout(Duration::from_secs(60), async {
-            while db.size() != 0 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("SQLite connections must be released before fixture removal");
         drop(state);
-        std::fs::remove_dir_all(directory).unwrap();
+        drop(db);
+        // Pool accounting can lag the actual handle release, and after a cancelled
+        // in-flight query it can stay non-zero indefinitely while the files are
+        // already removable. The real requirement is a removable fixture directory;
+        // on Windows deletion fails until every handle is released, so retry it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            match std::fs::remove_dir_all(&directory) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("fixture directory must be removable: {error}"),
+            }
+        }
     }
 
     fn line(start: u64, end: Option<u64>, text: &str) -> vmusic_core::LyricLine {
