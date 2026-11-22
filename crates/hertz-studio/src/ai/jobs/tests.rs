@@ -843,13 +843,7 @@ async fn worker_panics_interrupt_and_settle_according_to_dispatch_state() {
             .unwrap();
         assert_eq!(usage.usage_state, expected_usage);
         assert_eq!(usage.accounted_micro_usd, expected_charge);
-        assert!(!state
-            .ai_runtime
-            .inputs
-            .lock()
-            .await
-            .contains_key(&job.job_id));
-        assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+        await_worker_released(&state, &job.job_id).await;
     }
     state.audio.shutdown();
     handle.join().unwrap();
@@ -959,13 +953,7 @@ async fn terminal_settlement_error_interrupts_and_conservatively_charges_dispatc
         .unwrap();
     assert_eq!(usage.usage_state, "unknown");
     assert_eq!(usage.accounted_micro_usd, terminal.reservation_micro_usd);
-    assert!(!state
-        .ai_runtime
-        .inputs
-        .lock()
-        .await
-        .contains_key(&job.job_id));
-    assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+    await_worker_released(&state, &job.job_id).await;
 
     sqlx::query("DROP TRIGGER fail_failed_transition")
         .execute(&state.db)
@@ -1102,13 +1090,7 @@ async fn transient_interruption_settlement_error_retries_before_releasing_worker
         .unwrap();
     assert_eq!(usage.usage_state, "unknown");
     assert_eq!(usage.accounted_micro_usd, terminal.reservation_micro_usd);
-    assert!(!state
-        .ai_runtime
-        .inputs
-        .lock()
-        .await
-        .contains_key(&job.job_id));
-    assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+    await_worker_released(&state, &job.job_id).await;
 
     sqlx::query("DROP TRIGGER fail_transient_terminal")
         .execute(&state.db)

@@ -2089,7 +2089,7 @@ mod tests {
     // 冷启动的作品库初始化可能超过只读查询的 2s 期限（见
     // initialization_outlives_query_deadline_without_blocking_other_controls），
     // 满载 runner 上首次 list 拿到 query_timeout 是产品保证内的行为。
-    fn initialized(service: &LibraryService) -> Value {
+    fn initialized(service: &LibraryService, owner: u64) -> Value {
         let deadline = Instant::now() + Duration::from_secs(30);
         for attempt in 0.. {
             let reply = call(
@@ -2099,7 +2099,7 @@ mod tests {
                     "wallpaper.library.list",
                     json!({}),
                 ),
-                0,
+                owner,
             );
             if reply["ok"] == true {
                 return reply;
@@ -2662,7 +2662,7 @@ mod tests {
         use crate::wallpaper::library::{InstallWork, LOCAL_SOURCE};
         let root = tempfileish::temp_dir("service-delete");
         let service = LibraryService::start(root.path().to_path_buf(), probe());
-        initialized(&service);
+        initialized(&service, 0);
         let hash = "a".repeat(64);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (library, package_dir) = runtime.block_on(async {
@@ -2892,12 +2892,7 @@ mod tests {
         service.set_settings_owner(7);
         // The initial maintenance wake holds the content writer; finish it
         // before the one-shot import so it cannot fail with budget_busy.
-        let warm = call(
-            &service,
-            request("raw-warm", "wallpaper.library.list", json!({})),
-            7,
-        );
-        assert_eq!(warm["ok"], true, "{warm}");
+        initialized(&service, 7);
         let maintenance_deadline = Instant::now() + Duration::from_secs(5);
         while !service
             .state
