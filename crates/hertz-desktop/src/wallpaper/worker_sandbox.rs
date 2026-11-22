@@ -3126,7 +3126,15 @@ mod tests {
             unsafe { WaitForSingleObject(fixture.process.0, 3000) },
             WAIT_OBJECT_0
         );
-        assert_eq!(job.active().unwrap(), 1);
+        // 进程句柄先发信号，观察线程随后才记下退出回执；满载 runner 上两者有间隔。
+        let observed_root_exit = Instant::now() + Duration::from_secs(3);
+        while job.active().unwrap() != 1 {
+            assert!(
+                Instant::now() < observed_root_exit,
+                "root exit was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(job
             .wait_observed_exit(Instant::now() + Duration::from_millis(50))
             .is_err());
