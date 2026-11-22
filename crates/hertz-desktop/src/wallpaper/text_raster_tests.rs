@@ -59,7 +59,22 @@ impl Fixture {
         compiled: &CompiledDocument,
         values: &FinalPublicValues,
     ) -> BTreeMap<String, PreparedFont> {
-        let library = Library::open(self.directory.path()).await.unwrap();
+        // Windows 上 close 返回后文件句柄仍可能短暂占用，重开写迁移会报
+        // readonly database；这是释放延迟而不是库损坏，按覆盖期限重试。
+        let mut waited = std::time::Duration::ZERO;
+        let library = loop {
+            match Library::open(self.directory.path()).await {
+                Ok(library) => break library,
+                Err(error)
+                    if error.message.contains("readonly database")
+                        && waited < std::time::Duration::from_secs(60) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    waited += std::time::Duration::from_millis(10);
+                }
+                Err(error) => panic!("reopen library: {error:?}"),
+            }
+        };
         let probe = ProbeClient::testing_input(|input, _| {
             assert!(matches!(input, ProbeInput::Font(_)));
             Box::pin(async { Ok(()) })
