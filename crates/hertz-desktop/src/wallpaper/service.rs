@@ -2160,6 +2160,7 @@ mod tests {
             0,
         );
         assert_eq!(pick["error"]["code"], "settings_session_required");
+        initialized(&service, 0);
         let unknown = call(
             &service,
             request(
