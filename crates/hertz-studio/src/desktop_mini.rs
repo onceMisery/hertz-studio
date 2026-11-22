@@ -302,7 +302,7 @@ fn control_stale() -> ApiError {
 pub(crate) async fn request_restore(state: &Arc<AppState>) -> Result<bool, ApiError> {
     let window = state.native_window.get();
     if let Some(window) = window {
-        let _ = window.request_focus(&state.server_instance_id());
+        let _ = window.request_focus(state.server_instance_id());
     }
     crate::routes::broadcast_ui_notice(state, "expand-capsule").await?;
     Ok(window.is_some())
