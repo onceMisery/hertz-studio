@@ -319,6 +319,24 @@ html[data-skin="hertz"] #np-modal .np-footer { grid-column: 2; grid-row: 3; disp
 html[data-skin="hertz"] #np-modal .np-progress { grid-column: 1; grid-row: 1; justify-self: stretch; }
 html[data-skin="hertz"] #np-modal .np-transport { grid-column: 1; grid-row: 2; justify-content: center; gap: 20px; }
 html[data-skin="hertz"] #np-modal .np-volume { grid-column: 1; grid-row: 3; justify-self: center; align-self: center; width: min(100%, 280px); }
+/* 歌词视图：音量收进播控同一行的右端，用竖向弹层代替常驻横条；
+   页脚从三行回到两行，省下的高度直接给歌词。封面视图保持原来的三行。 */
+html[data-skin="hertz"] #np-modal .np-volume-inline { display: none; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-footer { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px 0; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-progress { grid-column: 1 / -1; grid-row: 1; justify-self: stretch; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-transport { grid-column: 2; grid-row: 2; }
+html[data-skin="hertz"] #np-modal.np-modal[data-view="lyrics"] .np-volume { display: none; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-volume-inline {
+  display: flex;
+  grid-column: 3;
+  grid-row: 2;
+  justify-self: end;
+  align-self: center;
+  width: 44px;
+  min-width: 44px;
+}
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-volume-inline .hz-volume-button { width: 44px; height: 44px; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-volume-inline .hz-volume-button svg { width: 22px; height: 22px; }
 html[data-skin="hertz"] #np-modal .np-ctrl-primary { width: 66px; height: 66px; }
 html[data-skin="hertz"] #np-modal .np-reading { grid-column: 2; grid-row: 4; height: 120px; align-self: start; margin-top: 12px; }
 html[data-skin="hertz"] #np-modal[data-view="cover"] .np-line { font: 22px/1.6 var(--hz-heading); padding-block: 8px; }
@@ -476,6 +494,9 @@ html[data-skin="hertz"] body.room-view .hz-mobile-nav, html[data-skin="hertz"] b
   html[data-skin="hertz"] #np-modal .np-footer { display: flex; flex-direction: column; flex: 0 0 auto; gap: 10px; }
   html[data-skin="hertz"] #np-modal .np-transport { grid-column: auto; grid-row: auto; gap: 12px; }
   html[data-skin="hertz"] #np-modal .np-volume { grid-column: auto; grid-row: auto; width: min(100%, 260px); justify-self: center; align-self: center; }
+  /* 窄屏保持常驻横条：播控行只剩一条，再塞一颗 44px 音量键会挤掉上一首/下一首。 */
+  html[data-skin="hertz"] #np-modal.np-modal[data-view="lyrics"] .np-volume { display: flex; }
+  html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-volume-inline { display: none; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-now { display: flex; flex: 0 0 58px; flex-direction: row; gap: 12px; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-art { width: 48px; height: 48px; border-radius: 7px; align-self: center; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-meta { flex: 1; }

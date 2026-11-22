@@ -115,9 +115,11 @@
       node.addEventListener('pointerleave', function () { deferClose(control); });
       node.addEventListener('focusout', function () { deferClose(control); });
     });
+    return control;
   }
-  // 横向内联变体（np-modal 播放页）：静音键 + 常驻横向滑条直接摆在宿主里，
-  // 不注入竖向弹出面板——播放页的页脚有它自己的栅格位置（transport 右端）。
+  // 横向内联变体（np-modal 封面视图）：静音键 + 常驻横向滑条直接摆在宿主里，
+  // 不注入竖向弹出面板——页脚在封面视图本来就有单独一行给音量。
+  // 歌词视图另走 mount('np-volume-lyrics') 的竖向弹层，把这一行省给歌词。
   // 其余表面积（底栏 / 声场）空间紧凑，继续用「图标 + 竖向弹出」。
   function mountInline(id, muteId) {
     var range = document.getElementById(id); if (!range) return;
@@ -149,6 +151,27 @@
   }
   function init() {
     mount('volume'); mountInline('np-volume', 'np-mute'); mount('s3d-volume'); mountSpace();
+    // 歌词视图的竖向音量：复用播放页那个 canonical range 的提交链路。
+    // 自己只负责显示与弹层，input 转发给 #np-volume，避免出现第二条音量写路径。
+    var lyrics = mount('np-volume-lyrics');
+    var source = document.getElementById('np-volume');
+    if (lyrics && source) {
+      lyrics.range.addEventListener('input', function () {
+        if (source.value !== lyrics.range.value) {
+          source.value = lyrics.range.value;
+          source.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        paint(lyrics, lyrics.range.value);
+      });
+      source.addEventListener('input', function () { paint(lyrics, source.value); });
+      var modal = document.getElementById('np-modal');
+      if (modal && typeof MutationObserver === 'function') {
+        new MutationObserver(function () {
+          if (modal.dataset.view === 'lyrics') paint(lyrics, source.value);
+        }).observe(modal, { attributes: true, attributeFilter: ['data-view'] });
+      }
+      paint(lyrics, source.value);
+    }
     document.addEventListener('pointerdown', function (event) {
       if (opened && !opened.panel.contains(event.target) && !opened.trigger.contains(event.target)) close(false);
     }, true);
@@ -170,7 +193,7 @@
     });
     ['playback-bar', 'np-modal', 'stage3d'].forEach(function (id) {
       var surface = document.getElementById(id);
-      if (surface) surfaceObserver.observe(surface, { attributes: true, attributeFilter: ['inert', 'hidden', 'aria-hidden'] });
+      if (surface) surfaceObserver.observe(surface, { attributes: true, attributeFilter: ['inert', 'hidden', 'aria-hidden', 'data-view'] });
     });
     window.addEventListener('resize', function () {
       if (opened) place(opened);

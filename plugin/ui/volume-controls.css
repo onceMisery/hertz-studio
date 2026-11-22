@@ -1,5 +1,5 @@
 /* Original range inputs, presented as compact vertical controls on every surface.
-   np-modal 播放页除外：它走下面的横向内联变体（.hz-volume-inline）。 */
+   np-modal 封面视图走横向内联变体（.hz-volume-inline）；歌词视图的竖向弹层与这里同源。 */
 html[data-skin="hertz"] .hz-volume-control {
   display: flex; align-items: center; justify-content: center; flex: none;
   width: 40px; min-width: 40px; gap: 0;
