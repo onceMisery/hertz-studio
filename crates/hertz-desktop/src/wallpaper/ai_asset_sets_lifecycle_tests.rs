@@ -49,7 +49,7 @@ async fn submission_pins_live_versions_before_a_delayed_receipt_and_terminal_fai
         .await
         .unwrap();
     sqlx::query("INSERT INTO ai_asset_sets(asset_set_id,service_identity,digest,metadata_json,selections_json,quote_id,request_id,created_at,expires_at) VALUES('set','service',?,'{}','[]','quote','request',1,?)")
-        .bind("a".repeat(64)).bind(now_secs()+1).execute(library.pool()).await.unwrap();
+        .bind("a".repeat(64)).bind(now_secs()+300).execute(library.pool()).await.unwrap();
     sqlx::query("INSERT INTO ai_asset_references VALUES('set','local-source',?)")
         .bind("b".repeat(64))
         .execute(library.pool())

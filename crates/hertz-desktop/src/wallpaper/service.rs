@@ -2086,6 +2086,33 @@ mod tests {
             .unwrap();
         receive.recv_timeout(Duration::from_secs(5)).unwrap()
     }
+    // 冷启动的作品库初始化可能超过只读查询的 2s 期限（见
+    // initialization_outlives_query_deadline_without_blocking_other_controls），
+    // 满载 runner 上首次 list 拿到 query_timeout 是产品保证内的行为。
+    fn initialized(service: &LibraryService) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        for attempt in 0.. {
+            let reply = call(
+                service,
+                request(
+                    &format!("init-{attempt}"),
+                    "wallpaper.library.list",
+                    json!({}),
+                ),
+                0,
+            );
+            if reply["ok"] == true {
+                return reply;
+            }
+            assert_eq!(
+                reply["error"]["code"], "query_timeout",
+                "初始化作品库: {reply}"
+            );
+            assert!(Instant::now() < deadline, "初始化作品库超时: {reply}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        unreachable!()
+    }
     fn inspect_until_ready(service: &LibraryService, request: Request) -> Value {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -2635,12 +2662,7 @@ mod tests {
         use crate::wallpaper::library::{InstallWork, LOCAL_SOURCE};
         let root = tempfileish::temp_dir("service-delete");
         let service = LibraryService::start(root.path().to_path_buf(), probe());
-        let list = call(
-            &service,
-            request("list", "wallpaper.library.list", json!({})),
-            0,
-        );
-        assert_eq!(list["ok"], true, "初始化作品库");
+        initialized(&service);
         let hash = "a".repeat(64);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (library, package_dir) = runtime.block_on(async {
