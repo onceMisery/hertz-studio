@@ -716,7 +716,7 @@ mod tests {
         // worker. Wait for actual pool accounting before deleting Windows DB files.
         // Poll on a timer instead of yield_now: with the suite's parallelism, cooperating
         // spinners starve the closer future on a small runner, so no deadline would hold.
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             while db.size() != 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

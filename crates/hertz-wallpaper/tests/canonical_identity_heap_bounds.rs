@@ -528,6 +528,9 @@ fn canonical_identity_envelope_and_bottom_cancellation() {
             "--exact",
             "cold_preopening_query_does_not_initialize_catalog",
             "--nocapture",
+            // Run the witness on the main libtest thread: a spawned test thread can
+            // allocate (TLS/stack metadata) inside the metered window on macOS.
+            "--test-threads=1",
         ])
         .env("HERTZ_CANONICAL_HEAP_COLD", "1")
         .output()
