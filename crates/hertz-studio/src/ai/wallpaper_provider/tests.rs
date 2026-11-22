@@ -377,13 +377,17 @@ async fn wallpaper_cancellation_drops_the_in_flight_connection_during_send_and_b
                     .unwrap();
             }
             started_tx.send(()).unwrap();
-            assert_eq!(
-                tokio::time::timeout(Duration::from_secs(2), socket.read(&mut chunk))
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                0
-            );
+            // 取消时客户端可能发 FIN 也可能直接 RST（macOS 上实测为
+            // ConnectionReset），两者都算连接已被丢弃；只有读到字节才是失败。
+            match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut chunk)).await {
+                Ok(Ok(0)) => {}
+                Ok(Err(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) => {}
+                other => panic!("cancelled request must close the connection: {other:?}"),
+            }
         });
         let input = input("coast");
         let (sender, receiver) = tokio::sync::watch::channel(());
