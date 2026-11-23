@@ -123,10 +123,23 @@ function Restore-HertzInstallation([string]$Installation, [bool]$Development, [s
     $original = Read-HertzPackage $backup $Development
     # Originals are retained until *every* restored file verifies. If another
     # program blocks recovery, leave the marker and complete backups in place.
+    # Windows can briefly retain a sharing lock or mapped section on a newly
+    # replaced executable. Wait at most two seconds across these violations while retaining
+    # the installation writer; persistent occupancy still requires explicit retry.
+    $sharingWait = [Diagnostics.Stopwatch]::new()
     foreach ($name in $original.Names) {
         $destination = Join-Path $Installation $name
         if (Test-Path -LiteralPath $destination) { $null = Assert-HertzFile $destination }
-        [IO.File]::Copy((Join-Path $backup $name), $destination, $true)
+        while ($true) {
+            try { [IO.File]::Copy((Join-Path $backup $name), $destination, $true); break }
+            catch {
+                $cause = $_.Exception.GetBaseException()
+                if (($cause.HResult -band 0xffff) -notin @(32, 33, 1224)) { throw }
+                if (-not $sharingWait.IsRunning) { $sharingWait.Start() }
+                if ($sharingWait.ElapsedMilliseconds -ge 2000) { throw }
+                Start-Sleep -Milliseconds 50
+            }
+        }
     }
     $null = Read-HertzPackage $Installation $Development $true
     if ((Get-HertzHash (Join-Path $Installation 'standalone-build.json')) -cne $journal.backupManifestSha256) { throw 'Restored manifest mismatch.' }

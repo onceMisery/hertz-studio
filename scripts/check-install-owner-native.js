@@ -58,6 +58,23 @@ async function hold(file, exclusive = true) {
   await until(() => { assert.equal(holder.exitCode, null, holder.err); return holder.out.includes('HELD'); }, 'external handle'); return holder;
 }
 async function release(holder) { holder.stdin.end('\n'); await exited(holder); assert.equal(holder.exitCode, 0, holder.err); }
+async function holdMapped(file, backup, releaseGate) {
+  const holder = child(ps, ['-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop"; '
+    + '$stream=[IO.FileStream]::new($env:HERTZ_MAPPED_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)); '
+    + '$mapping=$null; $view=$null; try { '
+    + '$mapping=[IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile($stream,[System.Management.Automation.Language.NullString]::Value,0,[IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read,[IO.HandleInheritability]::None,$true); '
+    + '$view=$mapping.CreateViewAccessor(0,0,[IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read); '
+    + '$denied=$false; try {[IO.File]::Copy($env:HERTZ_MAPPED_BACKUP,$env:HERTZ_MAPPED_FILE,$true)} catch { '
+    + '$code=$_.Exception.GetBaseException().HResult -band 0xffff; if($code -ne 1224){throw}; $denied=$true }; '
+    + 'if(-not $denied){throw "Mapping did not block overwrite"}; Write-Output "MAPPED:1224"; '
+    + 'if($env:HERTZ_MAPPING_GATE){$wait=[Diagnostics.Stopwatch]::StartNew(); while(-not [IO.File]::Exists($env:HERTZ_MAPPING_GATE)){ '
+    + 'if($wait.ElapsedMilliseconds -gt 30000){throw "Recovery never reached mapped destination"}; Start-Sleep -Milliseconds 30 }; Start-Sleep -Milliseconds 350 '
+    + '} else {[Console]::ReadLine() | Out-Null} '
+    + '} finally {if($null -ne $view){$view.Dispose()}; if($null -ne $mapping){$mapping.Dispose()}; $stream.Dispose()}; Write-Output "UNMAPPED"'],
+  { HERTZ_MAPPED_FILE: file, HERTZ_MAPPED_BACKUP: backup, HERTZ_MAPPING_GATE: releaseGate || '' });
+  await until(() => { assert.equal(holder.exitCode, null, holder.err); return holder.out.includes('MAPPED:1224'); }, 'real file mapping blocks overwrite');
+  return holder;
+}
 function update(install, candidate, recover = false) {
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', updater, '-InstallDir', install,
     ...(recover ? ['-Recover'] : ['-Candidate', candidate]), ...(allowDebug ? ['-AllowDebug'] : [])];
@@ -173,8 +190,31 @@ async function main() {
   const recoveryBlocker = await hold(path.join(install, 'NOTICE'), false);
   rejection(() => update(install, undefined, true), /used by another process|使用|进程/i); assert(fs.existsSync(marker));
   assert(fs.existsSync(path.join(install, journal.transaction, 'backup/NOTICE'))); await release(recoveryBlocker);
-  assert.equal(update(install, undefined, true).status, 'restored'); assert.deepEqual(snapshot(install), original);
-  mark('abrupt updater exit blocks business startup; malformed recovery paths reject, blocked recovery preserves originals, explicit retry restores the complete package');
+  const mappingGate = path.join(output, 'release-transient-mapping');
+  const backupExe = path.join(install, journal.transaction, 'backup/hertz-studio.exe');
+  const transientMapping = await holdMapped(installationExe, backupExe, mappingGate);
+  const observedRecovery = '. $env:HERTZ_TEST_UPDATER -InstallDir $env:HERTZ_TEST_INSTALL; '
+    + '$script:originalAssertFile=${function:Assert-HertzFile}; function Assert-HertzFile([string]$Path) { '
+    + '$item=& $script:originalAssertFile $Path; if($Path -ieq $env:HERTZ_MAPPED_FILE){[IO.File]::WriteAllText($env:HERTZ_MAPPING_GATE,"copy reached")}; return $item }; '
+    + 'Invoke-HertzPackageUpdate $env:HERTZ_TEST_INSTALL $null $true ([bool]([int]$env:HERTZ_TEST_DEBUG)) | ConvertTo-Json -Compress';
+  const recovered = JSON.parse(powershell(observedRecovery, { HERTZ_TEST_UPDATER: updater, HERTZ_TEST_INSTALL: install,
+    HERTZ_TEST_DEBUG: allowDebug ? '1' : '0', HERTZ_MAPPED_FILE: installationExe, HERTZ_MAPPING_GATE: mappingGate }));
+  await exited(transientMapping); assert.equal(transientMapping.exitCode, 0, transientMapping.err); assert(transientMapping.out.includes('UNMAPPED'));
+  assert.equal(recovered.status, 'restored'); assert.deepEqual(snapshot(install), original); assert(!fs.existsSync(marker));
+  mark('abrupt updater exit blocks business startup; malformed paths and blocked recovery preserve originals, transient mapped-executable recovery restores the complete package');
+
+  assert.throws(() => injectedCall(injection(true)), error => error.status === 77);
+  const mappedJournalBytes = fs.readFileSync(marker), mappedJournal = JSON.parse(mappedJournalBytes);
+  const mappedBackup = path.join(install, mappedJournal.transaction, 'backup');
+  const backupBeforeMapping = snapshot(mappedBackup);
+  const persistentMapping = await holdMapped(installationExe, path.join(mappedBackup, 'hertz-studio.exe'));
+  const mappingStarted = Date.now();
+  rejection(() => update(install, undefined, true), /user-mapped|用户映射|使用|进程/i);
+  assert(Date.now() - mappingStarted >= 1900, 'Persistent mapping must exhaust the bounded retry budget');
+  assert.deepEqual(fs.readFileSync(marker), mappedJournalBytes); assert.deepEqual(snapshot(mappedBackup), backupBeforeMapping);
+  await release(persistentMapping);
+  assert.equal(update(install, undefined, true).status, 'restored'); assert.deepEqual(snapshot(install), original); assert(!fs.existsSync(marker));
+  mark('persistent mapped-executable occupancy keeps the complete marker/backups; explicit recovery succeeds after unmapping');
 
   assert.equal(update(install, candidate).status, 'updated');
   const expected = { ...originalCandidate, 'user-kept.txt': original['user-kept.txt'] }; assert.deepEqual(snapshot(install), expected);

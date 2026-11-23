@@ -2,6 +2,8 @@
 
 [应用内更新](application-updates.md)新增发布检测与下载入口。其帮助进程仅在准确的原生退出获准、服务正常收尾后调用本更新事务；程序文件替换、writer、恢复标记和备份仍由本文的 owner 管理。本地命令行入口继续独立可用。
 
+恢复已校验备份时，Windows 对新替换文件的短时共享或文件映射占用会在两秒内重试。持续占用或其他写入错误保留原恢复标记与完整备份，供解除占用后显式运行 `-Recover`；重试期间继续持有安装目录 writer。
+
 日期：2026-11-07。范围：A08 的安装目录升级闸门和本地程序文件事务。沿用同进程播放器；用户要求直接实现后验证，不走 TDD。
 
 `install_owner.rs` 在 Windows standalone 的窗口、HTTP 服务或 MCP 适配进程启动前取得程序目录 `hertz-install.lock` 共享读句柄。多个 profile 共享读权限；更新程序使用同文件 `FileShare.None` 独占句柄。任一 reader 未退出时拒绝更新；writer 持有时新 player 在配置/资料/窗口初始化前返回 `install_dir_busy`。文件不能在持有期间删除或改名；系统释放退出/崩溃的句柄。DBX sidecar 使用自己的分发路径，不接 standalone 安装锁。DataDir owner 继续独立管理业务资料。

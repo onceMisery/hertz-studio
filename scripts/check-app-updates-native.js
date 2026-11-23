@@ -232,7 +232,12 @@ async function main() {
   });
   assert.match(failure, /更新包尚未准备好/);
   assert.equal((await parent.api('/v1/window/state')).phase, 'idle');
-  await page.screenshot({ path: path.join(output, 'native-settings.png') });
+  await page.locator('.hertz-startup').waitFor({ state: 'detached', timeout: 20000 });
+  await page.locator('#rail [data-view="settings"]').click();
+  await page.locator('.hz-settings-nav [data-category="tools"]').click();
+  await page.locator('#application-updates').waitFor({ state: 'visible' });
+  assert((await page.locator('#app-update-version').innerText()).includes('独立播放器'));
+  await page.locator('#application-updates').screenshot({ path: path.join(output, 'native-settings.png') });
   mark('real WebView2 ignores forged document IPC and delivers the current native document a failed installation receipt without quitting');
   await page.evaluate(() => window.__hertzWindowHost.requestQuit());
   await until(async () => {
