@@ -345,18 +345,18 @@ html[data-skin="hertz"] #np-modal .np-footer { grid-column: 2; grid-row: 3; disp
 html[data-skin="hertz"] #np-modal .np-progress { grid-column: 1; grid-row: 1; justify-self: stretch; }
 html[data-skin="hertz"] #np-modal .np-transport { grid-column: 1; grid-row: 2; justify-content: center; gap: 20px; }
 html[data-skin="hertz"] #np-modal .np-volume { grid-column: 1; grid-row: 3; justify-self: center; align-self: center; width: min(100%, 280px); }
-/* 歌词视图：音量收进播控同一行的右端，用竖向弹层代替常驻横条；
+/* 歌词视图：音量收进播控右侧（紧挨队列键），用竖向弹层代替常驻横条；
    页脚从三行回到两行，省下的高度直接给歌词。封面视图保持原来的三行。 */
 html[data-skin="hertz"] #np-modal .np-volume-inline { display: none; }
-html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-footer { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px 0; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-footer { grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr); gap: 12px; }
 html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-progress { grid-column: 1 / -1; grid-row: 1; justify-self: stretch; }
-html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-transport { grid-column: 2; grid-row: 2; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-transport { grid-column: 2; grid-row: 2; justify-self: end; }
 html[data-skin="hertz"] #np-modal.np-modal[data-view="lyrics"] .np-volume { display: none; }
 html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-volume-inline {
   display: flex;
   grid-column: 3;
   grid-row: 2;
-  justify-self: end;
+  justify-self: start;
   align-self: center;
   width: 44px;
   min-width: 44px;
