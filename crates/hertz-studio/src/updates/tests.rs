@@ -12,6 +12,20 @@ fn context(distribution: Distribution, edition: &str, target: &str) -> Context {
     }
 }
 
+// Public download gates candidates on being newer than the running build, so
+// fixtures that go through it must track version bumps instead of hardcoding.
+fn future_version() -> String {
+    let mut parts = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap());
+    let (major, minor, patch) = (
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+    );
+    format!("{major}.{minor}.{}", patch + 1)
+}
+
 fn release(tag: &str, names: &[&str]) -> GithubRelease {
     serde_json::from_value(serde_json::json!({
         "tag_name": tag, "name": "Hertz Studio", "body": "更新说明", "draft": false, "prerelease": false,
@@ -714,11 +728,10 @@ async fn shutdown_rejects_new_operations_and_unpolled_downloads_write_nothing() 
         {
             let mut inner = state.updates.lock();
             inner.phase = Phase::Available;
+            let version = future_version();
+            let archive = format!("hertz-studio-{version}-x86_64-pc-windows-msvc.zip");
             inner.candidate = select(
-                vec![release(
-                    "hertz-studio-v0.3.8",
-                    &["hertz-studio-0.3.8-x86_64-pc-windows-msvc.zip"],
-                )],
+                vec![release(&format!("hertz-studio-v{version}"), &[&archive])],
                 &context(Distribution::Standalone, "full", "x86_64-pc-windows-msvc"),
             )
             .unwrap();
