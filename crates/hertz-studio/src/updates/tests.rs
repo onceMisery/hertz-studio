@@ -462,8 +462,15 @@ async fn downloaded_bytes_are_verified_before_preparing_an_install() {
                 checksum_url: None,
             }),
         };
-        let result =
-            download_candidate(&updates, &operation, &candidate, &installation, &stage).await;
+        let result = download_candidate(
+            &updates,
+            &operation,
+            &candidate,
+            &installation,
+            &data,
+            &stage,
+        )
+        .await;
         if valid && expected_size == content.len() as u64 {
             let prepared = result.unwrap();
             assert_eq!(std::fs::read(stage.join("package.zip")).unwrap(), content);
@@ -637,6 +644,7 @@ fn ready_handoff(
     let package = stage.join("package.zip");
     std::fs::write(&package, b"fixture").unwrap();
     let prepared = windows::prepare(
+        &state.data_dir,
         &stage,
         package,
         "a".repeat(64),
@@ -656,7 +664,11 @@ fn ready_handoff(
     inner.phase = Phase::Installing;
     inner.operation_id = Some(operation.clone());
     inner.prepared = Some(prepared);
-    inner.handoff = Some(windows::test_handoff(handoff.clone(), token));
+    inner.handoff = Some(windows::test_handoff(
+        handoff.clone(),
+        state.data_dir.clone(),
+        token,
+    ));
     (operation, stage, handoff)
 }
 
@@ -864,4 +876,34 @@ async fn only_the_exact_approved_quit_commits_the_update() {
         serde_json::from_slice(&std::fs::read(handoff.join("apply.json")).unwrap()).unwrap();
     assert_eq!(approval["token"], ready["token"]);
     finish_install_fixture(state, audio, root).await;
+}
+
+#[cfg(unix)]
+#[test]
+fn links_are_rejected_inside_the_data_directory_but_not_above_it() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("hertz-update-links-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("real")).unwrap();
+    // macOS temp dirs live under the symlinked /var; a user-chosen data dir may
+    // sit behind an alias too. Only components this process owns are checked.
+    symlink(root.join("real"), root.join("alias")).unwrap();
+    let data = root.join("alias/data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::create_dir(root.join("install")).unwrap();
+    let installation = windows::Installation {
+        directory: root.join("install"),
+        kind: InstallKind::Portable,
+    };
+    let stage =
+        windows::create_stage(&data, &installation, &uuid::Uuid::new_v4().to_string()).unwrap();
+    assert!(stage.is_dir());
+
+    std::fs::remove_dir_all(data.join("cache")).unwrap();
+    symlink(root.join("install"), data.join("cache")).unwrap();
+    let error =
+        windows::create_stage(&data, &installation, &uuid::Uuid::new_v4().to_string()).unwrap_err();
+    assert_eq!(error.code, "update_filesystem_failed");
+
+    std::fs::remove_dir_all(&root).unwrap();
 }

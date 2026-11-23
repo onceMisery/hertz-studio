@@ -20,7 +20,7 @@ pub struct InstallResult {
 
 pub(super) fn last_result(data: &Path) -> Option<InstallResult> {
     let root = data.join("cache/updates");
-    safe_directory(&root).ok()?;
+    safe_directory(&root, data).ok()?;
     let value = read_json(&root.join("last-install.json"), 8 * 1024).ok()?;
     let result: InstallResult = serde_json::from_value(value).ok()?;
     (matches!(result.status.as_str(), "updated" | "failed")
@@ -49,7 +49,7 @@ impl Installation {
         }
         let executable = std::env::current_exe().map_err(|_| "无法确认播放器程序目录")?;
         let directory = executable.parent().ok_or("无法确认播放器程序目录")?;
-        safe_directory(directory).map_err(|_| "程序目录包含链接，更新请使用发布页面")?;
+        safe_directory(directory, directory).map_err(|_| "程序目录包含链接，更新请使用发布页面")?;
         let directory =
             normalized(std::fs::canonicalize(directory).map_err(|_| "无法读取程序目录")?);
         let manifest = read_json(&directory.join("standalone-build.json"), 512 * 1024)
@@ -99,15 +99,18 @@ pub(super) struct Prepared {
 #[derive(Debug)]
 pub(super) struct Handoff {
     directory: PathBuf,
+    /// Trusted data directory; links are only rejected from here down.
+    data: PathBuf,
     token: String,
     pub exit_request: Option<String>,
     helper: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 #[cfg(test)]
-pub(super) fn test_handoff(directory: PathBuf, token: String) -> Handoff {
+pub(super) fn test_handoff(directory: PathBuf, data: PathBuf, token: String) -> Handoff {
     Handoff {
         directory,
+        data,
         token,
         exit_request: None,
         helper: std::sync::Mutex::new(None),
@@ -122,9 +125,9 @@ pub(super) fn create_stage(
     let operation = uuid::Uuid::parse_str(operation)
         .map_err(|_| Failure::new("update_path_invalid", "更新操作身份无效"))?
         .to_string();
-    safe_directory(data).map_err(io_failure)?;
-    let cache = ensure_directory(data, "cache").map_err(io_failure)?;
-    let root = ensure_directory(&cache, "updates").map_err(io_failure)?;
+    safe_directory(data, data).map_err(io_failure)?;
+    let cache = ensure_directory(data, "cache", data).map_err(io_failure)?;
+    let root = ensure_directory(&cache, "updates", data).map_err(io_failure)?;
     let root = normalized(std::fs::canonicalize(root).map_err(io_failure)?);
     let install = normalized(std::fs::canonicalize(&installation.directory).map_err(io_failure)?);
     if root.starts_with(&install) || install.starts_with(&root) {
@@ -139,13 +142,14 @@ pub(super) fn create_stage(
 }
 
 pub(super) fn prepare(
+    data: &Path,
     directory: &Path,
     package: PathBuf,
     checksum: String,
     version: String,
     installation: Installation,
 ) -> Result<Prepared, Failure> {
-    safe_directory(directory).map_err(io_failure)?;
+    safe_directory(directory, data).map_err(io_failure)?;
     // Windows PowerShell 5.1 needs a UTF-8 BOM to read the localized messages.
     let mut helper = b"\xef\xbb\xbf".to_vec();
     helper.extend_from_slice(include_bytes!(
@@ -170,7 +174,7 @@ pub(super) fn arm(prepared: &Prepared, state: &AppState) -> Result<Handoff, Fail
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        safe_directory(&prepared.directory).map_err(io_failure)?;
+        safe_directory(&prepared.directory, &state.data_dir).map_err(io_failure)?;
         let file = ordinary_file(&prepared.package).map_err(io_failure)?;
         if file.len() == 0 || file.len() > MAX_PACKAGE_BYTES {
             return Err(Failure::new(
@@ -237,6 +241,7 @@ pub(super) fn arm(prepared: &Prepared, state: &AppState) -> Result<Handoff, Fail
             })?;
         Ok(Handoff {
             directory,
+            data: state.data_dir.clone(),
             token,
             exit_request: None,
             helper: std::sync::Mutex::new(Some(helper)),
@@ -276,7 +281,7 @@ pub(super) fn is_ready(handoff: &Handoff) -> bool {
 }
 
 pub(super) fn commit(handoff: &Handoff) -> Result<(), Failure> {
-    safe_directory(&handoff.directory).map_err(io_failure)?;
+    safe_directory(&handoff.directory, &handoff.data).map_err(io_failure)?;
     let temporary = handoff.directory.join("apply.new");
     let bytes = serde_json::to_vec(&serde_json::json!({ "token": handoff.token }))
         .map_err(|_| Failure::new("update_plan_invalid", "无法确认安装操作"))?;
@@ -286,7 +291,7 @@ pub(super) fn commit(handoff: &Handoff) -> Result<(), Failure> {
 
 pub(super) fn remove_stage(directory: &Path, data: &Path) {
     fn remove(directory: &Path, data: &Path) -> std::io::Result<()> {
-        safe_directory(directory)?;
+        safe_directory(directory, data)?;
         let resolved = normalized(std::fs::canonicalize(directory)?);
         let root = normalized(std::fs::canonicalize(data.join("cache/updates"))?);
         if resolved.parent() != Some(root.as_path())
@@ -321,15 +326,15 @@ pub(super) fn remove_stage(directory: &Path, data: &Path) {
     }
 }
 
-fn ensure_directory(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
-    safe_directory(parent)?;
+fn ensure_directory(parent: &Path, name: &str, root: &Path) -> std::io::Result<PathBuf> {
+    safe_directory(parent, root)?;
     let directory = parent.join(name);
     match std::fs::create_dir(&directory) {
         Ok(()) => (),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
         Err(error) => return Err(error),
     }
-    safe_directory(&directory)?;
+    safe_directory(&directory, root)?;
     Ok(directory)
 }
 
@@ -368,7 +373,11 @@ fn ordinary_file(path: &Path) -> std::io::Result<std::fs::Metadata> {
     Ok(metadata)
 }
 
-fn safe_directory(path: &Path) -> std::io::Result<()> {
+/// Rejects links from `path` down to `root` only. The chain above `root` is the
+/// user's own environment: macOS mounts temp data under symlinked `/var`, and
+/// rejecting those ancestors would block every download without protecting a
+/// path this process owns.
+fn safe_directory(path: &Path, root: &Path) -> std::io::Result<()> {
     for ancestor in path.ancestors() {
         if ancestor.as_os_str().is_empty() {
             continue;
@@ -379,6 +388,9 @@ fn safe_directory(path: &Path) -> std::io::Result<()> {
             return Err(std::io::Error::other(
                 "expected an ordinary update directory",
             ));
+        }
+        if ancestor == root || root.starts_with(ancestor) {
+            break;
         }
     }
     Ok(())

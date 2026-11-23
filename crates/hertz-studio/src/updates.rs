@@ -700,7 +700,7 @@ pub(crate) async fn download(state: &Arc<AppState>) -> ApiResult<Snapshot> {
             biased;
             _ = cancelled.changed() => Err(Failure::new("update_cancelled", "已取消下载")),
             _ = exiting.changed() => Err(Failure::new("update_cancelled", "播放器正在退出")),
-            result = download_candidate(&state_task.updates, &operation, &candidate, &installation, &directory) => result,
+            result = download_candidate(&state_task.updates, &operation, &candidate, &installation, &state_task.data_dir, &directory) => result,
         };
         match result {
             Ok(prepared) => {
@@ -729,6 +729,7 @@ async fn download_candidate(
     operation: &str,
     candidate: &Candidate,
     installation: &windows::Installation,
+    data: &std::path::Path,
     directory: &std::path::Path,
 ) -> Result<windows::Prepared, Failure> {
     let asset = candidate.asset.as_ref().unwrap();
@@ -820,6 +821,7 @@ async fn download_candidate(
         .await
         .map_err(|_| Failure::new("update_write_failed", "更新包保存失败，请重试"))?;
     windows::prepare(
+        data,
         directory,
         package,
         checksum,
