@@ -36,6 +36,8 @@ Host 保存与队列实例绑定的点歌人、成员投票和有界活动投影
 
 2026-11-07 A07 增量实现 `format_mode=fixed/native`，默认 fixed/48 kHz；native 创建必须省略 `sample_rate`。模式在房间生命周期内不变。原生以 seek 后同一解码器的实际 SignalSpec 为准，支持六档率及明确单/双声道，传输双声道 f32；同率沿既有 RenderCore 资格衔接，跨率保留同一个准备源并建立新代，禁止跨率 crossfade。设备会话继续使用原格式和唯一 ScheduledOutput 网格，格式转换与漂移校正合为一次。本增量的[实施与证据](../lan-native-sample-rate.md)按实验性范围记录。
 
+2026-11-23 Q1a 使用共享连续 EQ/前级实现。Producer 的可变 pull 独占滤波历史，原生两份 160 ms 输入历史合计 320 ms，并将增益/混合权重的全部分配字节一起预留在既有 NativePcmBudget。Host 的 MixerTimeline 仍持有共同音效呈现状态；Producer 在 EQ 过渡完成的实际帧边界回执，短源先结束时按真实尾边界处理，不把消息入队时间称为已生效。Receiver 与 PCM 线协议没有因此新增 EQ。详见[Q1a](../audio-quality-q1a.md)，真实跨机/声学资格未扩大。
+
 v3 实现能力与房间必需能力分离。fixed 的 Hello/Plan 形状和三项必需能力保持；native 追加 `native_rate_v1`，在原握手总期限内完成 ack→服务端原子协商→confirmed，客户端收到 confirmed 后才启动音频连接。仅控制成员也完成该确认，未协商会话不能占有音频租约。
 
 Producer 唯一拥有不可变的自然 `epoch_end(E)`，曲目 EOF 不自动封口同率代际。原生最终真实块截短至 E，封口后不接纳同代后继、不继续填零；晚到源只可建立新代。Host 保留代际终点，对曾声明旧代的端点发送 E，并在 Prepare 后重放已知 E。Receiver 保存整数 E 与控制截止 C，分别处理 `min(E,C)` 的旧尾和已提交新代起点；有限真实输入齐全后才补转换前视，没有下一 Plan 也独立排空。未知或冲突终点不能生成样本或播放授权。

@@ -5,6 +5,10 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use vmusic_core::{
     AudioBackend, AudioError, AudioSource, DeviceInfo, DspParams, MediaInfo, NextEvent, NextTrack,
     PrepareResult,
@@ -19,6 +23,7 @@ pub struct CpalBackend {
     device: Option<Device>,
     config: Option<SupportedStreamConfig>,
     stream: Option<Stream>,
+    stream_failed: Arc<AtomicBool>,
 }
 
 impl CpalBackend {
@@ -45,27 +50,40 @@ impl CpalBackend {
             device: Some(device),
             config: Some(config),
             stream: None,
+            stream_failed: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn ensure_stream(&mut self) -> Result<(), AudioError> {
+        if self.stream_failed.load(Ordering::Acquire) {
+            return Err(AudioError::DeviceUnavailable(
+                "音频输出已失效，请重新选择输出设备后播放".into(),
+            ));
+        }
         if self.stream.is_some() {
             return Ok(());
         }
         let device = self.device.as_ref().ok_or_else(no_device)?;
         let config = self.config.as_ref().ok_or_else(no_device)?;
-        let stream = Self::build_stream(device, config, self.renderer.output())?;
-        stream
-            .play()
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
+        let output = self.renderer.prepare_output(self.renderer.format())?;
+        let id = output.id();
+        let failed = Arc::new(AtomicBool::new(false));
+        let stream = Self::build_stream(device, config, output, failed.clone())?;
+        let previous = self.renderer.activate_output(id)?;
+        if let Err(error) = stream.play() {
+            self.renderer.activate_output(previous)?;
+            return Err(AudioError::BackendInit(error.to_string()));
+        }
         self.stream = Some(stream);
+        self.stream_failed = failed;
         Ok(())
     }
 
     fn build_stream(
         device: &Device,
         config: &SupportedStreamConfig,
-        output: RenderOutput,
+        mut output: RenderOutput,
+        failed: Arc<AtomicBool>,
     ) -> Result<Stream, AudioError> {
         let channels = config.channels();
         device
@@ -74,7 +92,10 @@ impl CpalBackend {
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     output.render(data, channels);
                 },
-                |err| tracing::warn!("audio output error: {err}"),
+                move |err| {
+                    failed.store(true, Ordering::Release);
+                    tracing::warn!("audio output error: {err}");
+                },
                 None,
             )
             .map_err(|e| AudioError::BackendInit(e.to_string()))
@@ -109,30 +130,61 @@ impl AudioBackend for CpalBackend {
         };
         self.renderer.validate_format_change(next_format)?;
 
-        let next_stream = if self.stream.is_some() {
-            Some(Self::build_stream(
-                &device,
-                &config,
-                self.renderer.output(),
-            )?)
-        } else {
-            None
-        };
-        if let Some(stream) = &next_stream {
-            if let Some(current) = &self.stream {
+        if let Some(current) = &self.stream {
+            let output = self.renderer.prepare_output(next_format)?;
+            let next_id = output.id();
+            let failed = Arc::new(AtomicBool::new(false));
+            let next_stream = Self::build_stream(&device, &config, output, failed.clone())?;
+            if !self.stream_failed.load(Ordering::Acquire) {
                 current
                     .pause()
                     .map_err(|error| AudioError::BackendInit(error.to_string()))?;
             }
-            if let Err(error) = stream.play() {
-                if let Some(current) = &self.stream {
-                    let _ = current.play();
+            let old_format = self.renderer.format();
+            let previous = match self.renderer.activate_output(0) {
+                Ok(previous) => previous,
+                Err(error) => {
+                    if let Err(restore) = current.play() {
+                        let message = format!("{error}; resume failed: {restore}");
+                        self.stream_failed.store(true, Ordering::Release);
+                        self.renderer.output_failed(message.clone());
+                        return Err(AudioError::BackendInit(message));
+                    }
+                    return Err(error);
                 }
-                return Err(AudioError::BackendInit(error.to_string()));
+            };
+            let start = (|| {
+                self.renderer.set_format(next_format)?;
+                self.renderer.activate_output(next_id)?;
+                next_stream
+                    .play()
+                    .map_err(|error| AudioError::BackendInit(error.to_string()))
+            })();
+            if let Err(error) = start {
+                let restore = (|| {
+                    self.renderer.activate_output(0)?;
+                    self.renderer.set_format(old_format)?;
+                    self.renderer.activate_output(previous)?;
+                    current
+                        .play()
+                        .map_err(|error| AudioError::BackendInit(error.to_string()))
+                })();
+                return Err(match restore {
+                    Ok(()) => error,
+                    Err(restore) => {
+                        let message =
+                            format!("{error}; previous output could not be restored: {restore}");
+                        self.stream_failed.store(true, Ordering::Release);
+                        self.renderer.output_failed(message.clone());
+                        AudioError::BackendInit(message)
+                    }
+                });
             }
+            self.stream = Some(next_stream);
+            self.stream_failed = failed;
+        } else {
+            self.renderer.set_format(next_format)?;
         }
-        self.stream = next_stream;
-        self.renderer.set_format(next_format)?;
         self.device = Some(device);
         self.config = Some(config);
         Ok(())
@@ -166,7 +218,10 @@ impl AudioBackend for CpalBackend {
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), AudioError> {
-        self.renderer.seek(position_ms)
+        let previous = self.renderer.activate_output(0)?;
+        let result = self.renderer.seek(position_ms);
+        self.renderer.activate_output(previous)?;
+        result
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
@@ -175,6 +230,16 @@ impl AudioBackend for CpalBackend {
 
     fn set_dsp(&mut self, params: DspParams) -> Result<(), AudioError> {
         self.renderer.set_dsp(params)
+    }
+
+    fn eq_status(&self) -> Option<vmusic_core::EqStatus> {
+        self.renderer.eq_status().map(|mut status| {
+            if self.stream_failed.load(Ordering::Acquire) {
+                status.state = vmusic_core::EqApplicationState::Unavailable;
+                status.active = false;
+            }
+            status
+        })
     }
 
     fn set_crossfade(&mut self, ms: u64) -> Result<(), AudioError> {
@@ -218,6 +283,15 @@ impl AudioBackend for CpalBackend {
     }
 
     fn maintain(&mut self) {
+        if self.stream_failed.load(Ordering::Acquire)
+            && self
+                .renderer
+                .eq_status()
+                .is_some_and(|status| status.active)
+        {
+            self.renderer
+                .output_failed("音频输出已失效，请重新选择输出设备后播放".into());
+        }
         self.renderer.maintain()
     }
 }

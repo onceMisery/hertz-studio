@@ -16,11 +16,16 @@
 
 资料会员状态 `Unknown / Reported{level}` 只是显示提示，不是授权。保留旧 vip 字段供兼容显示，禁止用它们推断可播音质、有效期或权限。没有权威权益端点之前不建立伪权益缓存或新授权门。
 
+2026-11-23 的 Q1a 增量将固定六段 EQ 历史交给唯一输出消费者。控制侧只发布完整 EQ/前级系数；参数邮箱争用时继续旧处理，首次没有完整参数则不消费 PCM。候选使用有界 deck 原始贡献历史预热，分别按各自前级执行曲目增益 clamp 和 EQ 后再作权重和为 1 的过渡。seek/load/stop 用捕获代际清理不连续历史，暂停与 gapless 保持可恢复历史。设备交接由原适配器撤回旧输出并等待在途回调退出；不可恢复故障暂停而非虚报播放。HTTP/RPC 共用旧键原子保存/下发，采用回执覆盖 EQ/前级，不等同于设备已经呈现。实现和未完成资格见[Q1a](../audio-quality-q1a.md)。
+
 ## 边界与 owner
 
 | 数值 | 现在是多少 | 定义在哪 | 改它要一起改什么 |
 | --- | --- | --- | --- |
 | 暂停/停止短淡出毫秒 | 200 | `crates/vmusic-audio/src/render.rs::FADE_OUT_MS` | transport 时序与回调样本测试，不能随歌曲重叠时长变化 |
+| 固定 EQ 输入历史毫秒 | 160 | `crates/vmusic-audio/src/render/dsp.rs::EQ_HISTORY_MS` | 固定六段历史误差、原生双历史预算和参数采用延迟 |
+| 固定 EQ 过渡毫秒 | 20 | `crates/vmusic-audio/src/render/dsp.rs::EQ_FADE_MS` | 权重和为 1、完整 EQ/前级峰值与房间生效帧 |
+| 每个实际帧最多预热历史帧 | 4 | `crates/vmusic-audio/src/render/dsp.rs::EQ_WARMUP_FRAMES_PER_FRAME` | 回调最坏工作量、追齐时间、首次/过渡零分配 |
 | 在线歌单窗口启用条数 | 120 | `plugin/ui/online-playlist-view.js::WINDOW_THRESHOLD` | 实际 DOM/渲染耗时、末项点击及键盘焦点测试 |
 | 集合续载上限 | 2000 | `crates/hertz-studio/src/collection.rs::LOAD_CAP` | 必须显示容量边界，不能把被截断的集合宣称已全部准备 |
 | 节拍等待重取次数 | 8 | `plugin/ui/stage-cinema.js::WAIT_RETRIES` | 预算不足时无任务事件的恢复路径、换曲作废和到限回退 |
@@ -38,3 +43,4 @@
 - 不许把 Transitioned 与后续 Ended/DecodeError 并发处理：极短或损坏的下一曲可能在同一 actor tick 结束。相同代际的空快照可能是随后解码失败，不能丢掉先发生的切换。
 - 不许让准备缓存被 LRU 删除，或在追加队列后继续播放原先预备的回卷曲。
 - 不许为虚拟列表重新建立曲目 owner；筛选/点击必须使用原始已加载集合和绝对索引。固定队列只改变显示，不发送播放命令。
+- 不许让控制线程持有可变滤波历史或争用时直接输出未滤波 PCM；否则调参会在块之间改变音色。也不许分别过渡 EQ 和前级；两端都不过载的配置可能在中途削波。

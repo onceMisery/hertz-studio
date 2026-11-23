@@ -273,6 +273,7 @@ pub async fn boot(
         cache_max: tokio::sync::Mutex::new(cache_max),
         cache_index,
         dsp: tokio::sync::Mutex::new(dsp_config.clone()),
+        dsp_application_error: tokio::sync::Mutex::new(None),
         auto_failures: Default::default(),
         skip_walk_from: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
@@ -341,7 +342,7 @@ pub async fn boot(
     // 历史自愈：把上一会话退化成平台 id 的在线历史行补回真实元数据（detach）。
     state.spawn_history_repair_sweep();
     // DSP 即时下发（播放时再按曲目追加 track_gain）。
-    let _ = state
+    let dsp_result = state
         .audio
         .set_dsp(vmusic_core::DspParams {
             eq_gains_db: dsp_config.eq_gains_db,
@@ -349,7 +350,11 @@ pub async fn boot(
             track_gain_db: 0.0,
         })
         .await;
-    let _ = state.audio.set_crossfade(dsp_config.crossfade_ms).await;
+    let crossfade_result = state.audio.set_crossfade(dsp_config.crossfade_ms).await;
+    *state.dsp_application_error.lock().await = dsp_result
+        .err()
+        .or_else(|| crossfade_result.err())
+        .map(|error| crate::error::ApiError::from(vmusic_core::CoreError::Audio(error)));
 
     // 凭据迁移：SQLite 旧明文凭据 → 系统钥匙串。失败保留旧数据并记 ERROR。
     let db_handle = state.db.clone();

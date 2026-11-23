@@ -884,8 +884,16 @@ impl Worker {
             };
             let mut samples = vec![0.0; frames * channels];
             let mut retry = false;
+            let mut mix_applied_offset = None;
             if let Some(renderer) = g.renderer.as_mut().filter(|_| !g.ended) {
                 let report = renderer.render_until_transition(&mut samples);
+                if g.pending_mix.is_some()
+                    && renderer.eq_status().is_some_and(|status| {
+                        status.state == vmusic_core::EqApplicationState::Applied
+                    })
+                {
+                    mix_applied_offset = Some(report.eq_applied_frame.unwrap_or(0) as u64);
+                }
                 let next_event = renderer.take_next_event();
                 if let Some(NextEvent::Bypassed { reason, .. }) = &next_event {
                     self.emit(ProducerEvent::Error {
@@ -943,6 +951,11 @@ impl Worker {
                     // Fixed rooms retain legacy idle PCM. Native rooms seal the
                     // real endpoint and stop after their truncated final block.
                     g.ended = true;
+                    // After the real tail, the desired settings govern future
+                    // playback even if this very short source ended mid-fade.
+                    if g.pending_mix.is_some() && mix_applied_offset.is_none() {
+                        mix_applied_offset = Some(report.source_frames as u64);
+                    }
                     if self.format_mode == FormatMode::Native {
                         frames = report.source_frames;
                         samples.truncate(frames * channels);
@@ -957,6 +970,14 @@ impl Worker {
                 }
             }
             if frames == 0 {
+                if mix_applied_offset.is_some() {
+                    if let Some(change) = g.pending_mix.take() {
+                        self.emit(ProducerEvent::MixApplied {
+                            change,
+                            at: g.time(g.frame).ok_or("room timeline overflow")?,
+                        })?;
+                    }
+                }
                 if self.format_mode == FormatMode::Native && g.ended {
                     self.emit(ProducerEvent::EpochEnd {
                         epoch: g.plan.epoch.0,
@@ -989,11 +1010,17 @@ impl Worker {
                 samples,
                 reservation,
             })?;
-            if let Some(change) = g.pending_mix.take() {
-                self.emit(ProducerEvent::MixApplied {
-                    change,
-                    at: g.time(g.frame).ok_or("room timeline overflow")?,
-                })?;
+            if let Some(offset) = mix_applied_offset {
+                if let Some(change) = g.pending_mix.take() {
+                    let frame = g
+                        .frame
+                        .checked_add(offset)
+                        .ok_or("room timeline overflow")?;
+                    self.emit(ProducerEvent::MixApplied {
+                        change,
+                        at: g.time(frame).ok_or("room timeline overflow")?,
+                    })?;
+                }
             }
             g.frame = g
                 .frame

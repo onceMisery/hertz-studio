@@ -46,6 +46,7 @@ pub(crate) mod lyrics_calibration;
 pub mod online;
 mod online_play;
 pub mod persist;
+pub(crate) mod player_dsp;
 pub mod podcasts;
 pub(crate) mod public_net;
 pub mod radio;

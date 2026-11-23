@@ -13,7 +13,8 @@ pub mod model;
 pub mod room;
 
 pub use audio::{
-    AudioBackend, AudioSource, DspParams, MediaInfo, NextEvent, NextTrack, PrepareResult,
+    AudioBackend, AudioSource, DspParams, EqApplicationState, EqStatus, MediaInfo, NextEvent,
+    NextTrack, PrepareResult,
 };
 pub use error::{http_status, AudioError, CoreError, LibraryError, Result, StoreError};
 pub use model::{

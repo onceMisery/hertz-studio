@@ -2208,96 +2208,16 @@ async fn mode(
 
 /// 读取 DSP 设置（EQ/preamp/响度归一化/交叉淡化）。
 async fn get_dsp(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let settings = vmusic_store::settings::get_all(&state.db)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let cfg = crate::state::DspConfig::from_settings(&settings);
-    Ok(Json(
-        serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?,
-    ))
+    Ok(Json(crate::player_dsp::read(&state).await?))
 }
 
-#[derive(Deserialize)]
-pub struct DspUpdate {
-    pub eq_gains_db: Option<[f32; 6]>,
-    pub preamp_db: Option<f32>,
-    /// 响度归一化档位：off / track / album。旧字段名 loudness_norm 不再接受。
-    pub loudness_mode: Option<String>,
-    pub crossfade_ms: Option<u64>,
-}
+pub use crate::player_dsp::DspUpdate;
 
-/// 更新 DSP 设置并即时下发到音频后端；歌曲重叠时长与暂停/停止淡出独立。
 async fn set_dsp(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DspUpdate>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _room_commit = state.play_commit.lock().await;
-    state.require_local_playback()?;
-    let settings = vmusic_store::settings::get_all(&state.db)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let mut cfg = crate::state::DspConfig::from_settings(&settings);
-    if let Some(eq) = body.eq_gains_db {
-        cfg.eq_gains_db = eq;
-        cfg.clamp_eq();
-    }
-    if let Some(pre) = body.preamp_db {
-        cfg.preamp_db = pre.clamp(-24.0, 12.0);
-    }
-    if let Some(mode) = &body.loudness_mode {
-        if !matches!(mode.as_str(), "off" | "track" | "album") {
-            return Err(bad_request("loudness_mode 只接受 off / track / album"));
-        }
-        cfg.loudness_mode = mode.clone();
-    }
-    if let Some(ms) = body.crossfade_ms {
-        cfg.crossfade_ms = ms.min(8000);
-    }
-    let eq_json = serde_json::json!(cfg.eq_gains_db);
-    vmusic_store::settings::set(&state.db, "dsp_eq", &eq_json)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    for (key, value) in [
-        ("dsp_preamp", serde_json::json!(cfg.preamp_db)),
-        ("dsp_loudness_mode", serde_json::json!(cfg.loudness_mode)),
-        ("dsp_crossfade_ms", serde_json::json!(cfg.crossfade_ms)),
-    ] {
-        vmusic_store::settings::set(&state.db, key, &value)
-            .await
-            .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    }
-    // 即时生效：EQ/增益走 set_dsp，交叉淡化走 set_crossfade。
-    //
-    // 内存里的 DspConfig 也要一起换：播放落地（play_local / play_online）读的是
-    // 它。不换的话「改设置那一首」按新档位下了增益，下一首又从启动时的旧档位
-    // 重算回去，看起来就是响度归一化只在改设置那一下生效。
-    *state.dsp.lock().await = cfg.clone();
-    let track_gain = if cfg.loudness_enabled() {
-        state
-            .current_loudness(&cfg.loudness_mode)
-            .await
-            .map(|(gain, _)| gain)
-            .unwrap_or(0.0) as f32
-    } else {
-        0.0
-    };
-    state
-        .audio
-        .set_dsp(vmusic_core::DspParams {
-            eq_gains_db: cfg.eq_gains_db,
-            preamp_db: cfg.preamp_db,
-            track_gain_db: track_gain,
-        })
-        .await
-        .ok();
-    state.audio.set_crossfade(cfg.crossfade_ms).await.ok();
-    {
-        state.cancel_prepared_playback().await;
-    }
-    state.schedule_prepare_next();
-    Ok(Json(
-        serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?,
-    ))
+    Ok(Json(crate::player_dsp::update(&state, body).await?))
 }
 
 async fn devices(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {

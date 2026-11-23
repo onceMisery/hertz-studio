@@ -45,6 +45,11 @@ use vmusic_core::{
     PrepareResult,
 };
 
+mod dsp;
+use dsp::{soft_limit, DspControl, DspRuntime};
+mod output_gate;
+use output_gate::OutputGate;
+
 mod native;
 pub use native::{NativeDecodedFormat, NativePcmBudget, NativePcmReservation, NativePcmUsage};
 
@@ -171,17 +176,12 @@ struct Shared {
     fade_to: AtomicU32,
     fade_frames: AtomicU64,
     fade_done: AtomicU64,
-    /// 解码线程异常早夭标志：仅在「非干净 EOF、非主动 stop」的退出时置位，
-    /// actor 经 take_decode_failure 每 tick 取走（换装淡出窗口除外）。
-    /// DSP：EQ 增益（dB bits × 6）与合成增益（preamp+track，dB bits）。
-    eq_gains: [AtomicU32; 6],
-    dsp_gain_db: AtomicU32,
+    /// Output-domain rate used by transport fades and overlap frame accounting.
     output_rate: AtomicU32,
     /// Requested overlap, also used for the unprepared sequential tail fallback.
     crossfade_ms: AtomicU64,
-    /// 回调线程持有的双二阶滤波器组（含各声道状态）。try_lock 拿不到就跳过
-    /// 本轮回调的 EQ——丢一段滤波远好过音频线程阻塞。
-    filters: Mutex<Option<EqBank>>,
+    dsp: DspControl,
+    output_gate: OutputGate,
 }
 
 impl Shared {
@@ -216,18 +216,10 @@ impl Shared {
             fade_to: AtomicU32::new(1.0f32.to_bits()),
             fade_frames: AtomicU64::new(0),
             fade_done: AtomicU64::new(0),
-            eq_gains: [
-                AtomicU32::new(0.0f32.to_bits()),
-                AtomicU32::new(0.0f32.to_bits()),
-                AtomicU32::new(0.0f32.to_bits()),
-                AtomicU32::new(0.0f32.to_bits()),
-                AtomicU32::new(0.0f32.to_bits()),
-                AtomicU32::new(0.0f32.to_bits()),
-            ],
-            dsp_gain_db: AtomicU32::new(0.0f32.to_bits()),
             output_rate: AtomicU32::new(48_000),
             crossfade_ms: AtomicU64::new(0),
-            filters: Mutex::new(None),
+            dsp: DspControl::new(),
+            output_gate: OutputGate::new(),
         };
         // 回调会 try_lock 的锁，一把都不留地先暖过（含 current deck 的 samples，已在
         // Deck::new 里暖过）。
@@ -235,7 +227,6 @@ impl Shared {
         prime(&shared.next);
         prime(&shared.next_event);
         prime(&shared.tap);
-        prime(&shared.filters);
         shared
     }
 
@@ -382,6 +373,8 @@ impl SpectrumWorkspace {
 /// It has no device dependency; an output consumer supplies the rendering clock.
 pub struct RenderCore {
     shared: Arc<Shared>,
+    dsp: Option<DspRuntime>,
+    next_output_id: u64,
     decoder: Option<(JoinHandle<()>, DecoderCtl)>,
     next_decoder: Option<(JoinHandle<()>, DecoderCtl)>,
     output_rate: u32,
@@ -411,6 +404,8 @@ pub struct RenderCore {
 pub struct RenderReport {
     pub source_frames: usize,
     pub transition_frame: Option<usize>,
+    /// First boundary at which the requested EQ transition has completed.
+    pub eq_applied_frame: Option<usize>,
     pub contended: bool,
 }
 
@@ -436,11 +431,24 @@ impl RenderFormat {
 /// The device adapter supplies its validated channel count during stream changes.
 pub(crate) struct RenderOutput {
     shared: Arc<Shared>,
+    dsp: DspRuntime,
+    id: u64,
 }
 
 impl RenderOutput {
-    pub(crate) fn render(&self, data: &mut [f32], channels: u16) {
-        write_samples(data, &self.shared, channels as usize);
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn render(&mut self, data: &mut [f32], channels: u16) {
+        let Some(claim) = self.shared.output_gate.enter(self.id) else {
+            data.fill(0.0);
+            return;
+        };
+        write_samples(data, &self.shared, channels as usize, &mut self.dsp);
+        if !claim.is_current() {
+            data.fill(0.0);
+        }
     }
 }
 
@@ -664,6 +672,11 @@ impl RenderCore {
         let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
         let mut renderer = Self {
             shared: Arc::new(Shared::with_sleep_deadline(sleep_deadline)),
+            dsp: Some(DspRuntime::new(
+                format.sample_rate,
+                format.channels as usize,
+            )),
+            next_output_id: 0,
             decoder: None,
             next_decoder: None,
             output_rate: format.sample_rate,
@@ -682,7 +695,7 @@ impl RenderCore {
             pending_load: None,
             native_budget: None,
         };
-        renderer.sync_dsp_context();
+        renderer.sync_dsp_context()?;
         Ok(renderer)
     }
 
@@ -699,6 +712,8 @@ impl RenderCore {
         let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
         let mut renderer = Self {
             shared: Arc::new(Shared::with_deck(None, deck)),
+            dsp: Some(DspRuntime::new_native(format.sample_rate, &budget)?),
+            next_output_id: 0,
             decoder: None,
             next_decoder: None,
             output_rate: format.sample_rate,
@@ -717,7 +732,7 @@ impl RenderCore {
             pending_load: None,
             native_budget: Some(budget),
         };
-        renderer.sync_dsp_context();
+        renderer.sync_dsp_context()?;
         Ok(renderer)
     }
 
@@ -725,18 +740,26 @@ impl RenderCore {
     /// Paused output and underruns are silent. This never allocates, deallocates
     /// or waits for a lock. Only one output consumer may pull this timeline.
     /// Only complete frames consume PCM; any incomplete trailing frame is silent.
-    pub fn render(&self, data: &mut [f32]) {
+    pub fn render(&mut self, data: &mut [f32]) {
         self.render_report(data);
     }
 
-    pub fn render_report(&self, data: &mut [f32]) -> RenderReport {
-        write_samples(data, &self.shared, self.output_channels as usize)
+    pub fn render_report(&mut self, data: &mut [f32]) -> RenderReport {
+        let Some(dsp) = self.dsp.as_mut() else {
+            data.fill(0.0);
+            return RenderReport::default();
+        };
+        write_samples(data, &self.shared, self.output_channels as usize, dsp)
     }
 
     /// Stops immediately after a deck promotion. Only `source_frames` are output;
     /// callers discard the silent tail and prepare the next deck before pulling.
-    pub fn render_until_transition(&self, data: &mut [f32]) -> RenderReport {
-        write_samples_mode(data, &self.shared, self.output_channels as usize, true)
+    pub fn render_until_transition(&mut self, data: &mut [f32]) -> RenderReport {
+        let Some(dsp) = self.dsp.as_mut() else {
+            data.fill(0.0);
+            return RenderReport::default();
+        };
+        write_samples_mode(data, &self.shared, self.output_channels as usize, true, dsp)
     }
 
     /// Worker-side readiness probe; never call from a realtime callback.
@@ -778,10 +801,46 @@ impl RenderCore {
             .load(Ordering::Relaxed)
     }
 
-    pub(crate) fn output(&self) -> RenderOutput {
-        RenderOutput {
+    pub(crate) fn prepare_output(
+        &mut self,
+        format: RenderFormat,
+    ) -> Result<RenderOutput, AudioError> {
+        self.validate_format_change(format)?;
+        let id = self
+            .next_output_id
+            .checked_add(1)
+            .ok_or_else(|| AudioError::BackendInit("output generation exhausted".into()))?;
+        self.next_output_id = id;
+        let dsp = if format == self.format() {
+            self.dsp.take()
+        } else {
+            None
+        };
+        Ok(RenderOutput {
             shared: self.shared.clone(),
-        }
+            dsp: dsp
+                .unwrap_or_else(|| DspRuntime::new(format.sample_rate, format.channels as usize)),
+            id,
+        })
+    }
+
+    pub(crate) fn activate_output(&self, id: u64) -> Result<u64, AudioError> {
+        let previous = self.shared.output_gate.activate(id)?;
+        self.shared.dsp.applied_revision.store(0, Ordering::Release);
+        Ok(previous)
+    }
+
+    pub(crate) fn output_failed(&mut self, message: String) {
+        self.shared.playing.store(false, Ordering::Release);
+        self.shared.dsp.applied_revision.store(0, Ordering::Release);
+        self.transport_error = Some(AudioError::BackendInit(message));
+    }
+
+    #[cfg(test)]
+    fn output(&mut self) -> RenderOutput {
+        let output = self.prepare_output(self.format()).unwrap();
+        self.activate_output(output.id()).unwrap();
+        output
     }
 
     pub(crate) fn validate_format_change(&self, format: RenderFormat) -> Result<(), AudioError> {
@@ -809,29 +868,25 @@ impl RenderCore {
         self.validate_format_change(format)?;
         self.output_rate = format.sample_rate;
         self.output_channels = format.channels;
-        self.sync_dsp_context();
+        if self.dsp.is_some() {
+            self.dsp = Some(DspRuntime::new(
+                format.sample_rate,
+                format.channels as usize,
+            ));
+        }
+        self.sync_dsp_context()?;
         Ok(())
     }
 
-    /// Rebuild output-domain EQ coefficients on the control thread.
-    fn sync_dsp_context(&mut self) {
+    /// Prepare output-domain EQ coefficients on the control thread.
+    fn sync_dsp_context(&mut self) -> Result<(), AudioError> {
+        self.shared
+            .dsp
+            .publish(self.output_rate, self.shared.dsp.gains())?;
         self.shared
             .output_rate
             .store(self.output_rate, Ordering::Relaxed);
-        let gains = std::array::from_fn(|i| {
-            f32::from_bits(self.shared.eq_gains[i].load(Ordering::Relaxed))
-        });
-        if let Ok(mut filters) = self.shared.filters.lock() {
-            if !filters.as_ref().is_some_and(|bank| {
-                bank.matches(self.output_rate, &gains, self.output_channels as usize)
-            }) {
-                *filters = Some(EqBank::new(
-                    self.output_rate,
-                    gains,
-                    self.output_channels as usize,
-                ));
-            }
-        }
+        Ok(())
     }
 
     fn stop_decoder(&mut self) {
@@ -844,6 +899,7 @@ impl RenderCore {
     fn clear_buffers(&self) {
         if let Ok(mut q) = self.shared.current_deck().samples.lock() {
             q.clear();
+            self.shared.dsp.reset();
         }
         if let Ok(mut t) = self.shared.tap.lock() {
             t.clear();
@@ -1176,145 +1232,6 @@ impl RenderCore {
     }
 }
 
-/// 一个双二阶节（RBJ cookbook peaking EQ）+ 一条声道的历史状态。
-#[derive(Debug, Clone, Copy)]
-struct BiQuad {
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
-    x1: f64,
-    x2: f64,
-    y1: f64,
-    y2: f64,
-}
-
-impl BiQuad {
-    /// RBJ cookbook peaking EQ，系数已按 a0 归一化。
-    fn peaking(center_hz: f32, gain_db: f32, q: f32, rate: u32) -> Self {
-        if gain_db == 0.0 || center_hz >= rate.max(1) as f32 * 0.5 {
-            return Self {
-                b0: 1.0,
-                b1: 0.0,
-                b2: 0.0,
-                a1: 0.0,
-                a2: 0.0,
-                x1: 0.0,
-                x2: 0.0,
-                y1: 0.0,
-                y2: 0.0,
-            };
-        }
-        let big_a = 10f64.powf(gain_db as f64 / 40.0);
-        let w0 = 2.0 * std::f64::consts::PI * center_hz as f64 / rate.max(1) as f64;
-        let alpha = w0.sin() / (2.0 * q as f64);
-        let cos_w0 = w0.cos();
-        let a0 = 1.0 + alpha / big_a;
-        Self {
-            b0: (1.0 + alpha * big_a) / a0,
-            b1: (-2.0 * cos_w0) / a0,
-            b2: (1.0 - alpha * big_a) / a0,
-            a1: (-2.0 * cos_w0) / a0,
-            a2: (1.0 - alpha / big_a) / a0,
-            x1: 0.0,
-            x2: 0.0,
-            y1: 0.0,
-            y2: 0.0,
-        }
-    }
-
-    /// Direct Form I；中性段（增益 0）系数退化为恒等，计算量可忽略。
-    #[inline]
-    fn process(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
-            - self.a1 * self.y1
-            - self.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-}
-
-/// 六段 EQ 滤波器组：系数按 (采样率, 增益) 缓存，状态按声道各一份。
-struct EqBank {
-    rate: u32,
-    gains: [f32; 6],
-    neutral: bool,
-    /// 每声道一份滤波器状态（采样历史），系数同源。
-    states: Vec<[BiQuad; 6]>,
-}
-
-impl EqBank {
-    fn new(rate: u32, gains: [f32; 6], channels: usize) -> Self {
-        let bands: Vec<BiQuad> = EQ_BANDS
-            .iter()
-            .zip(gains.iter())
-            .map(|(&f, &g)| BiQuad::peaking(f, g, 1.2, rate))
-            .collect();
-        let states = (0..channels.max(1))
-            .map(|_| {
-                let mut arr = [BiQuad {
-                    b0: 1.0,
-                    b1: 0.0,
-                    b2: 0.0,
-                    a1: 0.0,
-                    a2: 0.0,
-                    x1: 0.0,
-                    x2: 0.0,
-                    y1: 0.0,
-                    y2: 0.0,
-                }; 6];
-                for (a, b) in arr.iter_mut().zip(bands.iter()) {
-                    *a = *b;
-                }
-                arr
-            })
-            .collect();
-        Self {
-            rate,
-            gains,
-            neutral: gains.iter().all(|gain| *gain == 0.0),
-            states,
-        }
-    }
-
-    fn matches(&self, rate: u32, gains: &[f32; 6], channels: usize) -> bool {
-        self.rate == rate && self.gains == *gains && self.states.len() == channels.max(1)
-    }
-
-    #[inline]
-    fn process_frame(&mut self, ch: usize, sample: f32) -> f32 {
-        if self.neutral && sample.is_finite() && self.states[ch][0].y1.is_finite() {
-            // Identity sections have no history-dependent contribution. Preserve
-            // the old chain's +0 result and its non-finite poisoning behavior.
-            return if sample == 0.0 { 0.0 } else { sample };
-        }
-        let mut v = sample as f64;
-        for band in self.states[ch].iter_mut() {
-            v = band.process(v);
-        }
-        v as f32
-    }
-}
-
-/// 软限幅：-ceiling..ceiling 之外平滑压缩，线性段完全透明。
-fn soft_limit(sample: f32, ceiling: f32) -> f32 {
-    if !sample.is_finite() {
-        return 0.0;
-    }
-    let a = sample.abs();
-    if a <= ceiling {
-        sample
-    } else {
-        let over = a - ceiling;
-        let limited = ceiling + over / (1.0 + over);
-        limited.min(1.0) * sample.signum()
-    }
-}
-
 fn overlap_gains(frame: u64, frames: u64) -> (f32, f32) {
     let t = if frames <= 1 {
         1.0
@@ -1333,6 +1250,8 @@ fn render_decks(
     shared: &Shared,
     channels: usize,
     stop_at_transition: bool,
+    dsp: &mut DspRuntime,
+    eq_applied_frame: &mut Option<usize>,
 ) -> (usize, bool, Option<usize>) {
     let Ok(mut prepared) = shared.next.try_lock() else {
         return (0, true, None);
@@ -1356,20 +1275,27 @@ fn render_decks(
         let Ok(mut outgoing) = current.samples.try_lock() else {
             return (copied, true, transition_frame);
         };
-        let preamp = f32::from_bits(shared.dsp_gain_db.load(Ordering::Relaxed));
-        let deck_gain = |deck: &Deck| {
-            let db = f32::from_bits(deck.gain_db.load(Ordering::Relaxed));
-            10.0f32.powf(((preamp + db).clamp(-24.0, 18.0) - preamp) / 20.0)
-        };
-        let outgoing_gain = deck_gain(&current);
+        let outgoing_db = f32::from_bits(current.gain_db.load(Ordering::Relaxed));
         let eof = current.eof.load(Ordering::Acquire);
         let Some(next) = prepared.as_mut() else {
             let count = ((data.len() - copied).min(outgoing.len()) / channels) * channels;
-            for (target, sample) in data[copied..copied + count]
-                .iter_mut()
-                .zip(outgoing.drain(..count))
-            {
-                *target = sample * outgoing_gain;
+            for frame_offset in (0..count).step_by(channels) {
+                let mut old = [0.0; 32];
+                for sample in &mut old[..channels] {
+                    *sample = outgoing.pop_front().unwrap();
+                }
+                let offset = copied + frame_offset;
+                render_dsp_frame(
+                    &mut data[offset..offset + channels],
+                    &old[..channels],
+                    &[0.0; 32][..channels],
+                    [outgoing_db, 0.0],
+                    [1.0, 0.0],
+                    dsp,
+                    shared,
+                    offset / channels,
+                    eq_applied_frame,
+                );
             }
             current
                 .frames_played
@@ -1396,7 +1322,7 @@ fn render_decks(
             });
             continue;
         }
-        let incoming_gain = deck_gain(&next.deck);
+        let incoming_db = f32::from_bits(next.deck.gain_db.load(Ordering::Relaxed));
         let mut promote = false;
         let start_copied = copied;
         let start_mixed = next.mixed_frames;
@@ -1427,15 +1353,27 @@ fn render_decks(
             let (a, b) = next.overlap_frames.map_or((1.0, 0.0), |frames| {
                 overlap_gains(next.mixed_frames, frames)
             });
+            let mut old = [0.0; 32];
+            let mut new = [0.0; 32];
             for channel in 0..channels {
-                let old = outgoing.pop_front().unwrap();
-                let new = if mix {
+                old[channel] = outgoing.pop_front().unwrap();
+                new[channel] = if mix {
                     incoming.pop_front().unwrap()
                 } else {
                     0.0
                 };
-                data[copied + channel] = old * outgoing_gain * a + new * incoming_gain * b;
             }
+            render_dsp_frame(
+                &mut data[copied..copied + channels],
+                &old[..channels],
+                &new[..channels],
+                [outgoing_db, incoming_db],
+                [a, b],
+                dsp,
+                shared,
+                copied / channels,
+                eq_applied_frame,
+            );
             copied += channels;
             if mix {
                 next.mixed_frames += 1;
@@ -1481,14 +1419,56 @@ fn render_decks(
     }
     (copied, false, transition_frame)
 }
-fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) -> RenderReport {
-    write_samples_mode(data, shared, channels, false)
+/// Keep spectrum at its original pre-EQ/pre-preamp seam. The DSP consumes
+/// per-deck contributions once and evaluates each transition branch with that
+/// branch's own preamp-dependent track clamp.
+#[allow(clippy::too_many_arguments)]
+fn render_dsp_frame(
+    output: &mut [f32],
+    old: &[f32],
+    new: &[f32],
+    tracks: [f32; 2],
+    weights: [f32; 2],
+    dsp: &mut DspRuntime,
+    shared: &Shared,
+    frame: usize,
+    applied: &mut Option<usize>,
+) {
+    if shared.tap_enabled && frame % TAP_STRIDE == 0 {
+        if let Ok(mut tap) = shared.tap.try_lock() {
+            let factors = dsp.current_track_factors(tracks);
+            let sum: f32 = old
+                .iter()
+                .zip(new)
+                .map(|(a, b)| *a * factors[0] * weights[0] + *b * factors[1] * weights[1])
+                .sum();
+            if tap.len() >= TAP_LEN {
+                tap.pop_front();
+            }
+            tap.push_back(sum / output.len() as f32);
+        }
+    }
+    let revision = dsp.applied_revision();
+    dsp.process_mix(old, new, tracks, weights, output);
+    if dsp.applied_revision() != revision {
+        *applied = Some(frame + 1);
+    }
+}
+
+fn write_samples(
+    data: &mut [f32],
+    shared: &Shared,
+    channels: usize,
+    dsp: &mut DspRuntime,
+) -> RenderReport {
+    write_samples_mode(data, shared, channels, false, dsp)
 }
 fn write_samples_mode(
     data: &mut [f32],
     shared: &Shared,
     channels: usize,
     stop_at_transition: bool,
+    dsp: &mut DspRuntime,
 ) -> RenderReport {
     let sleep_deadline = shared
         .sleep_deadline
@@ -1521,9 +1501,22 @@ fn write_samples_mode(
         return RenderReport::default();
     }
 
+    let dsp_epoch = shared.dsp.reset_epoch.load(Ordering::Acquire);
+    let previous_eq = dsp.applied_revision();
+    if !dsp.begin_epoch(&shared.dsp, dsp_epoch) {
+        data.fill(0.0);
+        return RenderReport::default();
+    }
+    let mut eq_applied_frame = (dsp.applied_revision() != previous_eq).then_some(0);
     let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-    let (copied, contended, transition_frame) =
-        render_decks(data, shared, channels.max(1), stop_at_transition);
+    let (copied, contended, transition_frame) = render_decks(
+        data,
+        shared,
+        channels.max(1),
+        stop_at_transition,
+        dsp,
+        &mut eq_applied_frame,
+    );
     let data = if stop_at_transition && transition_frame.is_some() {
         let (used, tail) = data.split_at_mut(copied);
         tail.fill(0.0);
@@ -1532,40 +1525,15 @@ fn write_samples_mode(
         data
     };
 
-    // 频谱 tap：淡变前信号（舞台可视化不随淡出塌陷）。cheap, bounded, and
-    // skipped entirely under contention.
-    if shared.tap_enabled {
-        if let Ok(mut tap) = shared.tap.try_lock() {
-            let mut i = 0;
-            while i + channels <= copied {
-                let sum: f32 = data[i..i + channels].iter().sum();
-                if tap.len() >= TAP_LEN {
-                    tap.pop_front();
-                }
-                tap.push_back(sum / channels as f32);
-                i += channels * TAP_STRIDE;
-            }
-        }
+    // The consumer owns filter history; a contended control update keeps the
+    // previous complete filter. Never rebuild coefficients in this callback.
+    if shared.dsp.reset_epoch.load(Ordering::Acquire) != dsp_epoch {
+        data.fill(0.0);
+        return RenderReport::default();
     }
-
-    // DSP 链：EQ（每声道滤波器组）→ 线性增益（用户音量 × 斜坡 × preamp+track）
-    // → 软限幅防削波。actor 预先建立滤波器组；签名不符或 try_lock 失败
-    // 就跳过 EQ，音频线程绝不分配或阻塞。
-    let rate = shared.output_rate.load(Ordering::Relaxed);
-    let mut eq_gains = [0.0f32; 6];
-    for (i, g) in eq_gains.iter_mut().enumerate() {
-        *g = f32::from_bits(shared.eq_gains[i].load(Ordering::Relaxed));
+    if copied == 0 {
+        eq_applied_frame = None;
     }
-    let mut bank_guard = shared.filters.try_lock().ok();
-    if !bank_guard.as_ref().is_some_and(|bank| {
-        bank.as_ref()
-            .is_some_and(|b| b.matches(rate, &eq_gains, channels))
-    }) {
-        // The actor rebuilds coefficients. Never allocate filters in a callback.
-        bank_guard = None;
-    }
-    let dsp_gain =
-        10f64.powf(f32::from_bits(shared.dsp_gain_db.load(Ordering::Relaxed)) as f64 / 20.0) as f32;
 
     // 逐帧乘 用户音量 × 斜坡增益，每帧推进一次斜坡。斜坡状态只在回调末尾
     // 写回原子量，中途不产生跨线程可见的中间态。
@@ -1587,14 +1555,12 @@ fn write_samples_mode(
         for c in 0..channels {
             let idx = f * channels + c;
             let mut sample = data[idx];
-            if let Some(bank) = bank_guard.as_mut() {
-                if let Some(b) = bank.as_mut() {
-                    sample = b.process_frame(c, sample);
-                }
-            }
-            sample = sample * volume * gain * dsp_gain;
+            sample = sample * volume * gain;
             data[idx] = soft_limit(sample, 0.98);
         }
+    }
+    if frames > 0 {
+        dsp.finish_block(&shared.dsp);
     }
     // 缓冲已干而斜坡没走完：尾部淡出按「剩余帧数」武装，但自然 EOF 后缓冲
     // 里的实际帧数受重采样/取整影响未必凑得满斜坡；斜坡只在拷到帧时推进，
@@ -1621,13 +1587,16 @@ fn write_samples_mode(
     // outside the renderer's control, but this block must leave as silence.
     // Retain the entry deadline: pause acknowledgement may let the coordinator
     // clear/rearm the shared gate before this suspended callback returns.
-    if sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured)) {
+    if shared.dsp.reset_epoch.load(Ordering::Acquire) != dsp_epoch
+        || sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured))
+    {
         data.fill(0.0);
         return RenderReport::default();
     }
     RenderReport {
         source_frames: copied / channels,
         transition_frame,
+        eq_applied_frame,
         contended,
     }
 }
@@ -1783,6 +1752,7 @@ impl AudioBackend for RenderCore {
         let position_ms = position_ms.min(self.duration_ms.unwrap_or(u64::MAX));
         let (handle, ctl) = self.decoder.as_ref().ok_or(AudioError::NothingLoaded)?;
         ctl.seek(handle, position_ms, std::time::Duration::from_secs(2))?;
+        self.shared.dsp.reset();
         // 尾段淡出途中 seek：增益正沿尾斜坡滑向 0，而 tail_armed 会阻止
         // 尾部逻辑重新武装——不处理就永远卡在静音。解除门闩，从当前增益
         // 起步装一条 120ms 短回淡（arm_fade 自己读当前 fade_gain 当初值）。
@@ -1807,18 +1777,21 @@ impl AudioBackend for RenderCore {
     }
 
     fn set_dsp(&mut self, params: vmusic_core::DspParams) -> Result<(), AudioError> {
-        for (i, g) in params.eq_gains_db.iter().enumerate() {
-            self.shared.eq_gains[i].store(g.clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
+        if params.eq_gains_db.iter().any(|value| !value.is_finite())
+            || !params.preamp_db.is_finite()
+            || !params.track_gain_db.is_finite()
+        {
+            return Err(AudioError::Other("DSP parameters must be finite".into()));
         }
+        self.shared.dsp.publish_complete(
+            self.output_rate,
+            params.eq_gains_db.map(|gain| gain.clamp(-12.0, 12.0)),
+            params.preamp_db.clamp(-24.0, 12.0),
+        )?;
         self.shared.current_deck().gain_db.store(
             params.track_gain_db.clamp(-24.0, 12.0).to_bits(),
             Ordering::Relaxed,
         );
-        self.shared.dsp_gain_db.store(
-            params.preamp_db.clamp(-24.0, 12.0).to_bits(),
-            Ordering::Relaxed,
-        );
-        self.sync_dsp_context();
         Ok(())
     }
 
@@ -1827,6 +1800,13 @@ impl AudioBackend for RenderCore {
             .crossfade_ms
             .store(ms.min(8000), Ordering::Relaxed);
         Ok(())
+    }
+
+    fn eq_status(&self) -> Option<vmusic_core::EqStatus> {
+        Some(self.shared.dsp.status(
+            self.shared.playing.load(Ordering::Relaxed),
+            self.shared.output_gate.current(),
+        ))
     }
 
     fn prepare_next(&mut self, next: NextTrack) -> Result<PrepareResult, AudioError> {
@@ -2803,7 +2783,7 @@ mod tests {
                 .unwrap();
             wait_for_eof(&renderer);
             renderer.play().unwrap();
-            let callback = renderer.output();
+            let mut callback = renderer.output();
             barriers.nonzero.store(false, Ordering::Release);
             let worker = std::thread::spawn(move || {
                 SLEEP_CALLBACK_BARRIERS.with(|hook| hook.set(Some(barriers)));
@@ -3280,8 +3260,8 @@ mod tests {
         assert_eq!(
             budget.usage(),
             NativePcmUsage {
-                duration_ns: 1_000_000_000,
-                bytes: 2_304_000
+                duration_ns: 1_320_000_000,
+                bytes: 3_287_040
             }
         );
         renderer.shared.playing.store(true, Ordering::Relaxed);
@@ -3289,15 +3269,15 @@ mod tests {
         assert_eq!(renderer.render_report(&mut output).source_frames, 37);
         assert_eq!(
             budget.usage().duration_ns,
-            1_000_000_000,
+            1_320_000_000,
             "draining leaves actual queue allocation and decoder PCM alive"
         );
         renderer.stop_decoder();
         assert_eq!(
             budget.usage(),
             NativePcmUsage {
-                duration_ns: 500_000_000,
-                bytes: 768_000
+                duration_ns: 820_000_000,
+                bytes: 1_751_040
             }
         );
         drop(renderer);
@@ -3366,7 +3346,7 @@ mod tests {
             let held = if byte_pressure {
                 budget.reserve(0, 44_100, 8 * 1024 * 1024 - baseline.bytes)
             } else {
-                budget.reserve(88_200, 44_100, 88_200 * 8)
+                budget.reserve(74_088, 44_100, 74_088 * 8)
             }
             .unwrap();
             let pressured = budget.usage();
@@ -3402,7 +3382,7 @@ mod tests {
     fn native_runtime_shared_pcm_pressure_remains_cancellable() {
         let budget = NativePcmBudget::default();
         let (mut renderer, release) = native_scripted_renderer_at_gate(&budget);
-        let held = budget.reserve(88_200, 44_100, 88_200 * 8).unwrap();
+        let held = budget.reserve(74_088, 44_100, 74_088 * 8).unwrap();
         release.wait();
         std::thread::sleep(std::time::Duration::from_millis(40));
         assert!(!renderer.decoder.as_ref().unwrap().0.is_finished());
@@ -3772,7 +3752,7 @@ mod tests {
             wait_for_eof(&renderer);
             renderer.play().unwrap();
             renderer.render(&mut [0.0; 128]);
-            let output = renderer.output();
+            let mut output = callback.then(|| renderer.output());
             let fade_state = |shared: &Shared| {
                 (
                     shared.fade_gain.load(Ordering::Relaxed),
@@ -3793,7 +3773,7 @@ mod tests {
                     let mut data = [1.0; 1];
                     let (_, memory) = measure_memory(|| {
                         if callback {
-                            output.render(&mut data[..len], 2);
+                            output.as_mut().unwrap().render(&mut data[..len], 2);
                         } else {
                             renderer.render(&mut data[..len]);
                         }
@@ -3812,7 +3792,7 @@ mod tests {
                 }
                 let mut data = [0.0; 128];
                 if callback {
-                    output.render(&mut data, 2);
+                    output.as_mut().unwrap().render(&mut data, 2);
                 } else {
                     renderer.render(&mut data);
                 }
@@ -3839,14 +3819,14 @@ mod tests {
             };
             let mut aligned = make_renderer();
             let mut partial = make_renderer();
-            let aligned_output = aligned.output();
-            let partial_output = partial.output();
+            let mut aligned_output = callback.then(|| aligned.output());
+            let mut partial_output = callback.then(|| partial.output());
             for frames in [1, 64, 1] {
                 let mut aligned_pcm = vec![1.0; frames * 2];
                 let mut partial_pcm = vec![1.0; frames * 2 + 1];
                 if callback {
-                    aligned_output.render(&mut aligned_pcm, 2);
-                    partial_output.render(&mut partial_pcm, 2);
+                    aligned_output.as_mut().unwrap().render(&mut aligned_pcm, 2);
+                    partial_output.as_mut().unwrap().render(&mut partial_pcm, 2);
                 } else {
                     aligned.render(&mut aligned_pcm);
                     partial.render(&mut partial_pcm);
@@ -3896,7 +3876,7 @@ mod tests {
             };
             let mut headless = make_renderer();
             let mut local = make_renderer();
-            let callback = local.output();
+            let mut callback = local.output();
             let mut transitions = [0; 2];
             for block in 0..80 {
                 if block == 3 {
@@ -4056,12 +4036,12 @@ mod tests {
                 .unwrap()
                 .extend([0.25; 8]);
             shared.current_deck().eof.store(true, Ordering::Release);
-            *shared.filters.lock().unwrap() = Some(EqBank::new(8_000, [1.0; 6], 1));
-            for gain in &shared.eq_gains {
-                gain.store(1.0f32.to_bits(), Ordering::Relaxed);
-            }
+            shared.dsp.publish(8_000, [1.0; 6]).unwrap();
             if scenario == "eq-change" {
-                shared.eq_gains[0].store(2.0f32.to_bits(), Ordering::Relaxed);
+                shared
+                    .dsp
+                    .publish(8_000, [2.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+                    .unwrap();
             }
             if ["gapless", "overlap", "failed", "unready"].contains(&scenario) {
                 let samples: &[f32] = if scenario == "unready" {
@@ -4078,10 +4058,12 @@ mod tests {
             // A fresh thread proves that first-use lazy initialization cannot
             // hide an allocation behind a warm-up callback.
             let callback_shared = shared.clone();
+            let mut callback_dsp = DspRuntime::new(8_000, 1);
             let (output, memory) = std::thread::spawn(move || {
                 let mut output = [0.0; 64];
-                let (_, memory) =
-                    measure_memory(|| write_samples(&mut output, &callback_shared, 1));
+                let (_, memory) = measure_memory(|| {
+                    write_samples(&mut output, &callback_shared, 1, &mut callback_dsp)
+                });
                 (output, memory)
             })
             .join()
@@ -4092,6 +4074,103 @@ mod tests {
                 "callback allocations for {scenario}"
             );
             assert!(output.iter().all(|sample| sample.is_finite()));
+        }
+    }
+
+    #[test]
+    fn eq_warmup_fade_and_latest_update_allocate_nothing_on_a_fresh_callback_thread() {
+        let mut renderer = RenderCore::new(RenderFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        })
+        .unwrap();
+        renderer
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .extend([0.01; 40_000]);
+        renderer.shared.playing.store(true, Ordering::Relaxed);
+        let mut output = renderer.output();
+        output.render(&mut [0.0; 16_000], 2);
+        renderer
+            .set_dsp(vmusic_core::DspParams {
+                eq_gains_db: [12.0; 6],
+                ..Default::default()
+            })
+            .unwrap();
+        let shared = renderer.shared.clone();
+        let memory = std::thread::spawn(move || {
+            let mut block = [0.0; 256];
+            let (_, memory) = measure_memory(|| {
+                for _ in 0..32 {
+                    output.render(&mut block, 2);
+                }
+            });
+            (memory, shared.dsp.status(true, output.id()))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(memory.0, CallbackMemory::ZERO);
+        assert_eq!(memory.1.state, vmusic_core::EqApplicationState::Applied);
+    }
+
+    #[test]
+    #[ignore = "release-only full-renderer synthetic timing; no audio device"]
+    fn renderer_quality_probe() {
+        assert!(!cfg!(debug_assertions));
+        for rate in [44_100, 48_000, 96_000] {
+            for frames in [128usize, 512] {
+                let mut renderer = RenderCore::new(RenderFormat {
+                    sample_rate: rate,
+                    channels: 2,
+                })
+                .unwrap();
+                renderer.shared.playing.store(true, Ordering::Relaxed);
+                let mut output = renderer.output();
+                let mut pcm = vec![0.0; frames * 2];
+                let count = (rate as usize * 30).div_ceil(frames);
+                let mut times = Vec::with_capacity(count);
+                for i in 0..count {
+                    if i % 32 == 0 {
+                        let gain = if i % 64 == 0 { 12.0 } else { -12.0 };
+                        renderer
+                            .set_dsp(vmusic_core::DspParams {
+                                eq_gains_db: [gain; 6],
+                                preamp_db: -gain,
+                                track_gain_db: 6.0,
+                            })
+                            .unwrap();
+                    }
+                    renderer
+                        .shared
+                        .current_deck()
+                        .samples
+                        .lock()
+                        .unwrap()
+                        .extend(
+                            (0..frames * 2)
+                                .map(|n| 0.01 * ((i * frames * 2 + n) as f32 * 0.05).sin()),
+                        );
+                    let start = std::time::Instant::now();
+                    output.render(&mut pcm, 2);
+                    times.push(start.elapsed().as_nanos() as u64);
+                }
+                times.sort_unstable();
+                let deadline = frames as f64 * 1e9 / rate as f64;
+                println!(
+                    "RENDER_PROBE {}",
+                    serde_json::json!({
+                        "sampleRate":rate,"channels":2,"blockFrames":frames,"blocks":count,
+                        "p99Ns":times[count*99/100],"maxNs":times.last(),
+                        "deadlineNs":deadline,"overDeadline":times.iter().filter(|n|**n as f64>deadline).count(),
+                        "includes":"output gate, queues, deck gain clamp, tap, DSP warmup/fade, volume, limiter",
+                        "excludes":"decoder thread, OS scheduling priority, real device",
+                        "realSoundCardVerified":false
+                    })
+                );
+            }
         }
     }
 
@@ -4142,12 +4221,14 @@ mod tests {
 
     fn callback_returns_while_locked(shared: &Arc<Shared>, release_lock: impl FnOnce()) {
         let callback_shared = shared.clone();
+        let mut callback_dsp = DspRuntime::new(shared.output_rate.load(Ordering::Relaxed), 1);
         let (output, memory) = probe_while_locked(
             || {},
             move || {
                 let mut output = [0.75; 4];
-                let (_, memory) =
-                    measure_memory(|| write_samples(&mut output, &callback_shared, 1));
+                let (_, memory) = measure_memory(|| {
+                    write_samples(&mut output, &callback_shared, 1, &mut callback_dsp)
+                });
                 (output, memory)
             },
             release_lock,
@@ -4269,7 +4350,7 @@ mod tests {
         assert!(!backend.finished());
         assert!(backend.take_next_event().is_none());
         let mut output = [0.0; 4];
-        write_samples(&mut output, &backend.shared, 1);
+        backend.render_report(&mut output);
         assert_eq!(output, [0.5; 4]);
         assert!(matches!(
             backend.take_next_event(),
@@ -4299,7 +4380,7 @@ mod tests {
                 Arc::downgrade(&backend.shared.current_deck())
             };
             *backend.shared.next.lock().unwrap() = Some(prepared);
-            write_samples(&mut [0.0; 4], &backend.shared, 1);
+            backend.render_report(&mut [0.0; 4]);
             assert!(
                 reclaimed.upgrade().is_some(),
                 "callback freed deck for bypass={bypass}"
@@ -4392,7 +4473,7 @@ mod tests {
         }
     }
 
-    fn decoded_opened_fixture(
+    pub(super) fn decoded_opened_fixture(
         opened: OpenedReader,
         info: MediaInfo,
         output_rate: u32,
@@ -4675,7 +4756,7 @@ mod tests {
         assert_eq!(deck.samples.lock().unwrap().len(), first_segment_len);
     }
 
-    fn wait_for_eof(backend: &RenderCore) {
+    pub(super) fn wait_for_eof(backend: &RenderCore) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !backend.shared.current_deck().eof.load(Ordering::Acquire) {
             assert!(
@@ -4722,7 +4803,7 @@ mod tests {
         wav
     }
 
-    fn open_pcm(samples: &[i16], rate: u32, channels: u16) -> (OpenedReader, MediaInfo) {
+    pub(super) fn open_pcm(samples: &[i16], rate: u32, channels: u16) -> (OpenedReader, MediaInfo) {
         open_media(
             MediaSourceStream::new(
                 Box::new(std::io::Cursor::new(pcm_bytes(samples, rate, channels))),
@@ -4947,7 +5028,7 @@ mod tests {
             assert_eq!(params.padding, padding, "{name} padding");
             assert_eq!(opened.gapless_supported, gapless, "{name} capability");
             assert_eq!(info.sample_rate, Some(44_100));
-            let backend = decoded_opened_fixture(opened, info, 44_100, 1);
+            let mut backend = decoded_opened_fixture(opened, info, 44_100, 1);
             assert_eq!(
                 decoded_samples(&backend).len(),
                 frames,
@@ -4961,7 +5042,7 @@ mod tests {
             // Bypassed formats remain available to ordinary playback.
             backend.shared.playing.store(true, Ordering::Relaxed);
             let mut out = vec![0.0; frames];
-            write_samples(&mut out, &backend.shared, 1);
+            backend.render_report(&mut out);
             assert!(out.iter().all(|sample| sample.is_finite()));
             assert!(
                 out.iter().any(|sample| sample.abs() > 0.1),
@@ -5002,7 +5083,7 @@ mod tests {
             backend.shared.playing.store(true, Ordering::Relaxed);
             let mut out = vec![0.0; expected.len()];
             for block in out.chunks_mut(257) {
-                write_samples(block, &backend.shared, 1);
+                backend.render_report(block);
             }
             for (index, (actual, expected)) in out.iter().zip(expected).enumerate() {
                 assert_eq!(*actual, expected, "{current} -> {next}, sample {index}");
@@ -5060,7 +5141,7 @@ mod tests {
                     .len();
                 let mut out = vec![0.0; outgoing_frames + incoming_frames - 220];
                 backend.shared.playing.store(true, Ordering::Relaxed);
-                write_samples(&mut out, &backend.shared, 1);
+                backend.render_report(&mut out);
                 assert!(out
                     .iter()
                     .all(|sample| sample.is_finite() && sample.abs() <= 1.0));
@@ -5138,7 +5219,7 @@ mod tests {
                 .fade_gain
                 .store(1.0f32.to_bits(), Ordering::Relaxed);
             backend.shared.playing.store(true, Ordering::Relaxed);
-            write_samples(&mut vec![0.0; frames], &backend.shared, 1);
+            backend.render_report(&mut vec![0.0; frames]);
             assert!(matches!(
                 backend.take_next_event(),
                 Some(NextEvent::Transitioned { .. })
@@ -5166,7 +5247,7 @@ mod tests {
         wait_for_prepared(&backend);
         backend.shared.playing.store(true, Ordering::Relaxed);
         let mut out = vec![0.0; 8004];
-        let report = write_samples(&mut out, &backend.shared, 1);
+        let report = backend.render_report(&mut out);
         assert_eq!(report.source_frames, 8004);
         assert_eq!(report.transition_frame, Some(8000));
         for (i, sample) in out[..8000].iter().enumerate() {
@@ -5222,7 +5303,7 @@ mod tests {
             wait_for_prepared(&backend);
             backend.shared.playing.store(true, Ordering::Relaxed);
             let mut out = [0.0; 16];
-            write_samples(&mut out, &backend.shared, 1);
+            backend.render_report(&mut out);
             let (a, b) = overlap_gains(3, 8);
             let expected = soft_limit(0.999 * a + incoming as f32 / 32768.0 * b, 0.98);
             assert!((out[3] - expected).abs() < 1e-6);
@@ -5312,7 +5393,7 @@ mod tests {
         let mut out = vec![0.0; 1600];
         // Deliberately no maintain()/actor ticks between or during these blocks.
         for block in out.chunks_mut(113) {
-            write_samples(block, &backend.shared, 1);
+            backend.render_report(block);
         }
         for index in 0..800 {
             let (a, b) = overlap_gains(index as u64, 800);
@@ -5345,7 +5426,7 @@ mod tests {
             .flag_decode_error();
         backend.shared.playing.store(true, Ordering::Relaxed);
         let mut out = vec![0.0; 8_000];
-        write_samples(&mut out, &backend.shared, 1);
+        backend.render_report(&mut out);
         assert!((out[100] - 100.0 / 32768.0).abs() < 1e-6);
         assert!(backend.finished());
         assert!(!backend.take_decode_failure());
@@ -5374,7 +5455,7 @@ mod tests {
         });
         let current = backend.shared.current_deck();
         backend.shared.playing.store(true, Ordering::Relaxed);
-        write_samples(&mut vec![0.0; 8004], &backend.shared, 1);
+        backend.render_report(&mut vec![0.0; 8004]);
         assert!(Arc::ptr_eq(&current, &backend.shared.current_deck()));
         assert!(backend.finished());
         assert!(matches!(
@@ -5390,7 +5471,7 @@ mod tests {
         prepare_pcm(&mut backend, &[1000; 1000], 8_000, 1, 0);
         wait_for_prepared(&backend);
         backend.shared.playing.store(true, Ordering::Relaxed);
-        write_samples(&mut vec![0.0; 8001], &backend.shared, 1);
+        backend.render_report(&mut vec![0.0; 8001]);
         backend.clear_next();
         assert!(backend.next_decoder.is_some());
         assert!(matches!(
@@ -5541,14 +5622,14 @@ mod tests {
         assert_eq!(backend.position_ms(), 0);
         assert!(!backend.shared.playing.load(Ordering::Relaxed));
         let mut output = [1.0; 128];
-        write_samples(&mut output, &backend.shared, 1);
+        backend.render_report(&mut output);
         assert_eq!(output, [0.0; 128]);
         assert_eq!(
             backend.shared.current_deck().samples.lock().unwrap().len(),
             8_000
         );
         backend.shared.playing.store(true, Ordering::Relaxed);
-        write_samples(&mut output, &backend.shared, 1);
+        backend.render_report(&mut output);
         assert_eq!(backend.position_ms(), 16);
     }
 
@@ -5558,9 +5639,9 @@ mod tests {
         backend.duration_ms = None;
         backend.shared.playing.store(true, Ordering::Relaxed);
         let mut output = vec![0.0; 7_999];
-        write_samples(&mut output, &backend.shared, 1);
+        backend.render_report(&mut output);
         assert!(!backend.finished());
-        write_samples(&mut [0.0], &backend.shared, 1);
+        backend.render_report(&mut [0.0]);
         assert!(backend.finished());
         backend.seek(0).unwrap();
         wait_for_eof(&backend);
@@ -5579,7 +5660,8 @@ mod tests {
             .extend([0.5; 4]);
         shared.volume.store(0.25f32.to_bits(), Ordering::Relaxed);
         let mut output = [0.0; 4];
-        write_samples(&mut output, &shared, 1);
+        let mut fixture_dsp = DspRuntime::new(shared.output_rate.load(Ordering::Relaxed), 1);
+        write_samples(&mut output, &shared, 1, &mut fixture_dsp);
         assert_eq!(output, [0.125; 4]);
     }
 
@@ -5590,7 +5672,7 @@ mod tests {
         backend.shared.playing.store(true, Ordering::Relaxed);
         backend.maintain();
         assert!(!backend.tail_armed);
-        write_samples(&mut vec![0.0; 7_000], &backend.shared, 1);
+        backend.render_report(&mut vec![0.0; 7_000]);
         backend.maintain();
         assert!(backend.tail_armed);
         assert_eq!(backend.shared.fade_frames.load(Ordering::Relaxed), 1_000);
@@ -5607,12 +5689,12 @@ mod tests {
             8_000
         );
         backend.shared.playing.store(true, Ordering::Relaxed);
-        write_samples(&mut vec![0.0; 8_000], &backend.shared, 1);
+        backend.render_report(&mut vec![0.0; 8_000]);
         assert!(backend.finished());
         backend.pause().unwrap();
         backend.seek(637).unwrap();
         wait_for_eof(&backend);
-        write_samples(&mut [0.0; 128], &backend.shared, 1);
+        backend.render_report(&mut [0.0; 128]);
         assert_eq!(backend.position_ms(), 637);
         assert!(!backend.shared.playing.load(Ordering::Relaxed));
     }
@@ -5625,7 +5707,7 @@ mod tests {
         assert!(backend.take_decode_failure());
         assert!(!backend.take_decode_failure());
         let mut output = [1.0; 128];
-        write_samples(&mut output, &backend.shared, 1);
+        backend.render_report(&mut output);
         assert_eq!(output, [0.0; 128]);
         assert_eq!(backend.position_ms(), 0);
         assert!(backend
@@ -5673,7 +5755,8 @@ mod tests {
         }
 
         let mut buf = vec![1.0f32; 8];
-        write_samples(&mut buf, &shared, 2);
+        let mut fixture_dsp = DspRuntime::new(shared.output_rate.load(Ordering::Relaxed), 2);
+        write_samples(&mut buf, &shared, 2, &mut fixture_dsp);
 
         assert!(
             buf.iter().all(|s| *s == 0.0),
@@ -5717,7 +5800,8 @@ mod tests {
             .unwrap()
             .extend([1.0f32; 8]);
         let mut buf = vec![0.0f32; 8];
-        write_samples(&mut buf, &shared, 2);
+        let mut fixture_dsp = DspRuntime::new(shared.output_rate.load(Ordering::Relaxed), 2);
+        write_samples(&mut buf, &shared, 2, &mut fixture_dsp);
         // 淡入起点增益≈0：首帧样本幅值小于末帧。
         assert!(buf[0].abs() < buf[6].abs());
         assert!(buf[0] >= 0.0 && buf[0] < 0.01);
@@ -5750,7 +5834,8 @@ mod tests {
         let mut buf = vec![0.0f32; 4];
 
         // 第一轮回调：拷走仅有的 2 帧，斜坡只推进 2/100。
-        write_samples(&mut buf, &shared, 2);
+        let mut fixture_dsp = DspRuntime::new(shared.output_rate.load(Ordering::Relaxed), 2);
+        write_samples(&mut buf, &shared, 2, &mut fixture_dsp);
         assert!(shared.fade_active(), "斜坡未走完前必须仍处于武装态");
         assert!(
             f32::from_bits(shared.fade_gain.load(Ordering::Relaxed)) < 0.8,
@@ -5758,7 +5843,7 @@ mod tests {
         );
 
         // 缓冲已干：再次回调不允许把斜坡永远卡在半路。
-        write_samples(&mut buf, &shared, 2);
+        write_samples(&mut buf, &shared, 2, &mut fixture_dsp);
         assert!(
             !shared.fade_active(),
             "缓冲干涸时斜坡必须落到终点（否则换装/暂停/停止永久饿死）"
@@ -5884,96 +5969,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod dsp_tests {
-    use super::*;
-
-    #[test]
-    fn eq_pcm_matches_original_filter_chain_across_parameter_switches() {
-        for rate in [8_000, 44_100, 48_000, 192_000] {
-            for gains in [[0.0; 6], [2.0, 0.0, -3.0, 0.0, 4.0, 0.0], [0.0; 6]] {
-                let mut bank = EqBank::new(rate, gains, 2);
-                let mut reference = bank.states.clone();
-                for frame in 0..4096 {
-                    for (ch, channel_reference) in reference.iter_mut().enumerate() {
-                        let sample = match frame % 31 {
-                            0 => -0.0,
-                            1 => f32::from_bits(1),
-                            _ => (frame as f32 * (0.11 + ch as f32 * 0.003)).sin(),
-                        };
-                        let mut expected = sample as f64;
-                        for band in channel_reference {
-                            expected = band.process(expected);
-                        }
-                        assert_eq!(
-                            bank.process_frame(ch, sample).to_bits(),
-                            (expected as f32).to_bits()
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn neutral_eq_preserves_nonfinite_filter_history_semantics() {
-        for invalid in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
-            let mut bank = EqBank::new(48_000, [0.0; 6], 1);
-            let mut reference = bank.states.clone();
-            for sample in [0.5, -0.5, invalid, 0.25, 0.0] {
-                let mut expected = sample as f64;
-                for band in &mut reference[0] {
-                    expected = band.process(expected);
-                }
-                let actual = bank.process_frame(0, sample);
-                assert!(
-                    actual.to_bits() == (expected as f32).to_bits()
-                        || actual.is_nan() && expected.is_nan()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn peaking_filter_zero_gain_is_identity() {
-        let mut q = BiQuad::peaking(1000.0, 0.0, 1.2, 48_000);
-        // 增益 0 时 b0≈1、b1≈-2cos、a1≈-2cos、其余≈0 → 直通（系数误差 < 1e-9）
-        let out = q.process(0.5);
-        assert!((out - 0.5).abs() < 1e-6, "identity violated: {out}");
-    }
-
-    #[test]
-    fn peaking_filter_boosts_band_center() {
-        // +12dB @1kHz：以 1kHz 正弦（数值上直接喂常数不合适，喂极低频近似直流，
-        // 低频段增益应接近 1）。这里直接验证系数能量：中心频率处幅度比 > 1。
-        let q = BiQuad::peaking(1000.0, 12.0, 1.2, 48_000);
-        // 中心频率增益 |b0+b1 z+b2 z²|/|1+a1 z+a2 z²| 在 z=e^{-jw0} 处 ≈ 10^(12/20)
-        // 简化：直接断言 b0 > a0 归一化后的 1（有增益）
-        assert!(q.b0 > 1.0);
-    }
-
-    #[test]
-    fn limiter_is_transparent_below_ceiling_and_caps_above() {
-        for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(soft_limit(nonfinite, 0.98), 0.0);
-        }
-        assert_eq!(soft_limit(0.5, 0.98), 0.5);
-        assert_eq!(soft_limit(-0.5, 0.98), -0.5);
-        let loud = soft_limit(1.5, 0.98);
-        assert!(
-            loud > 0.98 && loud <= 1.0,
-            "soft clip must stay bounded: {loud}"
-        );
-        let neg = soft_limit(-1.5, 0.98);
-        assert!((-1.0..=-0.98).contains(&neg));
-        assert_eq!(soft_limit(2.5, 0.98), 1.0);
-    }
-
-    #[test]
-    fn eq_bank_matches_by_rate_gains_channels() {
-        let bank = EqBank::new(48_000, [0.0; 6], 2);
-        assert!(bank.matches(48_000, &[0.0; 6], 2));
-        assert!(!bank.matches(44_100, &[0.0; 6], 2));
-        assert!(!bank.matches(48_000, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2));
-        assert!(!bank.matches(48_000, &[0.0; 6], 1));
-    }
-}
+mod continuity_tests;

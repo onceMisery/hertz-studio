@@ -52,3 +52,7 @@ required-features = ["playback"]
 [[example]]
 name = "device_clock_probe"
 required-features = ["playback"]
+
+[[example]]
+name = "eq_output_probe"
+required-features = ["playback"]

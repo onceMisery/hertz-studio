@@ -10149,47 +10149,9 @@ async function startApp() {
     };
   }
 
-  // 音效与均衡器：进设置页拉取当前配置回填；保存后立即生效。
-  async function loadDspSettings() {
-    if (!ui.dspEq) return;
-    try {
-      const cfg = await transport.get('/v1/player/dsp');
-      ui.dspEq.querySelectorAll('input[data-band]').forEach((input) => {
-        input.value = cfg.eq_gains_db[Number(input.dataset.band)] || 0;
-      });
-      ui.dspPreamp.value = cfg.preamp_db;
-      // 三档响度：旧后端可能仍回布尔 loudness_norm，true 视作 track。
-      ui.dspLoudness.value = (typeof cfg.loudness_mode === 'string' && cfg.loudness_mode)
-        || (cfg.loudness_norm ? 'track' : 'off');
-      ui.dspCrossfade.value = cfg.crossfade_ms;
-    } catch { /* 设置读取失败不阻塞 */ }
-  }
-  window.__loadDspSettings = loadDspSettings;
-  if (ui.dspSave) {
-    ui.dspSave.onclick = async () => {
-      try {
-        const body = {
-          eq_gains_db: [...ui.dspEq.querySelectorAll('input[data-band]')]
-            .map((i) => Number(i.value)),
-          preamp_db: Number(ui.dspPreamp.value) || 0,
-          loudness_mode: ui.dspLoudness.value || 'off',
-          crossfade_ms: Math.max(0, Number(ui.dspCrossfade.value) || 0),
-        };
-        await transport.post('/v1/player/dsp', body);
-        toast('音效设置已保存');
-      } catch (err) {
-        toast(errText('保存失败', err), 'error');
-      }
-    };
-  }
-  if (ui.dspReset) {
-    ui.dspReset.onclick = () => {
-      ui.dspEq.querySelectorAll('input[data-band]').forEach((i) => { i.value = 0; });
-      ui.dspPreamp.value = 0;
-      ui.dspLoudness.value = 'off';
-      ui.dspCrossfade.value = 0;
-    };
-  }
+  // 音效设置沿用同一服务端入口，由专用控制器管理草稿和采用反馈。
+  const dspSettings = window.HertzDspSettings.init({ transport, toast });
+  window.__loadDspSettings = () => dspSettings && dspSettings.load();
 
   // 数据备份：导出下载 JSON；导入读文件后按幂等语义恢复。
   if (window.UiPreferences && window.UiPreferenceSettings) {

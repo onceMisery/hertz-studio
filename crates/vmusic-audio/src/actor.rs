@@ -117,6 +117,7 @@ enum Command {
     SetVolume(f32, Reply<Result<(), AudioError>>),
     SetDsp(vmusic_core::DspParams, Reply<Result<(), AudioError>>),
     SetCrossfade(u64, Reply<Result<(), AudioError>>),
+    EqStatus(Reply<Option<vmusic_core::EqStatus>>),
     PrepareNext(
         vmusic_core::NextTrack,
         Reply<Result<vmusic_core::PrepareResult, AudioError>>,
@@ -312,6 +313,12 @@ impl AudioHandle {
 
     /// 更新 DSP（EQ/增益）。real-time 链路上原子生效，不中断播放。
     pub async fn set_dsp(&self, params: vmusic_core::DspParams) -> Result<(), AudioError> {
+        if params.eq_gains_db.iter().any(|value| !value.is_finite())
+            || !params.preamp_db.is_finite()
+            || !params.track_gain_db.is_finite()
+        {
+            return Err(AudioError::Other("DSP parameters must be finite".into()));
+        }
         self.ask(|reply| Command::SetDsp(params, reply)).await
     }
 
@@ -383,6 +390,13 @@ impl AudioHandle {
         let (tx, rx) = oneshot::channel();
         self.send(Command::Devices(tx))?;
         Ok(rx.await.unwrap_or_default())
+    }
+
+    pub async fn eq_status(&self) -> Result<Option<vmusic_core::EqStatus>, AudioError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::EqStatus(tx))?;
+        rx.await
+            .map_err(|_| AudioError::Other("audio actor is not running".into()))
     }
 
     pub async fn select_device(&self, id: Option<String>) -> Result<(), AudioError> {
@@ -1090,6 +1104,10 @@ fn apply(
             let result = backend.set_crossfade(ms);
             publish(sink, state);
             let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::EqStatus(reply) => {
+            let _ = reply.send(backend.eq_status());
             Ok(false)
         }
         Command::PrepareNext(next, reply) => {

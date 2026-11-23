@@ -1,0 +1,26 @@
+{
+  "audibleQualityVerified": false,
+  "checks": [
+    "initial deferred",
+    "first PCM acknowledgement",
+    "EQ transition",
+    "pause deferred",
+    "resume",
+    "seek reset",
+    "default device reselect"
+  ],
+  "finalGeneration": "2:3",
+  "firstGeneration": "1:2",
+  "sampleRate": 48000,
+  "silentActualOutputLifecycle": true,
+  "binarySha256": "a58c0befdc04c521100655e232c267336dfedaa0d10026a4830548461ab8c8e8",
+  "sourceIdentityNote": "Source hashes record the working-tree readback at probe capture, before the final render.rs comment cleanup. The binary hash identifies the executed probe; this is not a release receipt.",
+  "sources": {
+    "crates/vmusic-audio/examples/eq_output_probe.rs": "40682d8f467770d3e7369b389c847abfa141230c416fe077cdf46bb960a04b82",
+    "crates/vmusic-audio/src/render.rs": "7a533408c7921a13101e265d6e4c45180edd14e6bcb3a41591725d5d3ab8909f",
+    "crates/vmusic-audio/src/render/dsp.rs": "e41de37da08a0e02dd20911bf8a0b93e325c295d1fa3aa63e83ce7f6ccb8b448",
+    "crates/vmusic-audio/src/render/output_gate.rs": "e3095adf2039dfe25348fad80c29a8d0a8a962d244bc294f548624e047f85b9d",
+    "crates/vmusic-audio/src/cpal_backend.rs": "a8bfa567927d2e24e434ec106632f044453d2897ac5e84e205a87f5900c769f3",
+    "Cargo.lock": "7c631a9882223c53578af4f83b4dd56a57ea003e3cfcd1beb68c05812f5cc86d"
+  }
+}

@@ -72,6 +72,33 @@ pub async fn set(pool: &SqlitePool, key: &str, value: &Value) -> Result<(), Stor
     set_all(pool, &single).await
 }
 
+/// Save a related set of preferences as a unit without changing the legacy keys.
+pub async fn set_atomic(
+    pool: &SqlitePool,
+    values: &BTreeMap<String, Value>,
+) -> Result<(), StoreError> {
+    if values.keys().any(|key| crate::stage_presets::managed(key)) {
+        return Err(StoreError::Serialization(
+            "舞台预设必须通过版本化保存接口修改".into(),
+        ));
+    }
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    for (key, value) in values {
+        let encoded = serde_json::to_string(value)
+            .map_err(|error| StoreError::Serialization(error.to_string()))?;
+        sqlx::query("INSERT INTO settings (key,value,updated_at) VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+            .bind(key).bind(encoded).bind(now_ms()).execute(&mut *transaction).await
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| StoreError::Database(error.to_string()))
+}
+
 pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<Value>, StoreError> {
     let encoded: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
         .bind(key)

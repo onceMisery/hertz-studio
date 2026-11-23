@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-23 [音质增强 Q1a](audio-quality-q1a.md)已实现连续六段 EQ/前级交接、输出消费者独占历史、争用时保持有效处理，以及 HTTP/RPC 统一原子保存和真实采用反馈。原生 Producer 的历史内存纳入原有预算，共同 DSP 回执按实际完成帧映射呈现；设置页保留草稿并区分已保存、待采用与失败。直接实现后回归：音频 187 单元与 7 集成、null 30、Hertz 默认库 955、内嵌资源 1、Chrome 7 组通过；MSRV 与 Full/DBX 编译通过。本机 48 kHz 静音输出生命周期通过，串行合成性能及早期并行超期限记录均已归档。Q0 有声听测、长稳/跨设备资格及 Q1b–Q4 仍未完成，S1/整个音质专项不据此完成。
+
 2026-11-11 [GLB数值互操作](wallpaper-model-resources.md)已在原workspace serde_json配置开启正确舍入；真实16,412节点与JS逐bit一致，新增7项/包242项回归通过，旧4,103样本的1,090差异证据保留。该前置修复不提升原native预算或GPU资格，完整A04/P2、P3/AI/A10及ModelInput/jobs/成本/首帧继续。
 
 2026-11-11 [GLB静态准备事实](wallpaper-model-resources.md)已由原typed owner保留作者scene/node/变换/mode、声明数量与逻辑BIN长度，并以固定状态提取loader pivot和optional null/URI存在标记。nodes.len()取代独立node_count；父关系、原权重与64KiB/hash/layout/skin/动画owner保持。235项包测试（新增事实12）、14项桌面资源及Clippy/格式、loader102、合同/ADR检查通过。该片仅补准备输入事实；原ModelInput/JobSource/完整成本、GPU首帧及A04/P2、P3/AI/A10完整目标继续。

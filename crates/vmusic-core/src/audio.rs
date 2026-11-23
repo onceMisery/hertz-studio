@@ -100,6 +100,29 @@ impl Default for DspParams {
     }
 }
 
+/// Output-consumer acknowledgement for the existing six-band EQ/preamp. This does
+/// not claim device presentation or adoption of future DSP stages.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct EqStatus {
+    pub state: EqApplicationState,
+    pub requested_revision: String,
+    pub applied_revision: Option<String>,
+    pub render_generation: String,
+    pub requested_gains_db: [f32; 6],
+    pub requested_preamp_db: f32,
+    pub processing_rate: u32,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EqApplicationState {
+    Deferred,
+    Applying,
+    Applied,
+    Unavailable,
+}
+
 pub trait AudioBackend {
     fn name(&self) -> &'static str;
 
@@ -131,6 +154,10 @@ pub trait AudioBackend {
     /// 更新 DSP 参数（EQ/增益）。默认忽略：null 后端没有音频链。
     fn set_dsp(&mut self, _params: DspParams) -> Result<(), AudioError> {
         Ok(())
+    }
+
+    fn eq_status(&self) -> Option<EqStatus> {
+        None
     }
 
     /// 可调交叉淡化时长（毫秒）。默认忽略。

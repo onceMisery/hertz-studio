@@ -840,6 +840,7 @@ pub struct AppState {
     pub(crate) protected: Mutex<Vec<String>>,
     /// DSP 设置（EQ/增益/响度归一化/交叉淡化）。
     pub(crate) dsp: Mutex<DspConfig>,
+    pub(crate) dsp_application_error: Mutex<Option<crate::error::ApiError>>,
     /// 用户显式保留的缓存条目（`{stem}.` 前缀，含全部音质档）。启动时从
     /// settings 装载、pin/unpin 即时更新；LRU 回收与手动清理都豁免它。
     pub(crate) keep: Mutex<Vec<String>>,
@@ -5013,6 +5014,7 @@ pub(crate) mod tests {
             downloads: Default::default(),
             protected: Default::default(),
             dsp: Mutex::new(DspConfig::from_settings(&Default::default())),
+            dsp_application_error: Mutex::new(None),
             keep: Default::default(),
             cache_max: Mutex::new(0),
             // 不存在的空目录即可：索引为空，测试都不碰缓存目录（cache_max=0）。
