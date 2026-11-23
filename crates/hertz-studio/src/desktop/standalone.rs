@@ -44,6 +44,8 @@ pub(crate) const CONTROL_COMMANDS: &[&str] = &[
     "profile-switch",
     // 桌面宠物（小窗）与素材目录由宿主在同一进程内执行。
     "mini-toggle",
+    // 幂等的「打开小窗」：主窗口关闭后由原生窗口调入宠物模式。
+    "mini-show",
     "mini-style",
     "open-pet-assets",
 ];

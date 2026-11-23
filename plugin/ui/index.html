@@ -1139,6 +1139,34 @@
     <div class="view" id="view-settings" hidden>
       <div class="col-head"><div class="col-head-left"><h1 class="col-title">设置</h1></div></div>
 
+      <fieldset class="set-group app-updates" id="application-updates">
+        <legend class="set-title">关于与更新</legend>
+        <div class="set-row app-update-heading">
+          <div><strong>Hertz Studio</strong><p class="hint" id="app-update-version">正在读取当前版本</p></div>
+          <button type="button" class="btn" id="app-update-check" disabled>检查更新</button>
+        </div>
+        <p class="app-update-status" id="app-update-status" role="status" aria-live="polite">尚未检查更新</p>
+        <progress class="app-update-progress" id="app-update-progress" aria-label="更新进度" hidden></progress>
+        <p class="hint" id="app-update-transfer" hidden></p>
+        <div class="set-row">
+          <label for="app-update-auto">启动时检查更新</label>
+          <input type="checkbox" role="switch" id="app-update-auto" aria-describedby="app-update-auto-note" disabled>
+        </div>
+        <p class="hint set-note" id="app-update-auto-note">开启后每天最多检查一次，只提示新版本；下载和安装由你决定</p>
+        <div class="app-update-release" id="app-update-release" hidden>
+          <p class="app-update-release-title" id="app-update-release-title"></p>
+          <details class="app-update-notes"><summary>更新说明</summary><pre id="app-update-notes"></pre></details>
+          <p class="hint" id="app-update-install-note"></p>
+          <div class="app-update-actions">
+            <button type="button" class="btn primary" id="app-update-download" hidden>下载更新</button>
+            <button type="button" class="btn primary" id="app-update-install" hidden>安装并重新打开</button>
+            <button type="button" class="btn" id="app-update-cancel" hidden>取消下载</button>
+            <a class="btn" id="app-update-page" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" hidden>发布页面</a>
+            <button type="button" class="btn" id="app-update-copy" hidden>复制下载链接</button>
+          </div>
+        </div>
+      </fieldset>
+
       <div class="set-group hz-appearance" id="hz-appearance">
         <h2 class="set-title">外观</h2>
         <div class="hz-setting-row">
@@ -1962,6 +1990,7 @@
           <select id="window-lifecycle-behavior" aria-describedby="window-lifecycle-setting-status" disabled>
             <option value="quit">退出播放器（默认）</option>
             <option value="hide">隐藏到托盘</option>
+            <option value="mini">最小化到桌面宠物</option>
           </select>
           <p class="hint" id="window-lifecycle-setting-status" role="status">关闭主窗口时退出播放器；选择“隐藏到托盘”后音乐继续播放，可从系统托盘恢复。</p>
           <button type="button" class="btn tiny" id="window-lifecycle-retry" hidden>重新读取</button>
@@ -3045,6 +3074,7 @@
   <p id="window-lifecycle-status" role="status" aria-live="polite"></p>
   <div class="window-lifecycle-actions">
     <button type="button" class="btn" id="window-lifecycle-cancel" autofocus>返回播放器</button>
+    <button type="button" class="btn" id="window-lifecycle-pet">最小化到桌面宠物</button>
     <button type="button" class="btn primary" id="window-lifecycle-approve" disabled>退出播放器</button>
   </div>
 </dialog>
@@ -3054,6 +3084,8 @@
 <script defer data-desktop-feature src="wallpaper-settings.js"></script>
 <!-- form:end -->
 <script defer src="window-lifecycle.js"></script>
+<link rel="stylesheet" href="app-updates.css">
+<script defer src="app-updates.js"></script>
 <script defer src="window-sleep.js"></script>
 <script defer src="volume-controls.js"></script>
 <script defer src="system-media.js"></script>

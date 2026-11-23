@@ -296,6 +296,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     let local = listener.local_addr()?;
     let actual_port = local.port();
+    state.set_update_restart_port(actual_port);
     let native_policy = args.window.then(|| native_http::Policy::new(actual_port));
 
     let app = Router::new()
@@ -462,6 +463,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     shutdown_state.server_instance_id(),
                 );
             }
+            shutdown_state.commit_update_handoff();
             // drain 看门狗：升级过的 `/ws` 连接不属于「会自己结束的 in-flight」，
             // 页面还开着时按退出钮，hyper 能一直等到天荒地老。收尾三步已经做完
             // （声音停了、发现文件删了），所以到点直接结束进程不会留半截状态。

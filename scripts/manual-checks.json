@@ -3,6 +3,14 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-app-updates-browser.js",
+      "purpose": "Chromium 更新设置回归：默认不联网、启动偏好持久与失败恢复、检查/设置/安装互斥、说明文本/链接、下载进度/重试/取消与陈旧状态、原生安装回执、DBX 隔离及窄屏键盘；真实包与原生文档由 check-app-updates-native.js 覆盖。需 Playwright 与 Chrome。"
+    },
+    {
+      "script": "check-app-updates-native.js",
+      "purpose": "隔离的真实 Windows 包/服务/更新 helper：父进程就绪握手、未批准退出与取消不替换、下载/包内校验失败、第二资料目录占用、便携事务成功与数据保留、相同资料/实际端口在绑定冲突下自动重开及真实 WebView2 文档 IPC。开发包需 HERTZ_ALLOW_DEBUG_PACKAGE=1，失败夹具使用 NoRestart/Quiet；NSIS 与实际更高版本正式包另验收。需 Full/native 二进制和 Playwright。"
+    },
+    {
       "script": "check-stage-review-browser.js",
       "purpose": "真实 Chromium：壁纸图片不加载运行时、静止停止提交、尺寸/参数/音频/恢复唤醒、原生质量消费、凤凰按需准备和加载取消。"
     },

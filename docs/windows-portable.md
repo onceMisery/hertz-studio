@@ -12,7 +12,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Launch-Hertz.ps1 -Data
 
 关闭主窗口默认退出播放器（播放中会先显示退出确认）；需要后台播放时可在设置中改为隐藏到托盘，再从托盘“退出 Hertz Studio”正常结束程序。关闭、保存与退出的确认以实际界面为准。再次打开同一资料目录会恢复已有原生窗口；同资料目录的浏览器服务或 DBX 尚未退出时，不能再初始化另一份服务。不同资料目录可以使用同一程序同时运行。
 
-升级前正常退出所有使用旧程序的窗口/服务和适配进程，备份资料，再完整解压新 ZIP 到另一目录。清单含 `windowsInstallGuard: true` 的新安装支持本地程序文件更新：
+完整 release 包可在“设置 → 工具 → 关于与更新”检查并下载更新，校验后点击“安装并重新打开”。返回播放器会取消安装；更新完成后使用同一资料目录重新打开，见[应用内更新](application-updates.md)。手动升级前正常退出所有使用旧程序的窗口/服务和适配进程，备份资料，再完整解压新 ZIP 到另一目录。清单含 `windowsInstallGuard: true` 的新安装支持本地程序文件更新：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'D:\New Hertz\Update-Hertz.ps1' -InstallDir 'D:\Hertz Studio' -Candidate 'D:\New Hertz'
@@ -26,7 +26,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'D:\New Hertz\Update-Her
 
 恢复未成功前播放器会拒绝启动；保留安装目录中的事务备份。该操作只恢复这次更新的程序文件，不读写资料目录或自动启动新程序。缺少安装保护协议的旧版本仍应退出后使用新的程序目录，不使用此工具覆盖。不要把资料塞进程序目录。
 
-新程序迁移过数据库后，仅换回旧 exe 不保证能读取；恢复升级前资料备份会丢失备份之后的修改。当前没有自动下载升级、发布者验签更新源或自动数据库回滚。调试候选仅在专项开发验收中显式使用 `-AllowDebug`，默认更新入口接受 release 候选。
+新程序迁移过数据库后，仅换回旧 exe 不保证能读取；恢复升级前资料备份会丢失备份之后的修改。应用内下载需用户点击，不自动安装；发布者验签资格和自动数据库回滚仍独立保留。调试候选仅在专项开发验收中显式使用 `-AllowDebug`，默认更新入口接受 release 候选。
 
 `standalone-build.json` 记录包内二进制的真实版本、edition、target、原生能力、内容构建 ID 和文件摘要。发布目录的 `.sha256` 可核验下载完整性；**摘要不是发布者签名**。清单中 `signatureStatus` 如为 `NotSigned`，该产物是未签名候选，不应作为已完成签名资格的正式安装包。带 `debug` 标记的包仅供开发验收。
 

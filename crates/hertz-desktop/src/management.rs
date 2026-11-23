@@ -27,6 +27,8 @@ pub(crate) const V2_COMMANDS: &[&str] = &[
     // 小窗播放（桌面宠物）：开关（进/出小窗，宠物态由配置决定）与素材文件夹。
     // 桌面功能只接受独立播放器来源。
     "mini-toggle",
+    // 幂等打开：播放器关闭主窗口进入宠物模式时调用，已在小窗则不重复创建。
+    "mini-show",
     "mini-style",
     "open-pet-assets",
 ];

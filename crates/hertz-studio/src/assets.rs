@@ -79,6 +79,8 @@ ui_assets! {
     "/window-sleep.js", JS => const WINDOW_SLEEP_JS: &str = edition_ui!("window-sleep.js");
     "/system-media.js", JS => const SYSTEM_MEDIA_JS: &str = edition_ui!("system-media.js");
     "/window-lifecycle.css", CSS => const WINDOW_LIFECYCLE_CSS: &str = edition_ui!("window-lifecycle.css");
+    "/app-updates.js", JS => const APP_UPDATES_JS: &str = edition_ui!("app-updates.js");
+    "/app-updates.css", CSS => const APP_UPDATES_CSS: &str = edition_ui!("app-updates.css");
     "/ui-preferences.js", JS => const UI_PREFERENCES_JS: &str = edition_ui!("ui-preferences.js");
     "/ui-preference-settings.js", JS => const UI_PREFERENCE_SETTINGS_JS: &str = edition_ui!("ui-preference-settings.js");
     "/ui-preferences.css", CSS => const UI_PREFERENCES_CSS: &str = edition_ui!("ui-preferences.css");

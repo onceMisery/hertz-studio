@@ -222,6 +222,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // 服务退出：首页那颗电源钮。停播 + 删发现文件 + 进程结束，见 `shutdown_service`。
         .route("/v1/system/shutdown", post(shutdown_service))
+        .route("/v1/system/updates", get(application_updates))
+        .route("/v1/system/updates/check", post(check_application_updates))
+        .route(
+            "/v1/system/updates/settings",
+            axum::routing::put(application_update_settings),
+        )
+        .route(
+            "/v1/system/updates/download",
+            post(download_application_update),
+        )
+        .route("/v1/system/updates/cancel", post(cancel_application_update))
         .route("/v1/window/state", get(native_window_state))
         .route("/v1/window/focus", post(native_window_focus))
         .route("/v1/window/media-state", get(native_media_state))
@@ -1899,6 +1910,38 @@ async fn shutdown_service(State(state): State<Arc<AppState>>) -> ApiResult<Respo
     }
     state.request_exit();
     Ok(Json(serde_json::json!({ "status": "exiting" })).into_response())
+}
+
+async fn application_updates(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::updates::Snapshot>> {
+    Ok(Json(crate::updates::status(&state).await?))
+}
+
+async fn check_application_updates(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::updates::CheckRequest>,
+) -> ApiResult<Json<crate::updates::Snapshot>> {
+    Ok(Json(crate::updates::check(&state, body.automatic).await?))
+}
+
+async fn application_update_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::updates::Preferences>,
+) -> ApiResult<Json<crate::updates::Snapshot>> {
+    Ok(Json(crate::updates::preferences(&state, body).await?))
+}
+
+async fn download_application_update(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::updates::Snapshot>> {
+    Ok(Json(crate::updates::download(&state).await?))
+}
+
+async fn cancel_application_update(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::updates::Snapshot>> {
+    Ok(Json(crate::updates::cancel(&state).await?))
 }
 
 async fn native_window_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

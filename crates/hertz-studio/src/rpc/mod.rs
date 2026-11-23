@@ -415,6 +415,21 @@ impl Rpc {
             (Op::Get, ["v1", "settings"]) => library::get_settings(state).await,
             (Op::Put, ["v1", "settings"]) => library::put_settings(state, body).await,
 
+            // Shared version checks; plugin packages remain installed by DBX.
+            (Op::Get, ["v1", "system", "updates"]) => {
+                Reply::json(&crate::updates::status(state).await?)
+            }
+            (Op::Post, ["v1", "system", "updates", "check"]) => {
+                let request: crate::updates::CheckRequest = body_as(body)?;
+                Reply::json(&crate::updates::check(state, request.automatic).await?)
+            }
+            (Op::Put, ["v1", "system", "updates", "settings"]) => {
+                Reply::json(&crate::updates::preferences(state, body_as(body)?).await?)
+            }
+            (Op::Post, ["v1", "system", "updates", "cancel"]) => {
+                Reply::json(&crate::updates::cancel(state).await?)
+            }
+
             // --- 收藏 ---
             (Op::Get, ["v1", "favorites"]) => library::list_favorites(state, query).await,
             (Op::Post, ["v1", "favorites"]) => library::add_favorite(state, body).await,

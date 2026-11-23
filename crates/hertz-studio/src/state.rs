@@ -782,6 +782,7 @@ pub struct AppState {
     pub(crate) native_window: std::sync::OnceLock<Arc<crate::window_lifecycle::WindowLifecycle>>,
     /// Process-local timer; installed only when the native window owns playback.
     pub(crate) native_sleep: std::sync::OnceLock<Arc<crate::window_sleep::WindowSleep>>,
+    pub(crate) updates: crate::updates::Updates,
     pub(crate) system_media: std::sync::OnceLock<Arc<crate::system_media::SystemMedia>>,
     pub token: String,
     /// 浮层只读钥匙（见 `main.rs` 的 `load_or_create_overlay_key`）。与 token
@@ -1076,9 +1077,21 @@ impl AppState {
     /// then stop the local actor and remove the service discovery file.
     pub async fn shutdown(&self) {
         self.exiting.send_replace(true);
+        self.updates.shutdown();
         self.room.shutdown().await;
         self.audio.shutdown();
         remove_discovery(&self.data_dir).await;
+    }
+
+    /// Called by the standalone binary after its normal shutdown work completes.
+    pub fn commit_update_handoff(&self) {
+        self.updates.commit_exit(self);
+    }
+
+    /// The standalone assembly supplies its runtime identity and actual bound port,
+    /// including CLI overrides and ephemeral-port selection.
+    pub fn set_update_restart_port(&self, port: u16) {
+        self.updates.set_restart_port(port);
     }
 
     /// AI runner 锁是否在本进程（生成受理的门禁）。
@@ -4972,6 +4985,7 @@ pub(crate) mod tests {
             native_window: Default::default(),
             _data_owner: None,
             native_sleep: Default::default(),
+            updates: Default::default(),
             system_media: Default::default(),
             token: String::new(),
             overlay_key: String::new(),

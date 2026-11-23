@@ -10,6 +10,8 @@
 
 门禁在路由 extractor、票据兑换及业务副作用之前执行，也覆盖 WS 升级。缺失 Origin 保留非浏览器客户端路径，后续路由仍要求原有有效凭据；拒绝的请求不能消耗入口或 WS 票据。
 
+[应用内更新](application-updates.md)的状态、检查、偏好、下载及取消沿现有完整播放器鉴权。安装和发布页面外部打开仅接受当前已核对原生文档的 IPC；HTTP/RPC 不提供安装端点。退出批准与正常服务收尾分别受原窗口生命周期和提交标记约束，网络请求不能直接替换程序。
+
 ## 页面与资源策略
 
 原生首页、凭据恢复表单和 OBS HTML 由可信编译模板显式渲染，每次生成随机 nonce，并发送 CSP、`Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY` 和 `X-Content-Type-Options: nosniff`。只有模板中确切的内联 script 标签获得 nonce；token 使用 JSON 字符串和 script 终止字符转义，不授权读者或用户正文中的脚本。

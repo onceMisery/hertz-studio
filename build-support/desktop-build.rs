@@ -31,6 +31,26 @@ const DESKTOP_INPUTS: &[&str] = &[
     "plugin/ui/vendor/zodiac-stage.js",
 ];
 
+const APPLICATION_INPUTS: &[&str] = &[
+    "crates",
+    "migrations",
+    "plugin/backend/Cargo.toml",
+    "plugin/backend/src",
+    "plugin/vendor/dbx-plugin-sdk/src",
+    "plugin/vendor/dbx-plugin-sdk/Cargo.toml",
+    "plugin/ui",
+    "plugin/assets",
+    "plugin/manifest.json",
+    "plugin/dbx-plugin.toml",
+    "build-support/edition-ui.rs",
+    "scripts/prepare-edition.js",
+    "scripts/minify-ui.js",
+    "scripts/windows/Apply-Hertz-Update.ps1",
+    "scripts/windows/Update-Hertz.ps1",
+    "tools/space-stage/package.json",
+    "tools/space-stage/package-lock.json",
+];
+
 pub fn emit(root: &Path, plugin: bool) {
     // Cargo can reuse a compiled build script in another checkout sharing target/.
     // Resolve inputs from that invocation and invalidate cached output when it moves.
@@ -92,23 +112,7 @@ pub fn emit(root: &Path, plugin: bool) {
     println!("cargo:rustc-env=HERTZ_DESKTOP_BUILD_ID={desktop_id}");
     if plugin {
         let mut inputs = desktop;
-        for relative in [
-            "crates",
-            "migrations",
-            "plugin/backend/Cargo.toml",
-            "plugin/backend/src",
-            "plugin/vendor/dbx-plugin-sdk/src",
-            "plugin/vendor/dbx-plugin-sdk/Cargo.toml",
-            "plugin/ui",
-            "plugin/assets",
-            "plugin/manifest.json",
-            "plugin/dbx-plugin.toml",
-            "build-support/edition-ui.rs",
-            "scripts/prepare-edition.js",
-            "scripts/minify-ui.js",
-            "tools/space-stage/package.json",
-            "tools/space-stage/package-lock.json",
-        ] {
+        for relative in APPLICATION_INPUTS {
             collect(root, relative, &mut inputs);
         }
         let edition = if std::env::var_os("CARGO_FEATURE_FULL").is_some() {
@@ -206,6 +210,13 @@ mod tests {
             }
             digest(&self.0, &inputs, "desktop/2")
         }
+        fn application_identity(&self) -> String {
+            let mut inputs = BTreeSet::new();
+            for relative in DESKTOP_INPUTS.iter().chain(APPLICATION_INPUTS) {
+                collect(&self.0, relative, &mut inputs);
+            }
+            digest(&self.0, &inputs, "standalone/2")
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -285,5 +296,28 @@ mod tests {
         fixture.write("vendor/zip/Cargo.lock", b"standalone test resolution");
         fixture.write("vendor/zip/target/temporary.rs", b"compiler cache");
         assert_eq!(fixture.identity(), extended);
+    }
+
+    #[test]
+    fn application_identity_tracks_both_embedded_update_scripts() {
+        let fixture = Fixture::new();
+        let scripts = [
+            "scripts/windows/Apply-Hertz-Update.ps1",
+            "scripts/windows/Update-Hertz.ps1",
+        ];
+        for script in scripts {
+            fixture.write(script, b"before");
+        }
+        let baseline = fixture.application_identity();
+        for script in scripts {
+            fixture.write(script, b"after");
+            assert_ne!(
+                fixture.application_identity(),
+                baseline,
+                "embedded update script omitted: {script}"
+            );
+            fixture.write(script, b"before");
+            assert_eq!(fixture.application_identity(), baseline);
+        }
     }
 }

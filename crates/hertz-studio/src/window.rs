@@ -64,6 +64,8 @@ enum UserEvent {
     Ipc(String),
     /// 握手通道收到 "focus" 或托盘「打开主窗口」：前置/恢复主窗口。
     FocusWindow,
+    /// 桌面宠物已就绪：隐藏主窗口，只留小窗。
+    PetModeReady,
     /// 托盘歌词设置在已有主窗口内编辑。
     OpenLyricsSettings,
     #[cfg(windows)]
@@ -362,6 +364,30 @@ const HOST_SCRIPT: &str = r#"
     if (window.ipc) window.ipc.postMessage(JSON.stringify(Object.assign({ kind: kind }, extra || {}, { documentId: documentId })));
   }
   var lifecycleReadyRequested = false;
+  var updateRequest = null;
+  window.addEventListener('hertz-native-update-result', function (event) {
+    var receipt = event.detail;
+    if (!updateRequest || !receipt || receipt.documentId !== documentId || receipt.requestId !== updateRequest.id) return;
+    var pending = updateRequest; updateRequest = null; clearTimeout(pending.timer);
+    if (receipt.status === 'accepted') pending.resolve();
+    else pending.reject(new Error(receipt.message || '无法准备安装，请重试'));
+  });
+  function nativeUpdateCommand(kind, extra) {
+    if (!window.ipc) return Promise.reject(new Error('原生窗口暂不可用'));
+    if (updateRequest) return Promise.reject(new Error('正在准备安装，请稍候'));
+    return new Promise(function (resolve, reject) {
+      var id = crypto.randomUUID();
+      var timer = setTimeout(function () {
+        if (updateRequest && updateRequest.id === id) { updateRequest = null; reject(new Error('安装请求未送达，请重试')); }
+      }, 10000);
+      updateRequest = { id: id, timer: timer, resolve: resolve, reject: reject };
+      post(kind, Object.assign({}, extra, { requestId: id }));
+    });
+  }
+  function installUpdate(operationId) {
+    if (typeof operationId !== 'string' || !/^[a-f0-9-]{36}$/.test(operationId)) return Promise.reject(new Error('更新操作无效，请重新下载'));
+    return nativeUpdateCommand('install-update', { operationId: operationId });
+  }
   window.addEventListener('hertz-native-host-confirmed', function (event) {
     if (event.detail && event.detail.documentId === documentId) {
       if (window.__hertzWindowHost) window.__hertzWindowHost.fileImportReady = true;
@@ -444,6 +470,9 @@ const HOST_SCRIPT: &str = r#"
         saveTextFile: saveTextFile,
         openObsPreview: openObsPreview,
         importFiles: importFiles,
+        updateVersion: 1,
+        installUpdate: installUpdate,
+        openUpdatePage: function (url) { return nativeUpdateCommand('open-update-page', { url: url }); },
         lifecycleReady: function () { lifecycleReadyRequested = true; post('lifecycle-ready'); },
         requestQuit: function () { post('quit'); },
         acknowledgeQuit: function (requestId, presentation) { post('quit-presented', { requestId: requestId, presentation: presentation }); },
@@ -453,6 +482,9 @@ const HOST_SCRIPT: &str = r#"
         maximizeToggle: function () { post('maximize-toggle'); },
         drag: function () { post('drag'); },
         capsule: function (minimized) { post(minimized ? 'capsule-enter' : 'capsule-exit'); },
+        // 最小化到桌面宠物：隐藏主窗口、由宿主打开小窗。宿主拉起失败时
+        // 原生命令会自行把主窗口恢复回来。
+        petMode: function () { post('pet-mode'); },
         edgeCheck: function () { post('capsule-edge-check'); },
         capsulePeekOut: function () { post('capsule-peek-out'); },
       };
@@ -630,15 +662,43 @@ impl QuitPresentation {
     }
 }
 
-fn close_main_window(window: &tao::window::Window, lifecycle: &WindowLifecycle) {
+fn close_main_window(
+    window: &tao::window::Window,
+    lifecycle: &WindowLifecycle,
+    data_dir: &std::path::Path,
+    ready: impl FnOnce() + Send + 'static,
+    recover: impl FnOnce() + Send + 'static,
+) {
     if lifecycle.snapshot().phase == Phase::Pending {
         return;
     }
-    if lifecycle.close_behavior() == CloseBehavior::Hide {
-        window.set_visible(false);
-    } else {
-        lifecycle.request_exit(QuitSource::WindowClose);
+    match lifecycle.close_behavior() {
+        CloseBehavior::Hide => window.set_visible(false),
+        CloseBehavior::Mini => enter_pet_mode(data_dir, ready, recover),
+        CloseBehavior::Quit => {
+            lifecycle.request_exit(QuitSource::WindowClose);
+        }
     }
+}
+
+/// 把主窗口交给桌面宠物：先拉起宿主并幂等打开小窗，确认小窗就绪后再
+/// 隐藏主窗口（页面不再渲染）。宿主不可用时保持主窗口可见，避免
+/// 「关掉界面却什么也没留下」。小窗自身记住 reopen，下次启动会恢复。
+fn enter_pet_mode(
+    data_dir: &std::path::Path,
+    ready: impl FnOnce() + Send + 'static,
+    recover: impl FnOnce() + Send + 'static,
+) {
+    let data_dir = data_dir.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("hertz-pet-mode".into())
+        .spawn(move || match desktop_tray::show_mini(&data_dir) {
+            Ok(()) => ready(),
+            Err(error) => {
+                tracing::warn!(error = %error, "进入桌面宠物失败，保持主窗口");
+                recover();
+            }
+        });
 }
 
 fn fallback_quit(window: &tao::window::Window) -> Option<bool> {
@@ -1278,6 +1338,31 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                 }
                 if document_id.is_none() || document_id != quit_ui.document_id.as_deref() { return; }
                 match kind {
+                    "install-update" | "open-update-page" => {
+                        let operation = message.get("operationId").and_then(serde_json::Value::as_str);
+                        let request = message.get("requestId").and_then(serde_json::Value::as_str);
+                        if !request.is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()) { return; }
+                        let result = if kind == "open-update-page" {
+                            match message.get("url").and_then(serde_json::Value::as_str) {
+                                Some(url) => lifecycle.open_update_page(url),
+                                None => Err(hertz_studio::error::bad_request("发布页面地址无效")),
+                            }
+                        } else {
+                            match operation.filter(|id| uuid::Uuid::parse_str(id).is_ok()) {
+                                Some(operation) => lifecycle.request_update_install(operation),
+                                None => Err(hertz_studio::error::bad_request("更新操作无效，请重新下载")),
+                            }
+                        };
+                        let receipt = serde_json::json!({
+                            "documentId": document_id,
+                            "requestId": request,
+                            "status": if result.is_ok() { "accepted" } else { "failed" },
+                            "message": result.err().map(|error| error.message),
+                        });
+                        let _ = webview.evaluate_script(&format!(
+                            "window.dispatchEvent(new CustomEvent('hertz-native-update-result',{{detail:{receipt}}}));"
+                        ));
+                    }
                     #[cfg(windows)]
                     "wallpaper-editor" => {
                         use tao::platform::windows::WindowExtWindows;
@@ -1355,7 +1440,23 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                     }
                     "close" => {
                         placement::record(&window, owner.as_ref(), main_placement.is_some());
-                        close_main_window(&window, &lifecycle);
+                        let ready_proxy = proxy.clone();
+                        let recover_proxy = proxy.clone();
+                        close_main_window(&window, &lifecycle, &data_dir,
+                            move || { let _ = ready_proxy.send_event(UserEvent::PetModeReady); },
+                            move || { let _ = recover_proxy.send_event(UserEvent::FocusWindow); });
+                    }
+                    // 最小化到桌面宠物：小窗就绪后主窗口不再渲染，只留宠物。
+                    // 页面在退出对话框或顶栏按钮里主动请求时走这条。
+                    "pet-mode" => {
+                        if matches!(lifecycle.snapshot().phase, Phase::Pending | Phase::Exiting) {
+                            return;
+                        }
+                        let ready_proxy = proxy.clone();
+                        let recover_proxy = proxy.clone();
+                        enter_pet_mode(&data_dir,
+                            move || { let _ = ready_proxy.send_event(UserEvent::PetModeReady); },
+                            move || { let _ = recover_proxy.send_event(UserEvent::FocusWindow); });
                     }
                     "quit" => { lifecycle.request_exit(QuitSource::Toolbar); }
                     "lifecycle-ready" => {
@@ -1449,6 +1550,7 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                 }
             }
             Event::UserEvent(UserEvent::NavigationStarted) => {
+                lifecycle.cancel_update_install();
                 #[cfg(windows)]
                 let _ = hertz_studio::desktop_host::place_settings(None);
                 quit_ui.reload();
@@ -1476,6 +1578,9 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
             }
             Event::UserEvent(UserEvent::Lifecycle(_event)) => {
                 let snapshot = lifecycle.snapshot();
+                if matches!(snapshot.phase, Phase::Cancelled | Phase::Failed) {
+                    lifecycle.cancel_update_install();
+                }
                 if snapshot.phase == Phase::Pending {
                     if let Some(placement) = main_placement.take() {
                         let _ = webview.evaluate_script("window.dispatchEvent(new Event('hertz-native-capsule-restore'));");
@@ -1506,6 +1611,13 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                     let _ = webview.evaluate_script(
                         "window.dispatchEvent(new Event('hertz-open-desktop-lyrics-settings'));",
                     );
+                }
+            }
+            Event::UserEvent(UserEvent::PetModeReady) => {
+                // 小窗已就绪：记下主窗口位置后隐藏，页面随之停止渲染。
+                if window.is_visible() {
+                    placement::record(&window, owner.as_ref(), main_placement.is_some());
+                    window.set_visible(false);
                 }
             }
             #[cfg(windows)]
@@ -1556,7 +1668,11 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                 ..
             } if window_id == window.id() => {
                 placement::record(&window, owner.as_ref(), main_placement.is_some());
-                close_main_window(&window, &lifecycle);
+                let ready_proxy = proxy.clone();
+                let recover_proxy = proxy.clone();
+                close_main_window(&window, &lifecycle, &data_dir,
+                    move || { let _ = ready_proxy.send_event(UserEvent::PetModeReady); },
+                    move || { let _ = recover_proxy.send_event(UserEvent::FocusWindow); });
             }
             Event::WindowEvent { window_id, event: WindowEvent::CloseRequested { .. }, .. }
                 if obs_preview.as_ref().is_some_and(|preview| preview.id() == window_id) => {

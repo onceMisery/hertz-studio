@@ -20,10 +20,12 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 
 下表列出独立播放器各编译 feature 的 HTTP 路由；桌面管理、`/v1/desktop-lyrics/*`、`/v1/wallpaper/*`、`/v1/desktop-mini/*` 和 `/v1/ai/wallpaper/*` 仅在 `desktop-host` 下注册。DBX RPC 的桌面请求返回 `not_found`；插件库的同族 HTTP 请求返回 404。
 
+2026-11-23 [应用内更新](application-updates.md)：`/v1/system/updates` 的状态、检查、偏好与取消由 HTTP/DBX RPC 共用；Windows 正式原生上下文另外支持下载。安装只走经核对的原生文档 IPC，无 HTTP/RPC 安装接口。
+
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 216 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 179 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 168 条内嵌静态资源路由。
+REST 路由表共 221 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 184 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 170 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -213,6 +215,11 @@ REST 路由表共 216 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/stage/project-media` |
 | GET | `/v1/state` |
 | POST | `/v1/system/shutdown` |
+| GET | `/v1/system/updates` |
+| POST | `/v1/system/updates/cancel` |
+| POST | `/v1/system/updates/check` |
+| POST | `/v1/system/updates/download` |
+| PUT | `/v1/system/updates/settings` |
 | GET | `/v1/tracks` |
 | POST | `/v1/tracks/batch-delete` |
 | POST | `/v1/tracks/batch-edit` |

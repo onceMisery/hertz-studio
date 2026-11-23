@@ -330,7 +330,7 @@
     refs.settingsGroups = Array.from(id('view-settings').children).filter(function (group) { return group.classList.contains('set-group') && group.id !== 'desktop-lyrics-settings'; });
     refs.settingsGroups.forEach(function (group) {
       var title = group.querySelector('.set-title').textContent, originalHidden = group.hidden;
-      group.dataset.hzCategory = /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
+      group.dataset.hzCategory = /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者|关于与更新/.test(title) ? 'tools' : 'appearance';
       // form:desktop
       if (group.id === 'desktop-settings-group') group.dataset.hzCategory = 'desktop';
       // form:end
@@ -633,7 +633,8 @@
     refs.queueToggle = button(tools, 'hz-icon hz-queue-toggle', '播放队列', 'queue', function (event) { setQueue(!queueOpen, event.currentTarget); }); refs.queueToggle.setAttribute('aria-controls', 'hz-queue-pane');
     layout.move(topbar.querySelector('.top-right'), tools);
     var menu = id('top-more-menu');
-    [['capsule-entry', '胶囊播放器'], ['stage3d-entry', '沉浸声场']].forEach(function (entry) {
+    // 桌面原生窗口里胶囊与桌面宠物是同一件事：菜单文案直接说「桌面宠物」。
+    [['capsule-entry', window.__hertzWindowHost ? '桌面宠物' : '胶囊播放器'], ['stage3d-entry', '沉浸声场']].forEach(function (entry) {
       var node = id(entry[0]); layout.move(node, menu); node.classList.add('menu-item'); make('span', '', node, entry[1]);
       cleanup.push(function () { node.classList.remove('menu-item'); });
     });

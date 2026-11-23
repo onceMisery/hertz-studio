@@ -4852,6 +4852,20 @@ impl App {
                 self.recompute_wallpaper();
                 self.sync_tray();
             }
+            "mini-show" => {
+                // 幂等打开：播放器关闭主窗口进入宠物模式时调用。
+                // 已经在小窗里就不重复创建，也不改动它的贴边状态。
+                let action = if self.mini_host.phase == MiniPhase::Hidden {
+                    self.mini_host
+                        .handle(MiniEvent::Enter(crate::mini::EnterReason::User))
+                } else {
+                    MiniAction::None
+                };
+                self.apply_mini_action(action, target);
+                self.config.mini.reopen = self.mini_host.phase != MiniPhase::Hidden;
+                self.schedule_save();
+                self.sync_tray();
+            }
             "mini-toggle" => {
                 let action = if self.mini_host.phase == MiniPhase::Hidden {
                     self.mini_host

@@ -240,6 +240,7 @@ pub async fn boot(
         desktop: Default::default(),
         native_window: Default::default(),
         native_sleep: Default::default(),
+        updates: Default::default(),
         system_media: Default::default(),
         token: token.clone(),
         overlay_key: overlay_key.clone(),

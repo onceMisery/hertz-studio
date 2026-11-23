@@ -37,10 +37,13 @@
     try {
       var snapshot = await transport.get('/v1/window/state');
       if (!snapshot || snapshot.available !== true) throw new Error('原生窗口状态暂不可用');
-      committedBehavior = snapshot.closeBehavior === 'quit' ? 'quit' : 'hide';
+      committedBehavior = snapshot.closeBehavior === 'quit' ? 'quit'
+        : snapshot.closeBehavior === 'mini' ? 'mini' : 'hide';
       refs.behavior.value = committedBehavior;
       refs.behavior.disabled = false;
-      note(committedBehavior === 'hide' ? '隐藏后音乐继续播放，可从系统托盘恢复主窗口。' + (snapshot.backgroundPlayback ? ' 页面重载或断开时仍由原生窗口管理播放。' : '') : '关闭主窗口时将退出播放器；音乐会停止，一起听房间会结束。');
+      note(committedBehavior === 'hide' ? '隐藏后音乐继续播放，可从系统托盘恢复主窗口。' + (snapshot.backgroundPlayback ? ' 页面重载或断开时仍由原生窗口管理播放。' : '')
+        : committedBehavior === 'mini' ? '关闭主窗口后只保留桌面宠物，音乐继续播放；点一下宠物回到主窗口。'
+        : '关闭主窗口时将退出播放器；音乐会停止，一起听房间会结束。');
     } catch (error) {
       refs.behavior.value = committedBehavior;
       refs.retry.hidden = false;
@@ -50,14 +53,16 @@
 
   async function saveSettings() {
     var next = refs.behavior.value;
-    if (next !== 'hide' && next !== 'quit') return;
+    if (next !== 'hide' && next !== 'quit' && next !== 'mini') return;
     refs.behavior.disabled = true;
     note('正在保存关闭行为…');
     try {
       // Await the typed endpoint directly: the generic settings helper swallows errors.
       await transport.put('/v1/window/settings', { closeBehavior: next });
       committedBehavior = next;
-      note(next === 'hide' ? '已保存。隐藏后音乐继续播放，可从系统托盘恢复主窗口。' : '已保存。关闭主窗口时将退出播放器。');
+      note(next === 'hide' ? '已保存。隐藏后音乐继续播放，可从系统托盘恢复主窗口。'
+        : next === 'mini' ? '已保存。关闭主窗口后只保留桌面宠物，音乐继续播放。'
+        : '已保存。关闭主窗口时将退出播放器。');
     } catch (error) {
       refs.behavior.value = committedBehavior;
       note('保存失败，已恢复上次设置：' + errorText(error), true);
@@ -66,6 +71,11 @@
 
   function render(context) {
     if (!alive(context)) return;
+    var updating = context.snapshot.source === 'update';
+    var title = document.getElementById('window-lifecycle-title');
+    var description = document.getElementById('window-lifecycle-description');
+    if (title) title.textContent = updating ? '安装更新并重新打开？' : '退出播放器？';
+    if (description) description.textContent = updating ? '正常退出后安装已下载的更新，然后重新打开当前音乐资料。返回播放器会取消这次安装。' : '退出后将关闭主窗口和播放服务；也可以最小化到桌面宠物，让音乐继续在桌面上播放。';
     var activity = context.snapshot.activity || {};
     var warnings = [];
     if (activity.playing) warnings.push('正在播放的音乐将停止');
@@ -77,11 +87,14 @@
     refs.status.textContent = context.message;
     refs.status.classList.toggle('window-lifecycle-error', !!context.error);
     refs.cancel.disabled = context.busy;
+    // 最小化到桌面宠物只在可确认退出请求时开放；安装更新时没有这个选项。
+    refs.pet.hidden = updating;
+    refs.pet.disabled = context.busy || !context.acknowledged;
     refs.approve.disabled = context.busy || context.saving || !context.acknowledged;
-    refs.approve.textContent = context.error === 'save' ? '仍然退出'
+    refs.approve.textContent = context.error === 'save' ? (updating ? '仍然退出并安装' : '仍然退出')
       : context.error === 'recording' ? '重试结束录制'
-        : context.recordingFinished ? '确认视频已保存并退出'
-        : context.hasRecording ? '结束录制并退出' : '退出播放器';
+        : context.recordingFinished ? (updating ? '确认视频已保存并安装' : '确认视频已保存并退出')
+        : context.hasRecording ? (updating ? '结束录制并安装' : '结束录制并退出') : (updating ? '安装并重新打开' : '退出播放器');
     refs.dialog.setAttribute('aria-busy', String(context.busy || context.saving));
   }
 
@@ -106,6 +119,33 @@
       context.busy = false;
       context.error = 'host';
       context.message = '取消退出失败：' + errorText(error) + '。请重试。';
+      render(context);
+    }
+  }
+
+  // 取消这次退出，把主窗口交给桌面宠物。舞台与预置库留在内存里，不需要
+  // 保存：主窗口只是不再渲染，点宠物就能原样回来。
+  async function minimizeToPet() {
+    var context = current;
+    if (!context || context.busy || !context.acknowledged) return;
+    if (typeof host.petMode !== 'function') {
+      context.message = '当前版本不支持最小化到桌面宠物，请更新后再试。';
+      render(context);
+      return;
+    }
+    context.busy = true;
+    render(context);
+    try {
+      await host.confirmQuit(context.requestId, context.presentation, false);
+      if (!alive(context)) return;
+      requestSent = false;
+      release(context);
+      host.petMode();
+    } catch (error) {
+      if (!alive(context)) return;
+      context.busy = false;
+      context.error = 'host';
+      context.message = '最小化到桌面宠物失败：' + errorText(error) + '。请重试。';
       render(context);
     }
   }
@@ -280,12 +320,13 @@
     var byId = function (id) { return document.getElementById('window-lifecycle-' + id); };
     refs = { setting: byId('setting'), behavior: byId('behavior'), settingStatus: byId('setting-status'),
       retry: byId('retry'), dialog: byId('dialog'), activity: byId('activity'), recording: byId('recording'),
-      status: byId('status'), cancel: byId('cancel'), approve: byId('approve') };
+      status: byId('status'), cancel: byId('cancel'), pet: byId('pet'), approve: byId('approve') };
     if (Object.keys(refs).some(function (key) { return !refs[key]; })) return;
     refs.setting.hidden = false;
     refs.behavior.addEventListener('change', saveSettings);
     refs.retry.addEventListener('click', loadSettings);
     refs.cancel.addEventListener('click', cancel);
+    refs.pet.addEventListener('click', function () { void minimizeToPet(); });
     refs.approve.addEventListener('click', function () { void approve(true); });
     refs.dialog.addEventListener('cancel', function (event) { event.preventDefault(); void cancel(); });
     // Own Escape ahead of the stage's document capture handlers. Other keys

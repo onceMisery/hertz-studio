@@ -42,6 +42,13 @@ pub fn spawn(data_dir: &Path) -> Result<(), String> {
     command("show")
 }
 
+/// 进入桌面宠物：按需拉起宿主并幂等打开小窗。主窗口关闭到宠物模式时调用；
+/// 宿主不可用会如实返回错误，由调用方恢复主窗口。
+pub fn show_mini(data_dir: &Path) -> Result<(), String> {
+    crate::desktop_host::ensure_started(data_dir).map_err(|error| format!("{error:#}"))?;
+    command("mini-show")
+}
+
 /// 托盘允许下发的命令（无参数动词；带值的操作请走设置页 REST）。
 const TRAY_COMMANDS: &[&str] = &[
     "quit",
@@ -55,6 +62,7 @@ const TRAY_COMMANDS: &[&str] = &[
     "show",
     "hide",
     "mini-toggle",
+    "mini-show",
 ];
 
 pub fn command(name: &str) -> Result<(), String> {

@@ -23,6 +23,9 @@ pub const CLOSE_BEHAVIOR_KEY: &str = "native_window_close_behavior";
 #[serde(rename_all = "snake_case")]
 pub enum CloseBehavior {
     Hide,
+    /// 关闭主窗口后只留桌面宠物（小窗播放）：主窗口不再渲染，音乐继续，
+    /// 点宠物回到主窗口。适合把播放器当作常驻小挂件的用法。
+    Mini,
     /// 默认关闭即退出：点 × 却只隐到托盘时，正在播放的音乐会让人以为程序
     /// 没关掉。需要后台播放的用户可以在「窗口与舞台」里显式改为隐藏。
     #[default]
@@ -47,6 +50,7 @@ pub enum QuitSource {
     Toolbar,
     Tray,
     Http,
+    Update,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
@@ -375,6 +379,44 @@ impl WindowLifecycle {
         snapshot
     }
 
+    /// Installation is admitted only by the current verified native document.
+    /// Helper readiness precedes the existing save/confirmation/exit workflow.
+    pub fn request_update_install(self: &Arc<Self>, operation: &str) -> ApiResult<()> {
+        let state = self.state.upgrade().ok_or_else(|| {
+            ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "播放器服务不可用",
+            )
+        })?;
+        state.updates.arm_install(&state, operation)?;
+        let lifecycle = self.clone();
+        let operation = operation.to_owned();
+        self.runtime.spawn(async move {
+            state
+                .updates
+                .begin_install_exit(&operation, &lifecycle)
+                .await;
+        });
+        Ok(())
+    }
+
+    pub fn cancel_update_install(&self) {
+        if let Some(state) = self.state.upgrade() {
+            state.updates.disarm_install();
+        }
+        let snapshot = self.snapshot();
+        if snapshot.source == Some(QuitSource::Update) && snapshot.phase == Phase::Pending {
+            if let Some(request) = snapshot.request_id {
+                self.confirm(&request, false);
+            }
+        }
+    }
+
+    pub fn open_update_page(&self, url: &str) -> ApiResult<()> {
+        crate::updates::open_release_page(url)
+    }
+
     /// Trusted in-process host entry only. Deliberately has no HTTP/RPC route.
     /// This is safe on the Tao thread: runtime work uses the captured handle.
     pub fn confirm(&self, request_id: &str, approve: bool) -> Snapshot {
@@ -409,6 +451,17 @@ impl WindowLifecycle {
         activity_was_shown: Option<bool>,
     ) -> Snapshot {
         let state = self.state.upgrade();
+        let pending = self.snapshot();
+        if approve
+            && pending.phase == Phase::Pending
+            && pending.source == Some(QuitSource::Update)
+            && pending.request_id.as_deref() == Some(request_id)
+            && state
+                .as_ref()
+                .is_some_and(|state| state.updates.validate_install_exit(request_id).is_err())
+        {
+            return self.fail_pending(request_id, "update_helper_unavailable");
+        }
         let (snapshot, sink, changed) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let activity = state.as_deref().map(Activity::read).unwrap_or_default();
@@ -421,6 +474,11 @@ impl WindowLifecycle {
             (inner.snapshot(activity), inner.sink.clone(), changed)
         };
         if changed {
+            if matches!(snapshot.phase, Phase::Cancelled | Phase::Failed) {
+                if let Some(state) = state.as_ref() {
+                    state.updates.disarm_install();
+                }
+            }
             if snapshot.phase == Phase::Exiting {
                 if let Some(state) = state {
                     self.runtime.spawn(async move { state.request_exit() });

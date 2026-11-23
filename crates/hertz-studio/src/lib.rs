@@ -63,6 +63,7 @@ pub(crate) mod stage_project;
 pub mod state;
 pub mod system_media;
 pub mod ticket;
+pub(crate) mod updates;
 #[cfg(any(feature = "desktop-host", test))]
 pub(crate) mod wallpaper;
 mod window_focus;

@@ -6124,6 +6124,7 @@ function enterReaderView() { if (window.Reader) window.Reader.onViewEnter(); }
 // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
 // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
 function enterSettingsView(ctx) {
+  if (window.HertzUpdates) void window.HertzUpdates.refresh();
   const options = (ctx && ctx.options) || {};
   loadDiagnostics();
   // 缓存占用是随时会变的数字，进设置页才刷新。
@@ -9267,6 +9268,12 @@ function initCapsuleControls() {
   // 「窗口与舞台」分组的新按钮（清风皮肤把控制入口统一收进左上角设置，
   // 顶栏那几个图标对它是冗余的，隐藏前必须在这里补一个可发现的入口）。
   const enterCapsule = () => {
+    // 桌面原生窗口：胶囊就是桌面宠物（小窗播放）。同一扇窗不再收成胶囊，
+    // 而是隐藏主窗口、由宿主打开小窗；点小窗回到主窗口。
+    if (window.__hertzWindowHost && typeof window.__hertzWindowHost.petMode === 'function') {
+      window.__hertzWindowHost.petMode();
+      return;
+    }
     if (floatingApi()) {
       // dbx：最小化 = 浮动胶囊窗口接管 + 关掉这个 tab。留一个空白 tab 在 dbx 里读作
       // 「页面坏了」，而浮窗那份本来就是「切到哪个应用都还在」的胶囊。不写 minimized
@@ -9286,6 +9293,20 @@ function initCapsuleControls() {
   ui.capsuleEntry.addEventListener('click', enterCapsule);
   const setCapsuleBtn = $('set-capsule-btn');
   if (setCapsuleBtn) setCapsuleBtn.addEventListener('click', enterCapsule);
+  // 桌面端只有一个「最小化播放器」：桌面宠物（小窗）。胶囊入口改名为宠物入口，
+  // 设置里的旧胶囊行收起，避免同一件事出现三个名字（胶囊 / 小窗 / 宠物）。
+  if (window.__hertzWindowHost && typeof window.__hertzWindowHost.petMode === 'function') {
+    ui.capsuleEntry.title = '最小化为桌面宠物';
+    ui.capsuleEntry.setAttribute('aria-label', '最小化为桌面宠物');
+    if (setCapsuleBtn) {
+      const capsuleRow = setCapsuleBtn.closest('.set-row');
+      if (capsuleRow) capsuleRow.hidden = true;
+      const capsuleNote = capsuleRow && capsuleRow.nextElementSibling;
+      if (capsuleNote && capsuleNote.classList.contains('set-note')) {
+        capsuleNote.textContent = '桌面宠物停在桌面上，播放时换形象、悬停展开成播放器，点一下回到主窗口。';
+      }
+    }
+  }
   // 传输三键：与底部播放条同一批调用。stopPropagation 免得冒到胶囊的展开/拖拽上。
   ui.capsulePrev.addEventListener('click', (e) => { e.stopPropagation(); post('/v1/player/previous'); });
   ui.capsuleNext.addEventListener('click', (e) => { e.stopPropagation(); post('/v1/player/next'); });
@@ -10532,6 +10553,7 @@ async function startApp() {
     };
   }
   if (window.WindowLifecycle) window.WindowLifecycle.init(transport);
+  if (window.HertzUpdates) window.HertzUpdates.init(transport);
 // form:desktop
   if (window.hertzHost.desktopEnabled) {
     // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。

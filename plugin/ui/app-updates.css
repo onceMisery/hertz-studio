@@ -1,0 +1,20 @@
+/* SPDX-License-Identifier: MIT */
+.app-updates { min-inline-size: 0; }
+.app-update-heading { align-items: center; gap: 16px; }
+.app-update-heading > div { min-inline-size: 0; }
+.app-update-heading .hint { margin-block: 4px 0; overflow-wrap: anywhere; }
+.app-update-status { margin-block: 12px; color: var(--muted); }
+.app-update-status.is-error { color: var(--danger, var(--text)); }
+.app-update-progress { accent-color: var(--accent); inline-size: 100%; margin-block: 4px; }
+.app-update-release { min-inline-size: 0; }
+.app-update-release-title { font-weight: 600; margin-block: 16px 10px; }
+.app-update-notes summary { cursor: pointer; min-block-size: 32px; padding-block: 6px; }
+.app-update-notes pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--muted); max-block-size: 240px; overflow: auto; margin-block: 8px 16px; }
+.app-update-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-block-start: 16px; }
+.app-update-actions .btn { min-block-size: 36px; text-decoration: none; }
+.app-update-actions .btn:focus-visible, .app-update-notes summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 480px) {
+  .app-update-heading { flex-wrap: wrap; }
+  .app-update-actions { align-items: stretch; }
+  .app-update-actions .btn { flex: 1 1 auto; }
+}
