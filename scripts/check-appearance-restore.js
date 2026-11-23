@@ -201,13 +201,14 @@ function checkBuiltinThemeRestore() {
 }
 
 function checkHertzAppearanceRestore() {
-  section('Hertz 外观：深浅主题与显式关闭点击粒子均能恢复');
-  for (const id of ['hertz-dark', 'hertz-light']) {
+  section('Hertz 外观：深浅主题与各自的点击粒子均能恢复');
+  const hertzFx = { 'hertz-dark': 'spark', 'hertz-light': 'paper' };
+  for (const id of Object.keys(hertzFx)) {
     const first = boot(makeApp(new Map()));
     first.sandbox.Theme.apply(id);
     const restored = boot(makeApp(first.store));
     eq(restored.sandbox.Theme.current().id, id, id + ' 保存与刷新恢复');
-    eq(restored.html.getAttribute('data-fx'), 'none', id + ' 不回退到默认点击粒子');
+    eq(restored.html.getAttribute('data-fx'), hertzFx[id], id + ' 恢复主题自带的点击粒子');
     eq(restored.html.getAttribute('data-look'), 'plain', id + ' 不遗留其它主题材质');
     eq(restored.sandbox.ThemeStudio.state.id, '', id + ' 未手选壁纸时保持无壁纸');
   }

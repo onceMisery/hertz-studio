@@ -10,7 +10,7 @@ window.__HERTZ_DESIGN_THEMES = [
     "id": "hertz-dark",
     "name": "夜色（默认）",
     "note": "原型深色 · 封面氛围光",
-    "fx": "none",
+    "fx": "spark",
     "tokens": {
       "--bg": "#0b0b0d",
       "--panel": "rgba(18,18,21,0.8)",
@@ -45,7 +45,7 @@ window.__HERTZ_DESIGN_THEMES = [
     "id": "hertz-light",
     "name": "暖白",
     "note": "原型浅色 · 温润纸感",
-    "fx": "none",
+    "fx": "paper",
     "tokens": {
       "--bg": "#f6f4f0",
       "--panel": "rgba(246,244,240,0.8)",

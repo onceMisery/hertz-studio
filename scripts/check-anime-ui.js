@@ -182,19 +182,19 @@ ok(registryFx.every(fx => cssFx.includes(fx)),
 ok(cssFx.every(fx => registryFx.includes(fx)),
   'CSS 里没有 EFFECTS 认不出的原型（死样式只会让人以为它生效）: ' +
     uniq(cssFx.filter(fx => !registryFx.includes(fx))).join(', '));
-// "不同主题色的特效应该不同"——内置 23 套的主题特效两两不同。
+// "不同主题色的特效应该不同"——内置主题的特效两两不同。
 // theme-studio 的二次元批次允许与内置共用原型（批次的气质归 palette 区分）。
 ok(uniq(enabledFx).length === enabledFx.length,
   '启用特效的内置主题 fx 两两不同（实得 ' + uniq(enabledFx).length + '/' + enabledFx.length + '；' +
   '两套主题共用一种手感 = 验收要求被悄悄打了折）');
 
-section('明确关闭点击反馈：Hertz 深浅主题不回退 spark');
-ok(disabledThemes.includes('hertz-dark') && disabledThemes.includes('hertz-light'), '两个 Hertz 主题显式声明 fx:none');
+section('Hertz 深浅主题：点击反馈与其他主题一致');
+ok(!disabledThemes.length, '内置主题没有 fx:none（默认与暖白主题不再静默关闭点击反馈）');
 ok(!registryFx.includes('none') && !cssFx.includes('none'), 'none 是禁用值，不伪造粒子原型');
 
 // Run the actual theme writer and interaction engine. A positive control
-// proves this DOM reaches the burst path before testing the disabled value.
-(function checkDisabledFeedback() {
+// proves this DOM reaches the burst path before checking the base themes.
+(function checkHertzFeedback() {
   const observers = [], listeners = new Map(), timers = new Map();
   let created = 0, clock = 0, timerId = 0;
   function node() {
@@ -235,17 +235,18 @@ ok(!registryFx.includes('none') && !cssFx.includes('none'), 'none 是禁用值�
   sandbox.Theme.init();
   vm.runInContext(INTERACTIONS_JS,sandbox,{filename:'anime-interactions.js'});
   const click=()=>listeners.get('click').forEach(fn=>fn({target:button,detail:1,button:0,clientX:22,clientY:22}));
-  for(const id of ['hertz-dark','hertz-light']) {
+  const hertzFx={ 'hertz-dark':'spark', 'hertz-light':'paper' };
+  for(const id of Object.keys(hertzFx)) {
     sandbox.Theme.apply('emerald');click();
     ok(body.children.length>0 && timers.size>0, '启用主题仍能创建真实点击反馈');
     sandbox.Theme.apply(id);
-    ok(root.getAttribute('data-fx')==='none',id+' 实际 apply 写入 none');
+    ok(root.getAttribute('data-fx')===hertzFx[id],id+' 实际 apply 写入 '+hertzFx[id]);
     ok(body.children.length===0 && timers.size===0,id+' 切换时释放上个主题的粒子与计时器');
     const before=created;click();
-    ok(created===before && timers.size===0,id+' 点击不创建粒子、不回退 spark');
+    ok(created>before && timers.size>0,id+' 点击创建粒子（与其它主题一致）');
   }
   sandbox.AnimeInteractions.destroy();
-  ok(listeners.get('click').size===0,'禁用后仍能完整卸载反馈监听');
+  ok(listeners.get('click').size===0,'卸载后仍能完整移除反馈监听');
 })();
 
 // ---------------------------------------------------------------------------

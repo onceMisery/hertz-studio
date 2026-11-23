@@ -49,7 +49,9 @@
     halo:     { count: 0, dist: [0, 0], lift: 0, angle: null, stagger: 0, duration: 480 },
     neon:     { count: 0, dist: [0, 0], lift: 0, angle: null, stagger: 0, duration: 460 },
     pill:     { count: 0, dist: [0, 0], lift: 0, angle: null, stagger: 0, duration: 360 },
-    tide:     { count: 0, dist: [0, 0], lift: 0, angle: null, stagger: 0, duration: 520 }
+    tide:     { count: 0, dist: [0, 0], lift: 0, angle: null, stagger: 0, duration: 520 },
+    // 暖白：纸屑轻扬（与 spark 一样是多粒子原型）。
+    paper:    { count: 7,  dist: [16, 34], lift: 4,   angle: null,       stagger: 80,  duration: 520 }
   };
 
   var started = false, waiting = false;
