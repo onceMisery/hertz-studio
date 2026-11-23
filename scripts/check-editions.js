@@ -67,7 +67,7 @@ for (const edition of ['standard', 'full']) {
     '--target-dir', path.join(root, 'target'),
     '--locked', '--offline'], { cwd: root, stdio: 'inherit' });
   assert(!html.includes('edition:'));
-  assert.equal(staged[edition].version, '0.3.7');
+  assert.equal(staged[edition].version, '0.3.8');
   for (const item of staged[edition].contributions) assert(item.id.startsWith(staged[edition].id + '.'));
   for (const locale of Object.values(staged[edition].localizations)) {
     assert(locale.name.includes(edition === 'full' ? 'Full' : 'Standard'));
