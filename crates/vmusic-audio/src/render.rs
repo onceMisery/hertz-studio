@@ -45,8 +45,10 @@ use vmusic_core::{
     PrepareResult,
 };
 
+pub mod comparison;
 mod dsp;
 mod impulse;
+mod preview;
 mod terminal;
 mod tone;
 use dsp::{soft_limit, DspControl, DspRuntime};
@@ -185,6 +187,8 @@ struct Shared {
     crossfade_ms: AtomicU64,
     dsp: DspControl,
     output_gate: OutputGate,
+    preview_end_frame: AtomicU64,
+    preview_deadline: SleepDeadline,
 }
 
 impl Shared {
@@ -223,6 +227,8 @@ impl Shared {
             crossfade_ms: AtomicU64::new(0),
             dsp: DspControl::new(),
             output_gate: OutputGate::new(),
+            preview_end_frame: AtomicU64::new(0),
+            preview_deadline: SleepDeadline::new(),
         };
         // 回调会 try_lock 的锁，一把都不留地先暖过（含 current deck 的 samples，已在
         // Deck::new 里暖过）。
@@ -400,6 +406,7 @@ pub struct RenderCore {
     /// 等旧源淡出完成后换装的新源。
     pending_load: Option<PendingLoad>,
     native_budget: Option<NativePcmBudget>,
+    preview: preview::PreviewSlot,
 }
 
 /// Exact boundaries within one pull, relative to its first output frame.
@@ -715,6 +722,7 @@ impl RenderCore {
             tail_armed: false,
             pending_load: None,
             native_budget: None,
+            preview: preview::PreviewSlot::default(),
         };
         renderer.sync_dsp_context()?;
         Ok(renderer)
@@ -752,6 +760,7 @@ impl RenderCore {
             tail_armed: false,
             pending_load: None,
             native_budget: Some(budget),
+            preview: preview::PreviewSlot::default(),
         };
         renderer.sync_dsp_context()?;
         Ok(renderer)
@@ -832,6 +841,7 @@ impl RenderCore {
         &mut self,
         format: RenderFormat,
     ) -> Result<RenderOutput, AudioError> {
+        self.invalidate_preview(true)?;
         self.validate_format_change(format)?;
         let id = self
             .next_output_id
@@ -956,6 +966,7 @@ impl RenderCore {
     }
 
     pub(crate) fn set_format(&mut self, format: RenderFormat) -> Result<(), AudioError> {
+        self.invalidate_preview(true)?;
         self.validate_format_change(format)?;
         self.output_rate = format.sample_rate;
         self.output_channels = format.channels;
@@ -1062,6 +1073,11 @@ impl RenderCore {
         gain_db: f32,
         continuous: bool,
     ) -> Result<PrepareResult, AudioError> {
+        if self.preview_blocks_successor() {
+            return Ok(PrepareResult::Bypassed {
+                reason: "temporary_preview_active".into(),
+            });
+        }
         self.validate_native_install(&opened)?;
         self.clear_next();
         if matches!(
@@ -1186,9 +1202,15 @@ impl RenderCore {
             tracing::error!("spawn pending decoder failed: {e}");
             self.shared.flag_decode_error();
         }
+        if let Err(error) = self.activate_pending_preview() {
+            let _ = self.invalidate_preview(false);
+            self.transport_error = Some(error);
+            self.shared.playing.store(false, Ordering::Relaxed);
+            return;
+        }
         self.tail_armed = false;
         self.shared.reset_fade_shared();
-        if play_after {
+        if play_after && !self.shared.sleep_expired() {
             self.shared.arm_fade(1.0, FADE_IN_MS, self.output_rate);
             self.shared.playing.store(true, Ordering::Relaxed);
         } else {
@@ -1207,6 +1229,7 @@ impl RenderCore {
         mss: MediaSourceStream,
         ext: Option<&str>,
     ) -> Result<MediaInfo, AudioError> {
+        self.invalidate_preview(false)?;
         if self.native_budget.is_some() {
             return Err(AudioError::UnsupportedFormat(
                 "native_source_requires_prepared_media".into(),
@@ -1277,6 +1300,7 @@ impl RenderCore {
 
     /// actor 线程每 20ms 调一次：推进淡出后的延迟动作与自然尾部淡出。
     pub fn maintain(&mut self) {
+        self.maintain_preview();
         let source_empty = self
             .shared
             .current_deck()
@@ -1423,7 +1447,16 @@ fn render_decks(
         let outgoing_db = f32::from_bits(current.gain_db.load(Ordering::Relaxed));
         let eof = current.eof.load(Ordering::Acquire);
         let Some(next) = prepared.as_mut() else {
-            let count = ((data.len() - copied).min(outgoing.len()) / channels) * channels;
+            let end = shared.preview_end_frame.load(Ordering::Relaxed);
+            let available = if end == 0 {
+                outgoing.len()
+            } else {
+                outgoing.len().min(
+                    end.saturating_sub(current.frames_played.load(Ordering::Relaxed)) as usize
+                        * channels,
+                )
+            };
+            let count = ((data.len() - copied).min(available) / channels) * channels;
             for frame_offset in (0..count).step_by(channels) {
                 let mut old = [0.0; 32];
                 for sample in &mut old[..channels] {
@@ -1446,7 +1479,8 @@ fn render_decks(
                 .frames_played
                 .fetch_add((count / channels) as u64, Ordering::Relaxed);
             copied += count;
-            facts.exhausted = eof && outgoing.is_empty();
+            facts.exhausted = (eof && outgoing.is_empty())
+                || (end != 0 && current.frames_played.load(Ordering::Relaxed) >= end);
             break;
         };
         let Ok(mut incoming) = next.deck.samples.try_lock() else {
@@ -1625,13 +1659,16 @@ fn write_samples_mode(
     stop_at_transition: bool,
     dsp: &mut DspRuntime,
 ) -> RenderReport {
+    let preview_deadline = shared.preview_deadline.callback_deadline();
     let sleep_deadline = shared
         .sleep_deadline
         .as_ref()
         .map(|gate| (gate, gate.callback_deadline()));
     // Check before touching a deck, a fade, DSP or any mutex. This also runs on
     // the first callback after OS resume, before the actor/runtime can wake.
-    if sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured)) {
+    if shared.preview_deadline.callback_expired(preview_deadline)
+        || sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured))
+    {
         // The callback only silences PCM. The actor owns transport state and
         // must acknowledge pause before the coordinator clears a due gate;
         // a suspended callback must never overwrite a newer play command.
@@ -1825,6 +1862,7 @@ fn write_samples_mode(
     }
     if shared.dsp.reset_epoch.load(Ordering::Acquire) != dsp_epoch
         || sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured))
+        || shared.preview_deadline.callback_expired(preview_deadline)
     {
         data.fill(0.0);
         return RenderReport::default();
@@ -2029,6 +2067,7 @@ impl AudioBackend for RenderCore {
     /// 卸载由 load() 负责，杀线程会让「停止 → 再播放」无声卡死。
     /// duration 不清：停止后进度条仍应显示总时长。
     fn stop(&mut self) -> Result<(), AudioError> {
+        self.invalidate_preview(false)?;
         if self.shared.playing.load(Ordering::Relaxed) && !self.pending_stop {
             self.shared.arm_fade(0.0, FADE_OUT_MS, self.output_rate);
             self.pending_stop = true;
@@ -2043,28 +2082,12 @@ impl AudioBackend for RenderCore {
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), AudioError> {
-        if self.pending_load.is_some() {
-            self.shared.playing.store(false, Ordering::Relaxed);
-            self.spawn_pending();
-        }
-        let position_ms = position_ms.min(self.duration_ms.unwrap_or(u64::MAX));
-        let (handle, ctl) = self.decoder.as_ref().ok_or(AudioError::NothingLoaded)?;
-        ctl.seek(handle, position_ms, std::time::Duration::from_secs(2))?;
-        self.shared.dsp.reset();
-        // 尾段淡出途中 seek：增益正沿尾斜坡滑向 0，而 tail_armed 会阻止
-        // 尾部逻辑重新武装——不处理就永远卡在静音。解除门闩，从当前增益
-        // 起步装一条 120ms 短回淡（arm_fade 自己读当前 fade_gain 当初值）。
-        // 例外：pending_stop 复位时的 seek(0) 是停止动作，不能再淡回来。
-        if self.tail_armed {
-            self.tail_armed = false;
-            if !self.pending_stop && !self.pending_pause {
-                self.shared.arm_fade(1.0, 120, self.output_rate);
-            }
-        }
-        Ok(())
+        self.invalidate_preview(false)?;
+        self.seek_timeline(position_ms)
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
+        self.invalidate_preview(true)?;
         if !volume.is_finite() {
             return Err(AudioError::Other("volume must be finite".into()));
         }
@@ -2075,6 +2098,7 @@ impl AudioBackend for RenderCore {
     }
 
     fn set_dsp(&mut self, params: vmusic_core::DspParams) -> Result<(), AudioError> {
+        self.invalidate_preview(true)?;
         if params.eq_gains_db.iter().any(|value| !value.is_finite())
             || !params.preamp_db.is_finite()
             || !params.track_gain_db.is_finite()
@@ -2099,6 +2123,7 @@ impl AudioBackend for RenderCore {
     }
 
     fn set_crossfade(&mut self, ms: u64) -> Result<(), AudioError> {
+        self.invalidate_preview(true)?;
         self.shared
             .crossfade_ms
             .store(ms.min(8000), Ordering::Relaxed);
@@ -2117,6 +2142,7 @@ impl AudioBackend for RenderCore {
         &mut self,
         params: vmusic_core::audio_quality::QualityParams,
     ) -> Result<(), AudioError> {
+        self.invalidate_preview(true)?;
         self.validate_quality_context(params, self.format())?;
         self.shared.dsp.publish_quality(self.output_rate, params)?;
         self.shared
@@ -2129,6 +2155,7 @@ impl AudioBackend for RenderCore {
         &mut self,
         kernel: vmusic_core::impulse::ImpulseKernel,
     ) -> Result<(), AudioError> {
+        self.invalidate_preview(true)?;
         if self.native_budget.is_some() {
             return Err(AudioError::Other("房间不支持私人校正核".into()));
         }
@@ -2149,17 +2176,48 @@ impl AudioBackend for RenderCore {
     }
 
     fn quality_status(&self) -> Option<vmusic_core::audio_quality::QualityStatus> {
-        Some(self.shared.dsp.quality_status(
+        let mut status = self.shared.dsp.quality_status(
             self.shared.playing.load(Ordering::Relaxed),
             self.shared.output_gate.current(),
-        ))
+        );
+        self.project_preview(&mut status);
+        Some(status)
+    }
+
+    fn prepare_quality_preview(
+        &mut self,
+        plan: vmusic_core::audio_preview::PreviewPlan,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        self.prepare_preview(plan, source, ext)
+    }
+    fn start_quality_preview(
+        &mut self,
+        id: &str,
+        side: vmusic_core::audio_preview::PreviewSide,
+    ) -> Result<MediaInfo, AudioError> {
+        self.start_preview(id, side)
+    }
+    fn select_quality_preview(
+        &mut self,
+        id: &str,
+        side: vmusic_core::audio_preview::PreviewSide,
+    ) -> Result<(), AudioError> {
+        self.select_preview(id, side)
+    }
+    fn cancel_quality_preview(&mut self, id: Option<&str>) -> Result<bool, AudioError> {
+        self.cancel_preview(id)
+    }
+    fn refresh_quality_preview(&mut self, id: &str) -> bool {
+        self.refresh_preview(id)
+    }
+    fn take_quality_preview_restore(&mut self) -> Option<String> {
+        self.take_preview_restore()
     }
 
     fn eq_status(&self) -> Option<vmusic_core::EqStatus> {
-        Some(self.shared.dsp.status(
-            self.shared.playing.load(Ordering::Relaxed),
-            self.shared.output_gate.current(),
-        ))
+        self.quality_status().map(|s| s.eq)
     }
 
     fn prepare_next(&mut self, next: NextTrack) -> Result<PrepareResult, AudioError> {
@@ -2274,7 +2332,8 @@ impl AudioBackend for RenderCore {
     fn finished(&self) -> bool {
         // 换装淡出窗口里旧源耗尽绝不能算「播完」：maintain 马上要换上新源，
         // 此刻报 Ended 会让状态层错误地接力/停播（I1）。
-        if self.pending_load.is_some()
+        if self.preview_blocks_successor()
+            || self.pending_load.is_some()
             || self.shared.next.lock().unwrap().is_some()
             || self.pending_stop
             || self.pending_pause
@@ -2311,6 +2370,7 @@ impl AudioBackend for RenderCore {
         if !self.shared.take_decode_error() {
             return false;
         }
+        let _ = self.invalidate_preview(false);
         self.shared.playing.store(false, Ordering::Relaxed);
         self.clear_buffers();
         self.reset_fade();
@@ -2949,13 +3009,21 @@ mod tests {
     pub(super) struct CallbackMemory {
         pub(super) allocs: usize,
         pub(super) frees: usize,
+        pub(super) allocated_bytes: usize,
+        pub(super) freed_bytes: usize,
+        pub(super) live_bytes: isize,
+        pub(super) peak_live_bytes: usize,
         alloc_sizes: [usize; RECORDED_ALLOCS],
     }
 
     impl CallbackMemory {
-        const ZERO: Self = Self {
+        pub(super) const ZERO: Self = Self {
             allocs: 0,
             frees: 0,
+            allocated_bytes: 0,
+            freed_bytes: 0,
+            live_bytes: 0,
+            peak_live_bytes: 0,
             alloc_sizes: [0; RECORDED_ALLOCS],
         };
     }
@@ -2974,6 +3042,11 @@ mod tests {
                         memory.alloc_sizes[memory.allocs] = layout.size();
                     }
                     memory.allocs += 1;
+                    memory.allocated_bytes += layout.size();
+                    memory.live_bytes += layout.size() as isize;
+                    memory.peak_live_bytes = memory
+                        .peak_live_bytes
+                        .max(memory.live_bytes.max(0) as usize);
                     counts.set(Some(memory));
                 }
             });
@@ -2984,6 +3057,8 @@ mod tests {
             let _ = CALLBACK_ALLOCATIONS.try_with(|counts| {
                 if let Some(mut memory) = counts.get() {
                     memory.frees += 1;
+                    memory.freed_bytes += layout.size();
+                    memory.live_bytes -= layout.size() as isize;
                     counts.set(Some(memory));
                 }
             });
@@ -6366,3 +6441,5 @@ mod tests {
 
 #[cfg(test)]
 mod continuity_tests;
+#[cfg(test)]
+mod resource_tests;

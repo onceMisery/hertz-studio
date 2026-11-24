@@ -1,0 +1,378 @@
+[
+  {
+    "name": "remaining-windows-lib-current",
+    "path": "logs/remaining-windows-lib-current.log",
+    "sha256": "f04e3a818d52c0880d85705ca34e0adb6821db51c69dc1e09949480fc393913b",
+    "bytes": 126600,
+    "args": [
+      "+1.88",
+      "test",
+      "-p",
+      "vmusic-audio",
+      "-p",
+      "vmusic-core",
+      "-p",
+      "vmusic-store",
+      "-p",
+      "hertz-studio",
+      "--lib",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv",
+      "--",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795515311826,
+    "ended": 1795515740199,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-linux-regression-2",
+    "path": "logs/remaining-linux-regression-2.log",
+    "sha256": "daa2905737130841fea21be8c236584ecc3a44ffb31d2e83ee8116387dfee8ec",
+    "bytes": 9564,
+    "args": [
+      "-d",
+      "Ubuntu",
+      "--exec",
+      "sh",
+      "/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/linux-regression.sh"
+    ],
+    "code": 0,
+    "started": 1795514976381,
+    "ended": 1795516219269,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-embedded-preview-assets",
+    "path": "logs/remaining-embedded-preview-assets.log",
+    "sha256": "cb23cb7b6ed5a1fc4373f2d599e7666bb796196ebf9181840f4bd66c8797d19b",
+    "bytes": 738,
+    "args": [
+      "+1.88",
+      "test",
+      "-p",
+      "hertz-studio",
+      "--bin",
+      "hertz-studio",
+      "registered_ui_assets_are_served_with_their_own_content",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv",
+      "--",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795515311837,
+    "ended": 1795515388246,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-frontend-contract-2",
+    "path": "logs/remaining-frontend-contract-2.log",
+    "sha256": "11a85c0ebfdd641c0a3ef1095d093c10009fe508616788e655cfc84792351896",
+    "bytes": 11670,
+    "args": [
+      "scripts/check-frontend.js"
+    ],
+    "code": 0,
+    "started": 1795514976385,
+    "ended": 1795515013526,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-preview-chrome-6",
+    "path": "logs/remaining-preview-chrome-6.log",
+    "sha256": "13ca83f42637aed278fb926694e9fd2d5d34951e58e719a74b00eaad7701b75b",
+    "bytes": 1009,
+    "args": [
+      "-e",
+      "process.env.PLAYWRIGHT_MODULE=\"C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules/playwright\";process.env.PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe';require(\"./scripts/check-audio-preview-browser.js\");"
+    ],
+    "code": 0,
+    "started": 1795511243033,
+    "ended": 1795511254141,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-dsp-chrome",
+    "path": "logs/remaining-dsp-chrome.log",
+    "sha256": "f79990a24c210e9d0f33e1644c51fce0ad8710de809ac2135f0c1f16b92003b3",
+    "bytes": 681,
+    "args": [
+      "-e",
+      "process.env.PLAYWRIGHT_MODULE=\"C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules/playwright\";process.env.PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe';require(\"./scripts/check-dsp-settings-browser.js\");"
+    ],
+    "code": 0,
+    "started": 1795511243073,
+    "ended": 1795511252417,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-actions-chrome",
+    "path": "logs/remaining-actions-chrome.log",
+    "sha256": "42a5bbb07b76ea38b3a65554a15c3c7605b9c2e35d9ba8212cf15c1ca1bfdceb",
+    "bytes": 541,
+    "args": [
+      "-e",
+      "process.env.PLAYWRIGHT_MODULE=\"C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules/playwright\";process.env.PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe';require(\"./scripts/check-audio-quality-actions-browser.js\");"
+    ],
+    "code": 0,
+    "started": 1795511243040,
+    "ended": 1795511245204,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-shared-zero-service-release",
+    "path": "logs/remaining-shared-zero-service-release.log",
+    "sha256": "e7518b657565931273e737dca43867f5d32669c090e80611ac457cddfa90b6f8",
+    "bytes": 1150,
+    "args": [
+      "audio_preview::tests::shared_zero_pcm_http_preview_dbx_selection_and_byte_rebinding",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795515900143,
+    "ended": 1795515901376,
+    "binary_sha256": null
+  },
+  {
+    "name": "remaining-parameter-response",
+    "path": "logs/remaining-parameter-response.log",
+    "sha256": "3ae9b63ee3afe4f1eb2e6fd333080d17c86ad27f5b156551733ec8cc60985f67",
+    "bytes": 11542,
+    "args": [
+      "render::resource_tests::parameter_adoption_latency_probe",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795516345254,
+    "ended": 1795516430577,
+    "binary_sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+  },
+  {
+    "name": "remaining-dsp-memory",
+    "path": "logs/remaining-dsp-memory.log",
+    "sha256": "305e63b266e34dbfeca328282729aa13eafcd74078a79f77552c8deaa13feb29",
+    "bytes": 2034,
+    "args": [
+      "render::resource_tests::dsp_working_memory_probe",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795516430583,
+    "ended": 1795516430946,
+    "binary_sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+  },
+  {
+    "name": "remaining-analysis-memory",
+    "path": "logs/remaining-analysis-memory.log",
+    "sha256": "eee212aeae5ebbb49822b295df4d2b6fba568cca34bc66ffb552c4161a9aa22e",
+    "bytes": 1613,
+    "args": [
+      "render::resource_tests::analysis_working_memory_probe",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795516430950,
+    "ended": 1795516431992,
+    "binary_sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+  },
+  {
+    "name": "remaining-preview-chain-600s-direct",
+    "path": "logs/remaining-preview-chain-600s-direct.log",
+    "sha256": "90209441670e78c3c3d818a68aa002f862966b98b9b72e274e8c354b66d132e5",
+    "bytes": 3049,
+    "exe": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+    "args": [
+      "render::continuity_tests::complete_quality_chain_probe",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "env": {
+      "SystemRoot": "C:\\Windows",
+      "WINDIR": "C:\\Windows",
+      "TEMP": "C:\\Users\\miracle\\AppData\\Local\\Temp",
+      "TMP": "C:\\Users\\miracle\\AppData\\Local\\Temp",
+      "HERTZ_AUDIO_PROBE_SECONDS": "100",
+      "HERTZ_AUDIO_PROBE_PACED": "1",
+      "HERTZ_AUDIO_PROBE_CHANGES": "1",
+      "HERTZ_AUDIO_PROBE_PREVIEW": "1"
+    },
+    "code": 0,
+    "started": 1795516805441,
+    "ended": 1795517405963,
+    "binary_sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+  },
+  {
+    "name": "remaining-final-hertz-full",
+    "path": "logs/remaining-final-hertz-full.log",
+    "sha256": "de08a9f8263dff60ce577c26a586a38e6019da7b639d0c5b3c762778dd130e5f",
+    "bytes": 199,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "check",
+      "-p",
+      "hertz-studio",
+      "--all-targets",
+      "--features",
+      "full",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv"
+    ],
+    "code": 0,
+    "started": 1795517958637,
+    "ended": 1795517974990
+  },
+  {
+    "name": "remaining-final-dbx-standard",
+    "path": "logs/remaining-final-dbx-standard.log",
+    "sha256": "44860ba6472cdca5147c48b2d2984c3e3787809cebe2541be8634958f03cbe50",
+    "bytes": 323,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "check",
+      "-p",
+      "dbx-plugin-hertz",
+      "--all-targets",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv"
+    ],
+    "code": 0,
+    "started": 1795517974995,
+    "ended": 1795517982437
+  },
+  {
+    "name": "remaining-final-dbx-full",
+    "path": "logs/remaining-final-dbx-full.log",
+    "sha256": "8cfe38c211cee6b0ac970453284bd1f725eb20a23222efe445d60c453febbd29",
+    "bytes": 323,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "check",
+      "-p",
+      "dbx-plugin-hertz",
+      "--all-targets",
+      "--features",
+      "full",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv"
+    ],
+    "code": 0,
+    "started": 1795517982442,
+    "ended": 1795517989761
+  },
+  {
+    "name": "remaining-audio-integration",
+    "path": "logs/remaining-audio-integration.log",
+    "sha256": "2e914cf60ac5c17554d511ed631fb558140b8c76eef2462f65d2ceccfd19d997",
+    "bytes": 1230,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "test",
+      "-p",
+      "vmusic-audio",
+      "--test",
+      "resampling",
+      "--test",
+      "scheduled_output_alloc",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv",
+      "--",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795513424330,
+    "ended": 1795513447653
+  },
+  {
+    "name": "remaining-audio-null",
+    "path": "logs/remaining-audio-null.log",
+    "sha256": "efca25175f7509dd6b5035fb2bfd3c633b7cd8212a622224e6f13de2fb02cfb1",
+    "bytes": 3287,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "test",
+      "-p",
+      "vmusic-audio",
+      "--no-default-features",
+      "--lib",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv",
+      "--",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "started": 1795513447656,
+    "ended": 1795513458069
+  },
+  {
+    "name": "remaining-service-release-compile",
+    "path": "logs/remaining-service-release-compile.log",
+    "sha256": "875ecee671b18b6be803b1d2ab9534e95d5dc88921e5bb0d425ce045db4a7493",
+    "bytes": 13567,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "test",
+      "-p",
+      "hertz-studio",
+      "--release",
+      "--lib",
+      "--no-run",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv"
+    ],
+    "code": 0,
+    "started": 1795515311821,
+    "ended": 1795515824480
+  },
+  {
+    "name": "remaining-audio-release-current-compile",
+    "path": "logs/remaining-audio-release-current-compile.log",
+    "sha256": "3003bab960e75bc027cb03d19e7dcc240c3a241d1d637e9a25624d7bd97e9e42",
+    "bytes": 326,
+    "exe": "cargo",
+    "args": [
+      "+1.88",
+      "test",
+      "-p",
+      "vmusic-audio",
+      "--release",
+      "--lib",
+      "--no-run",
+      "--locked",
+      "--target-dir",
+      "D:/code/github/hertz-studio/target/audio-quality-msrv"
+    ],
+    "code": 0,
+    "started": 1795516007351,
+    "ended": 1795516044225
+  }
+]

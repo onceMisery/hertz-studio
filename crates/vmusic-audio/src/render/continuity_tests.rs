@@ -717,6 +717,7 @@ fn complete_quality_chain_probe() {
     }
     let paced = std::env::var_os("HERTZ_AUDIO_PROBE_PACED").is_some();
     let changes = std::env::var_os("HERTZ_AUDIO_PROBE_CHANGES").is_some();
+    let preview_processing = std::env::var_os("HERTZ_AUDIO_PROBE_PREVIEW").is_some();
     let seconds: usize = std::env::var("HERTZ_AUDIO_PROBE_SECONDS")
         .ok()
         .map(|s| s.parse().expect("probe seconds integer"))
@@ -795,6 +796,17 @@ fn complete_quality_chain_probe() {
                 None
             };
             renderer.set_quality(q).unwrap();
+            if preview_processing {
+                let kernel = *renderer.shared.dsp.impulse.lock().unwrap();
+                renderer
+                    .shared
+                    .dsp
+                    .publish_preview(
+                        super::dsp::PreparedEq::preview(rate, q, -3.0, 0).unwrap(),
+                        kernel,
+                    )
+                    .unwrap();
+            }
             let samples = (rate as usize * seconds) * 2;
             renderer
                 .shared
@@ -809,6 +821,10 @@ fn complete_quality_chain_probe() {
             let mut timings = Vec::with_capacity(samples / (frames * 2) + 1);
             let interval = std::time::Duration::from_secs_f64(frames as f64 / rate as f64);
             let started = std::time::Instant::now();
+            let mut bypassed = false;
+            let mut preview_switches = 0;
+            let mut callback_allocs = 0;
+            let mut callback_frees = 0;
             for index in 0..samples / (frames * 2) {
                 if changes && index > 0 && index % (rate as usize / frames / 2).max(1) == 0 {
                     let alternate = (index / (rate as usize / frames / 2).max(1)).is_multiple_of(2);
@@ -832,9 +848,51 @@ fn complete_quality_chain_probe() {
                         q.impulse_id = vmusic_core::audio_quality::decode_id(&id);
                     }
                     renderer.set_quality(q).unwrap();
+                    if preview_processing {
+                        // The real audition owner resets on a side change. Exercise
+                        // the same finite gain/alignment messages here, alongside
+                        // ordinary warm-up, kernel fades and retirement between sides.
+                        let next_bypass = (index / (rate as usize / frames / 2).max(1)) % 10 == 0;
+                        if bypassed != next_bypass {
+                            renderer.shared.dsp.reset();
+                            preview_switches += 1;
+                        }
+                        bypassed = next_bypass;
+                        let params = if bypassed {
+                            super::preview::bypass(q)
+                        } else {
+                            q
+                        };
+                        let alignment = if bypassed && correction {
+                            vmusic_core::audio_preview::MAX_ALIGNMENT_FRAMES
+                        } else {
+                            0
+                        };
+                        let kernel = if bypassed {
+                            None
+                        } else {
+                            *renderer.shared.dsp.impulse.lock().unwrap()
+                        };
+                        renderer
+                            .shared
+                            .dsp
+                            .publish_preview(
+                                super::dsp::PreparedEq::preview(
+                                    rate,
+                                    params,
+                                    if bypassed { -6.0 } else { -3.0 },
+                                    alignment,
+                                )
+                                .unwrap(),
+                                kernel,
+                            )
+                            .unwrap();
+                    }
                 }
                 let begin = std::time::Instant::now();
-                output.render(&mut block, 2);
+                let (_, memory) = super::tests::measure_memory(|| output.render(&mut block, 2));
+                callback_allocs += memory.allocs;
+                callback_frees += memory.frees;
                 timings.push(begin.elapsed().as_nanos());
                 if paced {
                     let next = started + interval * (index as u32 + 1);
@@ -847,8 +905,13 @@ fn complete_quality_chain_probe() {
             let deadline = frames as f64 / rate as f64 * 1e9;
             eprintln!(
                 "FULL_QUALITY_PROBE {}",
-                serde_json::json!({"rate":rate,"frames":frames,"seconds":seconds,"continuous_changes":changes,"p99_ns":p99,"max_ns":max,"deadline_ns":deadline,"p99_fraction":p99 as f64/deadline,"over_deadline":timings.iter().filter(|n|**n as f64>deadline).count(),"real_device":false,"paced":paced,"audio_priority":paced&&cfg!(windows),"ir_taps":if correction {257} else {0},"saturation_oversample":if correction {4} else {1},"scope":if correction {"qualified_full_chain"} else {"qualified_without_ir_saturation"},"detector_taps":128,"detector_phases":8,"delay_frames":renderer.quality_status().map(|s|s.latency_frames)})
+                serde_json::json!({"rate":rate,"frames":frames,"seconds":seconds,"continuous_changes":changes,"preview_processing":preview_processing,"preview_switches":preview_switches,"callback_allocations":callback_allocs,"callback_frees":callback_frees,"p99_ns":p99,"max_ns":max,"deadline_ns":deadline,"p99_fraction":p99 as f64/deadline,"over_deadline":timings.iter().filter(|n|**n as f64>deadline).count(),"real_device":false,"paced":paced,"audio_priority":paced&&cfg!(windows),"ir_taps":if correction {257} else {0},"saturation_oversample":if correction {4} else {1},"scope":if correction {"qualified_full_chain"} else {"qualified_without_ir_saturation"},"detector_taps":128,"detector_phases":8,"delay_frames":renderer.quality_status().map(|s|s.latency_frames)})
             );
+            assert_eq!(
+                callback_allocs, 0,
+                "callback allocations at {rate}/{frames}"
+            );
+            assert_eq!(callback_frees, 0, "callback frees at {rate}/{frames}");
             if (p99 as f64) >= deadline * 0.25 {
                 over_budget.push((rate, frames, p99 as f64 / deadline));
             }

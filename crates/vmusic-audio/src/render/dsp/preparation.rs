@@ -136,6 +136,8 @@ fn prepare_inner(
         0.0
     };
     Ok(PreparedEq {
+        preview_gain_db: 0.0,
+        preview_alignment: 0,
         revision,
         rate,
         gains,

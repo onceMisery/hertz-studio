@@ -17,7 +17,7 @@
     var compensation=document.getElementById('dsp-compensation'),saturation=document.getElementById('dsp-saturation');
     var drive=document.getElementById('dsp-drive'),mix=document.getElementById('dsp-mix'),impulse=document.getElementById('dsp-impulse');
 
-    var revision = null, latest = null;
+    var revision = null, latest = null, preview = null;
     var preamp = document.getElementById('dsp-preamp');
     var loudness = document.getElementById('dsp-loudness');
     var crossfade = document.getElementById('dsp-crossfade');
@@ -40,6 +40,7 @@
     }
     function describe(cfg) {
       var effective = cfg.effective, active = effective && effective.eq && effective.eq.active;
+      if (effective && effective.preview) return '正在采用临时试听；保存设置保持原版本，结束试听后恢复。';
       if (cfg.application_state === 'failed') return '设置已保存，应用失败：' + String(cfg.issues && cfg.issues[0] && cfg.issues[0].message || '请检查输出设备');
       if (cfg.application_state === 'applied' && cfg.applied_revision === cfg.revision) return active ? '设置已保存，音效已应用到播放输出。' : '设置已保存，音效已采用；当前播放已暂停。';
       if (cfg.application_state === 'applying') return '设置已保存，音效正在平滑切换…';
@@ -65,6 +66,7 @@
     }
     function showEffective(cfg) {
       latest=cfg;
+      if (preview) preview.onRead(cfg);
       var capabilities=cfg.capabilities||{};
       var saturationNote=document.getElementById('dsp-saturation-status');
       var impulseNote=document.getElementById('dsp-impulse-status');
@@ -114,7 +116,12 @@
     function clearCapabilityErrors() {
       [saturation,impulse].forEach(function(input){input.setCustomValidity('');input.removeAttribute('aria-invalid');});
     }
-    function changed() { clearCapabilityErrors();dirty = true; edits++; note(lastMessage); }
+    function changed(event) {
+      if (event && event.target.closest('[data-quality-preview]')) return;
+      clearCapabilityErrors();
+      if (preview) preview.invalidate();
+      dirty = true; edits++; note(lastMessage);
+    }
     function validateCapabilities() {
       clearCapabilityErrors();
       var capabilities=latest&&latest.capabilities||{};
@@ -125,9 +132,15 @@
         }
       });
     }
+    function prepareSubmit() {
+      // The button click also precedes native validation for implicit Enter
+      // submission. Preview-only errors must not gate saved preferences.
+      if (preview) preview.clearErrors();
+    }
     async function submit(event) {
       event.preventDefault();
       if (closed || busy) return;
+      if (preview) preview.clearErrors();
       validateCapabilities();
       if (!form.reportValidity()) return;
       var requestEdits = edits;
@@ -141,6 +154,8 @@
       form.setAttribute('aria-busy', 'true');
       note('正在保存音效设置…');
       try {
+        if (preview) { preview.setSaving(true); await preview.cancel('保存前正在结束临时试听…'); }
+        if (closed || requestIntent !== intent) return;
         var cfg = await options.transport.post('/v1/player/audio-quality', body);
         if (closed || requestIntent !== intent) return;
         revision=cfg.revision; showEffective(cfg);
@@ -160,6 +175,7 @@
         save.disabled = false;
         reset.disabled = false;
         form.setAttribute('aria-busy', 'false');
+        if (preview) preview.setSaving(false);
         schedule();
       }
     }
@@ -184,6 +200,8 @@
     }
     function destroy() {
       closed = true; intent++; cancelTimer();
+      if (preview) preview.destroy();
+      save.removeEventListener('click', prepareSubmit);
       form.removeEventListener('submit', submit);
       form.removeEventListener('input', changed);
       form.removeEventListener('change', changed);
@@ -194,6 +212,13 @@
       window.removeEventListener('hertz-native-host-ready', visibilityChanged);
       window.removeEventListener('pagehide', destroy);
     }
+    if (window.HertzAudioPreviewSettings) preview = window.HertzAudioPreviewSettings.init({
+      form: form, transport: options.transport, getDraft: draft,
+      getRevision: function () { return revision; },
+      onState: function (cfg) { showEffective(cfg); note(describe(cfg)); },
+      refresh: function () { return refresh(false); }
+    });
+    save.addEventListener('click', prepareSubmit);
     form.addEventListener('submit', submit);
     form.addEventListener('input', changed);
     form.addEventListener('change', changed);

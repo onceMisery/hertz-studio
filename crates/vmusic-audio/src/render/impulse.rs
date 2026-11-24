@@ -39,12 +39,25 @@ pub(super) struct PreparedImpulse {
     pub len: usize,
     pub delay: usize,
     pub gain: f32,
+    pub preview_only: bool,
     convolve: Convolution,
 }
 impl PreparedImpulse {
     pub fn prepare(kernel: ImpulseKernel) -> Result<Self, AudioError> {
         kernel.validate()?;
         vmusic_core::audio_quality::validate_correction_rate(kernel.sample_rate)?;
+        Self::copy(kernel, false)
+    }
+    pub fn prepare_preview(
+        impulse: vmusic_core::audio_preview::PreviewImpulse,
+    ) -> Result<Self, AudioError> {
+        impulse.validate()?;
+        Self::copy(
+            impulse.kernel,
+            impulse.phase == vmusic_core::audio_preview::ImpulsePhase::Unknown,
+        )
+    }
+    fn copy(kernel: ImpulseKernel, preview_only: bool) -> Result<Self, AudioError> {
         let mut result = Self {
             id: vmusic_core::audio_quality::decode_id(&kernel.resource_id).unwrap(),
             rate: kernel.sample_rate,
@@ -52,6 +65,7 @@ impl PreparedImpulse {
             len: kernel.channels[0].len(),
             delay: kernel.delay_frames,
             gain: 10.0f32.powf(kernel.attenuation_db / 20.0),
+            preview_only,
             convolve: {
                 #[cfg(target_arch = "x86_64")]
                 {

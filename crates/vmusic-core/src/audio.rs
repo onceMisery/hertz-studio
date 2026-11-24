@@ -202,6 +202,43 @@ pub trait AudioBackend {
         None
     }
 
+    fn prepare_quality_preview(
+        &mut self,
+        _plan: crate::audio_preview::PreviewPlan,
+        _source: Box<dyn AudioSource>,
+        _ext: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        Err(AudioError::Other("当前后端不支持临时试听".into()))
+    }
+
+    fn start_quality_preview(
+        &mut self,
+        _id: &str,
+        _side: crate::audio_preview::PreviewSide,
+    ) -> Result<MediaInfo, AudioError> {
+        Err(AudioError::Other("当前后端不支持临时试听".into()))
+    }
+
+    fn select_quality_preview(
+        &mut self,
+        _id: &str,
+        _side: crate::audio_preview::PreviewSide,
+    ) -> Result<(), AudioError> {
+        Err(AudioError::Other("当前后端不支持临时试听".into()))
+    }
+
+    fn cancel_quality_preview(&mut self, _id: Option<&str>) -> Result<bool, AudioError> {
+        Ok(false)
+    }
+
+    fn refresh_quality_preview(&mut self, _id: &str) -> bool {
+        false
+    }
+    /// Actor-only discontinuity notification after an automatic audition exit.
+    fn take_quality_preview_restore(&mut self) -> Option<String> {
+        None
+    }
+
     fn prepare_impulse(
         &mut self,
         _kernel: crate::impulse::ImpulseKernel,

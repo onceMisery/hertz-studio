@@ -1,0 +1,73 @@
+    Checking windows-sys v0.61.2
+    Checking bytemuck v1.25.2
+   Compiling ring v0.17.14
+    Checking bitflags v2.13.2
+    Checking num-integer v0.1.47
+    Checking symphonia-core v0.5.5
+    Checking transpose v0.2.3
+    Checking png v0.18.1
+    Checking symphonia-metadata v0.5.5
+    Checking symphonia-codec-pcm v0.5.5
+    Checking symphonia-codec-adpcm v0.5.5
+    Checking symphonia-utils-xiph v0.5.5
+    Checking symphonia-bundle-mp3 v0.5.5
+    Checking symphonia-bundle-flac v0.5.5
+    Checking symphonia-format-ogg v0.5.5
+    Checking symphonia-format-isomp4 v0.5.5
+    Checking symphonia-codec-vorbis v0.5.5
+    Checking symphonia-format-riff v0.5.5
+    Checking symphonia-codec-aac v0.5.5
+    Checking symphonia-codec-alac v0.5.5
+    Checking primal-check v0.3.4
+    Checking socket2 v0.6.5
+    Checking mio v1.2.3
+    Checking winapi-util v0.1.11
+    Checking same-file v1.0.6
+    Checking symphonia v0.5.5
+    Checking rustfft v6.4.1
+    Checking walkdir v2.5.0
+    Checking tokio v1.53.1
+   Compiling rustls v0.23.45
+    Checking socket-pktinfo v0.3.2
+   Compiling rmcp v3.5.1
+    Checking mdns-sd v0.15.2
+    Checking rustls-webpki v0.103.15
+    Checking rcgen v0.13.2
+   Compiling hertz-studio v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\hertz-studio)
+    Checking tokio-stream v0.1.19
+    Checking hyper v1.11.1
+    Checking sqlx-core v0.8.6
+    Checking tokio-util v0.7.19
+    Checking hyper-util v0.1.20
+    Checking tokio-rustls v0.26.5
+    Checking tower v0.5.3
+    Checking async-compression v0.4.48
+    Checking tokio-tungstenite v0.28.0
+    Checking tower-http v0.6.11
+    Checking tokio-tungstenite v0.29.0
+    Checking image v0.25.10
+    Checking hyper-rustls v0.27.9
+    Checking nu-ansi-term v0.50.3
+    Checking rubato v0.16.2
+    Checking notify-types v2.1.0
+    Checking sqlx-sqlite v0.8.6
+    Checking roxmltree v0.21.1
+    Checking raw-window-handle v0.6.2
+    Checking axum v0.8.9
+    Checking vmusic-lyrics v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-lyrics)
+    Checking hertz-wallpaper v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\hertz-wallpaper)
+    Checking sqlx v0.8.6
+    Checking hertz-sqlite-lifecycle v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\hertz-sqlite-lifecycle)
+    Checking vmusic-store v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-store)
+    Checking vmusic-lan v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-lan)
+    Checking rfd v0.15.4
+    Checking tracing-subscriber v0.3.23
+    Checking vmusic-audio v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-audio)
+    Checking notify v8.2.0
+    Checking reqwest v0.12.28
+    Checking vmusic-beats v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-beats)
+    Checking hertz-desktop-ipc v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\hertz-desktop-ipc)
+    Checking vmusic-library v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-library)
+    Checking dbx-plugin-sdk v0.1.0 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\plugin\vendor\dbx-plugin-sdk)
+    Checking dbx-plugin-hertz v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\plugin\backend)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 16s

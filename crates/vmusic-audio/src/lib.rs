@@ -48,6 +48,8 @@ pub use vmusic_core::PrepareResult;
 #[cfg(feature = "playback")]
 pub mod loudness;
 #[cfg(feature = "playback")]
+pub use render::comparison;
+#[cfg(feature = "playback")]
 mod true_peak;
 
 #[cfg(feature = "playback")]

@@ -32,6 +32,14 @@ impl Applied {
         self.source_generation == snapshot.source_generation
             && snapshot.track_id.as_deref() == Some(&self.track_id)
     }
+    pub(crate) fn matches_bytes(&self, snapshot: &PlayerSnapshot, sha256: &str) -> bool {
+        self.matches(snapshot)
+            && self
+                .selection
+                .as_ref()
+                .and_then(|s| s.source_sha256.as_deref())
+                == Some(sha256)
+    }
     pub(crate) fn from_selection(
         snapshot: &PlayerSnapshot,
         selection: GainSelection,
@@ -64,6 +72,28 @@ pub(crate) struct LoadDecision {
     pub measured: Option<(GainSelection, QualityConfig)>,
 }
 
+pub(crate) async fn candidate_ready_for_load(
+    state: &AppState,
+    id: &str,
+    path: &Path,
+) -> Option<u64> {
+    let Ok(config) = core_config(state).await else {
+        return None;
+    };
+    if config.loudness_source != LoudnessSource::R128 || config.loudness_mode == "off" {
+        return None;
+    }
+    state
+        .loudness_candidates
+        .ready_for_load(
+            id,
+            &config.revision,
+            path,
+            state.audio.snapshot().source_generation,
+        )
+        .await
+}
+
 /// Caller holds play_commit. Settings updates use that same lock, so source,
 /// mode and candidate selection are one decision immediately before Load.
 /// Atomic Load-with-gain prevents changing the outgoing track during I/O.
@@ -71,6 +101,7 @@ pub(crate) async fn for_load_locked(
     state: &AppState,
     id: &str,
     complete_path: Option<&Path>,
+    candidate_serial: Option<u64>,
 ) -> Result<LoadDecision, CoreError> {
     let mut decision = LoadDecision {
         source: None,
@@ -90,15 +121,32 @@ pub(crate) async fn for_load_locked(
             .map_or(0.0, |(gain, _)| gain as f32);
     } else if state.scan.lock().await.running {
         state.loudness_candidates.invalidate();
-    } else if let Some(candidate) = complete_path.and_then(|path| {
-        state
-            .loudness_candidates
-            .take_for_load(id, &config.revision, path)
-    }) {
-        let (source, ext, gain) = candidate.into_parts();
-        decision.gain_db = gain.gain_db as f32;
-        decision.source = Some((source, ext));
-        decision.measured = Some((gain, config));
+    } else {
+        let candidate = candidate_serial.and_then(|serial| {
+            complete_path.and_then(|path| {
+                state.loudness_candidates.take_for_load(
+                    id,
+                    &config.revision,
+                    path,
+                    state.audio.snapshot().source_generation,
+                    serial,
+                )
+            })
+        });
+        if let Some(candidate) = candidate {
+            let stale = match candidate.next() {
+                Some(next) => !state.loudness_next_matches_locked(next).await,
+                None => false,
+            };
+            if stale {
+                candidate.retire();
+            } else {
+                let (source, ext, gain) = candidate.into_parts();
+                decision.gain_db = gain.gain_db as f32;
+                decision.source = Some((source, ext));
+                decision.measured = Some((gain, config));
+            }
+        }
     }
     Ok(decision)
 }
@@ -161,6 +209,7 @@ pub(crate) fn invalidate_on_library_changes(state: &Arc<AppState>) {
                     let Some(state) = weak.upgrade() else {
                         break;
                     };
+                    let _ = crate::audio_preview::cancel_for_change(&state).await;
                     let _commit = state.play_commit.lock().await;
                     invalidate_pending_locked(&state).await;
                 }
@@ -196,11 +245,16 @@ pub(crate) async fn apply_current(state: &Arc<AppState>) -> Result<Value, ApiErr
     }
     let index = (*state.cursor.lock().await).ok_or_else(|| bad_request("当前播放游标不可用"))?;
     let path = current_complete_path(state, &id).await?;
-    if !path.as_deref().is_some_and(|path| {
-        state
-            .loudness_candidates
-            .ready_for_load(&id, &config.revision, path)
-    }) {
+    let ready = match path.as_deref() {
+        Some(path) => {
+            state
+                .loudness_candidates
+                .ready_for_load(&id, &config.revision, path, snapshot.source_generation)
+                .await
+        }
+        None => None,
+    };
+    if ready.is_none() {
         schedule_current(state);
         return Ok(
             json!({"applied":false,"state":"preparing","message":"完整媒体尚未核验，请稍后再点应用；本次未改变播放增益"}),
@@ -253,6 +307,7 @@ mod tests {
             ..Default::default()
         };
         let selection = GainSelection {
+            source_sha256: None,
             state: "ready".into(),
             gain_db: 3.0,
             requested_gain_db: Some(3.0),
@@ -314,7 +369,7 @@ mod tests {
         .await
         .unwrap();
         let _commit = state.play_commit.lock().await;
-        let missing = for_load_locked(&state, id, None).await.unwrap();
+        let missing = for_load_locked(&state, id, None, None).await.unwrap();
         assert_eq!(missing.gain_db, 0.0);
         assert!(missing.measured.is_none());
         config.revision = "2".into();
@@ -327,7 +382,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            for_load_locked(&state, id, None).await.unwrap().gain_db,
+            for_load_locked(&state, id, None, None)
+                .await
+                .unwrap()
+                .gain_db,
             9.0
         );
         config.revision = "3".into();
@@ -340,7 +398,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            for_load_locked(&state, id, None).await.unwrap().gain_db,
+            for_load_locked(&state, id, None, None)
+                .await
+                .unwrap()
+                .gain_db,
             0.0
         );
         let current = state.audio.snapshot();
@@ -351,6 +412,7 @@ mod tests {
         state.audio.shutdown();
         actor.join().unwrap();
         state.db.close().await;
+        drop(state);
         remove_dir_settled(dir).await;
     }
 }

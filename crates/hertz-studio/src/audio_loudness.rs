@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! One bounded offline reader inside the existing shared analysis allowance.
 use crate::{
+    audio_source_snapshot::{OriginalIdentity, StableFile},
     error::{bad_request, not_found, ApiError, ApiResult},
     state::AppState,
 };
@@ -25,10 +26,13 @@ use vmusic_core::Track;
 use vmusic_core::{CoreError, TrackSource};
 use vmusic_store::loudness::{AlbumMeasurement, Member, TrackMeasurement};
 
-static READER: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
+pub(crate) static READER: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
+#[cfg(test)]
+pub(crate) static ANALYSIS_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const DEADLINE: Duration = Duration::from_secs(120);
 const MAX_MEMBERS: usize = 128;
 const CANDIDATE_TTL: Duration = Duration::from_secs(30);
+const CANDIDATE_IDENTITY_BUDGET: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 pub(crate) struct Candidates {
@@ -37,6 +41,7 @@ pub(crate) struct Candidates {
 #[derive(Default)]
 struct CandidateState {
     entries: VecDeque<VerifiedSource>,
+    next_serial: u64,
     epoch: u64,
     preparing: bool,
     reaping: bool,
@@ -49,18 +54,35 @@ struct CandidateState {
 /// At most two pending sources (current/next) are retained per AppState. Album
 /// member leases keep every fingerprint current until the selected source exits.
 pub(crate) struct VerifiedSource {
+    serial: u64,
     id: String,
     revision: String,
     path: PathBuf,
     prepared_at: Instant,
+    source_generation: u64,
     source: StableAudioSource,
     gain: GainSelection,
     next: Option<crate::state::PreparedPlayback>,
 }
 struct StableAudioSource {
-    file: std::fs::File,
-    _album_guards: Vec<std::fs::File>,
+    file: StableFile,
+    _album_guards: Vec<StableFile>,
     len: u64,
+}
+impl StableAudioSource {
+    fn originals_match(&self) -> bool {
+        self.file.original_identity_matches()
+            && self
+                ._album_guards
+                .iter()
+                .all(|guard| guard.original_identity_matches())
+    }
+
+    fn original_identities(&self) -> Vec<OriginalIdentity> {
+        std::iter::once(self.file.original_identity())
+            .chain(self._album_guards.iter().map(StableFile::original_identity))
+            .collect()
+    }
 }
 impl Read for StableAudioSource {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
@@ -78,6 +100,14 @@ impl vmusic_core::AudioSource for StableAudioSource {
     }
 }
 impl VerifiedSource {
+    pub(crate) fn retire(self) {
+        retire_sources(VecDeque::from([self]));
+    }
+
+    pub(crate) fn next(&self) -> Option<&crate::state::PreparedPlayback> {
+        self.next.as_ref()
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -132,22 +162,63 @@ impl Candidates {
     pub(crate) fn epoch(&self) -> Option<u64> {
         self.inner.try_lock().ok().map(|s| s.epoch)
     }
-    pub(crate) fn ready_for_load(&self, id: &str, revision: &str, path: &Path) -> bool {
-        self.inner.try_lock().is_ok_and(|inner| {
-            inner.entries.iter().any(|e| {
-                e.id == id
+    pub(crate) async fn ready_for_load(
+        &self,
+        id: &str,
+        revision: &str,
+        path: &Path,
+        source_generation: u64,
+    ) -> Option<u64> {
+        let (serial, identities) =
+            self.identity_checks_for_load(id, revision, path, source_generation)?;
+        // Playback falls back to 0 dB even if a timed-out stat remains on the blocking pool.
+        let valid = tokio::time::timeout(
+            CANDIDATE_IDENTITY_BUDGET,
+            tokio::task::spawn_blocking(move || identities.iter().all(OriginalIdentity::matches)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false);
+        if !valid {
+            return None;
+        }
+        let inner = self.inner.try_lock().ok()?;
+        inner
+            .entries
+            .iter()
+            .any(|e| {
+                e.serial == serial
+                    && e.id == id
                     && e.revision == revision
                     && e.path == path
+                    && e.source_generation == source_generation
                     && e.prepared_at.elapsed() <= CANDIDATE_TTL
             })
-        })
+            .then_some(serial)
+    }
+    fn identity_checks_for_load(
+        &self,
+        id: &str,
+        revision: &str,
+        path: &Path,
+        source_generation: u64,
+    ) -> Option<(u64, Vec<OriginalIdentity>)> {
+        let inner = self.inner.try_lock().ok()?;
+        let source = inner.entries.iter().find(|e| {
+            e.id == id
+                && e.revision == revision
+                && e.path == path
+                && e.source_generation == source_generation
+                && e.prepared_at.elapsed() <= CANDIDATE_TTL
+        })?;
+        Some((source.serial, source.source.original_identities()))
     }
     fn ready_for_track(&self, id: &str) -> bool {
         self.inner.try_lock().is_ok_and(|inner| {
-            inner
-                .entries
-                .iter()
-                .any(|e| e.id == id && e.prepared_at.elapsed() <= CANDIDATE_TTL)
+            inner.entries.iter().any(|e| {
+                e.id == id && e.source.originals_match() && e.prepared_at.elapsed() <= CANDIDATE_TTL
+            })
         })
     }
     /// Call when effective library/album metadata changes. Config revisions are
@@ -164,33 +235,42 @@ impl Candidates {
         };
         retire_sources(retired);
     }
-    /// No file, hash, DB or waiting operation. A hit transfers the immutable
-    /// source itself to the original decoder owner; a miss means immediate 0 dB.
+    /// Memory-only admission for callers that validated originals before taking
+    /// `play_commit`. The transferred snapshot and gain always describe the same bytes.
     pub(crate) fn take_for_load(
         &self,
         id: &str,
         revision: &str,
         path: &Path,
+        source_generation: u64,
+        serial: u64,
     ) -> Option<VerifiedSource> {
         let mut inner = self.inner.try_lock().ok()?;
-        let position = inner
-            .entries
-            .iter()
-            .position(|e| e.id == id && e.revision == revision && e.path == path)?;
+        let position = inner.entries.iter().position(|e| {
+            e.serial == serial
+                && e.id == id
+                && e.revision == revision
+                && e.path == path
+                && e.source_generation == source_generation
+        })?;
         let source = inner.entries.remove(position)?;
         drop(inner);
         if source.prepared_at.elapsed() > CANDIDATE_TTL {
-            retire_sources(VecDeque::from([source]));
+            source.retire();
             None
         } else {
             Some(source)
         }
     }
-    fn begin(&self, id: &str, revision: &str) -> Option<u64> {
+    fn begin(&self, id: &str, revision: &str, source_generation: u64) -> Option<u64> {
         let mut inner = self.inner.try_lock().ok()?;
         if inner.preparing
             || inner.entries.iter().any(|e| {
-                e.id == id && e.revision == revision && e.prepared_at.elapsed() <= CANDIDATE_TTL
+                e.id == id
+                    && e.revision == revision
+                    && e.source_generation == source_generation
+                    && e.source.originals_match()
+                    && e.prepared_at.elapsed() <= CANDIDATE_TTL
             })
         {
             return None;
@@ -212,7 +292,9 @@ impl Candidates {
             inner.preparing = false;
             inner.cancel = None;
             if inner.epoch == epoch {
-                if let Some(source) = source {
+                if let Some(mut source) = source {
+                    source.serial = inner.next_serial;
+                    inner.next_serial = inner.next_serial.wrapping_add(1);
                     for entry in std::mem::take(&mut inner.entries) {
                         if entry.id == source.id || entry.prepared_at.elapsed() > CANDIDATE_TTL {
                             retired.push_back(entry);
@@ -273,7 +355,19 @@ pub(crate) fn schedule_candidate(
     target_lufs: f64,
     album: bool,
 ) -> bool {
-    schedule_candidate_inner(state, track_id, revision, target_lufs, album, None)
+    let snapshot = state.audio.snapshot();
+    if snapshot.track_id.as_deref() != Some(track_id.as_str()) {
+        return false;
+    }
+    schedule_candidate_inner(
+        state,
+        track_id,
+        revision,
+        target_lufs,
+        album,
+        None,
+        snapshot.source_generation,
+    )
 }
 
 pub(crate) fn schedule_next_candidate(
@@ -289,7 +383,8 @@ pub(crate) fn schedule_next_candidate(
         revision,
         target_lufs,
         album,
-        Some(next),
+        Some(next.clone()),
+        next.loudness_source_generation(),
     )
 }
 
@@ -300,8 +395,9 @@ fn schedule_candidate_inner(
     target_lufs: f64,
     album: bool,
     next: Option<crate::state::PreparedPlayback>,
+    source_generation: u64,
 ) -> bool {
-    if !cfg!(windows)
+    if !crate::audio_source_snapshot::available()
         || !target_lufs.is_finite()
         || !(-24.0..=-12.0).contains(&target_lufs)
         || revision.len() > 64
@@ -309,7 +405,10 @@ fn schedule_candidate_inner(
     {
         return false;
     }
-    let Some(epoch) = state.loudness_candidates.begin(&track_id, &revision) else {
+    let Some(epoch) = state
+        .loudness_candidates
+        .begin(&track_id, &revision, source_generation)
+    else {
         return false;
     };
     let state = state.clone();
@@ -327,6 +426,7 @@ fn schedule_candidate_inner(
                 album,
                 &control,
                 next,
+                source_generation,
             )
             .await?;
             control.check().map_err(analysis_error)?;
@@ -337,6 +437,12 @@ fn schedule_candidate_inner(
                 if !owner.loudness_next_matches_locked(next).await {
                     return Err(changed());
                 }
+            } else if candidate.as_ref().is_some_and(|source| {
+                let snapshot = owner.audio.snapshot();
+                snapshot.track_id.as_deref() != Some(source.id.as_str())
+                    || snapshot.source_generation != source_generation
+            }) {
+                return Err(changed());
             }
             owner.loudness_candidates.finish(epoch, candidate);
             Ok(ready)
@@ -367,7 +473,7 @@ fn schedule_candidate_inner(
     true
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, unix)))]
 async fn prepare_candidate(
     state: &Arc<AppState>,
     id: String,
@@ -376,7 +482,17 @@ async fn prepare_candidate(
     album_mode: bool,
     control: &Control,
 ) -> ApiResult<Option<VerifiedSource>> {
-    prepare_candidate_from(state, id, revision, target, album_mode, control, None).await
+    prepare_candidate_from(
+        state,
+        id,
+        revision,
+        target,
+        album_mode,
+        control,
+        None,
+        state.audio.snapshot().source_generation,
+    )
+    .await
 }
 
 async fn prepare_candidate_from(
@@ -387,8 +503,9 @@ async fn prepare_candidate_from(
     album_mode: bool,
     control: &Control,
     next: Option<crate::state::PreparedPlayback>,
+    source_generation: u64,
 ) -> ApiResult<Option<VerifiedSource>> {
-    if !cfg!(windows) {
+    if !crate::audio_source_snapshot::available() {
         return Err(error(
             "loudness_snapshot_unavailable",
             "当前系统尚未实现可证明不可变的播放源快照；本机测量可用，自动应用暂不可用",
@@ -416,7 +533,7 @@ async fn prepare_candidate_from(
     {
         return Ok(None);
     }
-    let gain = if let Some(a) = &album {
+    let mut gain = if let Some(a) = &album {
         selection(a.integrated_lufs, a.true_peak, &a.state, target, true)
     } else {
         selection(
@@ -464,20 +581,12 @@ async fn prepare_candidate_from(
         let work_source = source.clone();
         let c = control.clone();
         let file = tokio::task::spawn_blocking(move || {
-            let mut guard = open_guard(&work_source.path)?;
+            let mut guard = StableFile::open(&work_source.path, &c)?;
             let (sha256, bytes) = fingerprint_guard(&mut guard, &c)?;
-            let (_, identity) =
-                crate::stage_project::fingerprinted_file(&work_source.path, c.until, || {
-                    c.check().map_err(analysis_error)
-                })
-                .map_err(media_error)?;
-            if sha256 != member.sha256
-                || bytes != member.byte_length
-                || identity.sha256 != sha256
-                || identity.byte_length != bytes.to_string()
-            {
+            if sha256 != member.sha256 || bytes != member.byte_length {
                 return Err(changed());
             }
+            guard.verify_original(&c)?;
             Ok::<_, ApiError>(guard)
         })
         .await
@@ -496,13 +605,16 @@ async fn prepare_candidate_from(
         .iter()
         .position(|(source, _)| source.id == id)
         .ok_or_else(changed)?;
-    let (source, file) = held.swap_remove(index);
-    let len = file.metadata().map_err(|_| changed())?.len();
+    let (source, mut file) = held.swap_remove(index);
+    let len = file.len();
+    gain.source_sha256 = Some(file.fingerprint(control)?.0);
     Ok(Some(VerifiedSource {
+        serial: 0,
         id,
         revision,
         path: source.path,
         prepared_at: Instant::now(),
+        source_generation,
         source: StableAudioSource {
             file,
             _album_guards: held.into_iter().map(|(_, file)| file).collect(),
@@ -523,6 +635,8 @@ pub(crate) struct AnalyzeRequest {
 }
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GainSelection {
+    /// Filled only after the selected immutable source passes complete fingerprint verification.
+    pub source_sha256: Option<String>,
     pub state: String,
     pub gain_db: f64,
     pub requested_gain_db: Option<f64>,
@@ -587,7 +701,7 @@ fn timeout() -> ApiError {
         "响度分析超过 120 秒期限，请稍后重试",
     )
 }
-fn analysis_error(e: AnalyzeError) -> ApiError {
+pub(crate) fn analysis_error(e: AnalyzeError) -> ApiError {
     match e {
         AnalyzeError::Deadline => timeout(),
         AnalyzeError::Cancelled => error("loudness_cancelled", "响度分析已取消"),
@@ -605,6 +719,7 @@ fn analysis_error(e: AnalyzeError) -> ApiError {
         ),
     }
 }
+#[cfg(test)]
 fn media_error(e: ApiError) -> ApiError {
     match e.code {
         "project_media_timeout" => timeout(),
@@ -637,99 +752,29 @@ fn validate_ids(ids: &[String]) -> ApiResult<()> {
 }
 
 #[derive(Clone)]
-struct Source {
+pub(crate) struct Source {
     id: String,
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     generation: Option<u64>,
     next: Option<crate::state::PreparedPlayback>,
 }
 
-fn open_guard(path: &Path) -> ApiResult<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // Keep the selected bytes immutable while hashing/decoding/publishing.
-        // Concurrent readers are allowed, writers and path replacement are not.
-        options.share_mode(1);
-    }
-    options.open(path).map_err(|_| {
-        error(
-            "loudness_unavailable",
-            "无法稳定读取媒体；请关闭正在写入此文件的程序后重试",
-        )
-    })
-}
-
 /// Hash the leased handle itself. Reopening its path could select a different
 /// symlink/junction target even when the original target denies replacement.
-fn fingerprint_guard(file: &mut std::fs::File, control: &Control) -> ApiResult<(String, u64)> {
-    const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    let before = file.metadata().map_err(|_| changed())?;
-    if !before.is_file() || before.len() > MAX_BYTES {
-        return Err(error("loudness_size", "需要不超过 2 GiB 的完整普通文件"));
-    }
-    file.seek(std::io::SeekFrom::Start(0))
-        .map_err(|_| changed())?;
-    let mut hash = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    let mut bytes = 0u64;
-    loop {
-        control.check().map_err(analysis_error)?;
-        let n = file.read(&mut buf).map_err(|_| changed())?;
-        if n == 0 {
-            break;
-        }
-        bytes += n as u64;
-        if bytes > MAX_BYTES {
-            return Err(changed());
-        }
-        hash.update(&buf[..n]);
-    }
-    let after = file.metadata().map_err(|_| changed())?;
-    if bytes != before.len()
-        || after.len() != before.len()
-        || after.modified().ok() != before.modified().ok()
-    {
-        return Err(changed());
-    }
-    file.seek(std::io::SeekFrom::Start(0))
-        .map_err(|_| changed())?;
-    control.check().map_err(analysis_error)?;
-    Ok((format!("{:x}", hash.finalize()), bytes))
+fn fingerprint_guard(file: &mut StableFile, control: &Control) -> ApiResult<(String, u64)> {
+    file.fingerprint(control)
 }
 
 struct Witness {
     source: Source,
-    file: std::fs::File,
-    metadata: std::fs::Metadata,
-    sha256: String,
+    file: StableFile,
 }
 impl Witness {
-    fn verify(&self, control: &Control) -> ApiResult<()> {
-        control.check().map_err(analysis_error)?;
-        let opened = self.file.metadata().map_err(|_| changed())?;
-        let named = std::fs::metadata(&self.source.path).map_err(|_| changed())?;
-        if [opened, named].iter().any(|m| {
-            m.len() != self.metadata.len() || m.modified().ok() != self.metadata.modified().ok()
-        }) {
-            return Err(changed());
-        }
-        // On systems without Windows sharing enforcement, this also detects
-        // same-size replacements during later album members' analysis.
-        let (_, media) =
-            crate::stage_project::fingerprinted_file(&self.source.path, control.until, || {
-                control.check().map_err(analysis_error)
-            })
-            .map_err(media_error)?;
-        if media.sha256 != self.sha256 {
-            return Err(changed());
-        }
-        Ok(())
+    fn verify(&mut self, control: &Control) -> ApiResult<()> {
+        self.file.verify_original(control)
     }
 }
-async fn resolve(state: &Arc<AppState>, id: &str) -> ApiResult<Source> {
+pub(crate) async fn resolve(state: &Arc<AppState>, id: &str) -> ApiResult<Source> {
     let (path, generation) = if crate::online::split_virtual_id(id).is_some() {
         let generation = state.audio.snapshot().source_generation;
         (
@@ -765,7 +810,7 @@ async fn resolve(state: &Arc<AppState>, id: &str) -> ApiResult<Source> {
         next: None,
     })
 }
-async fn verify_owner(state: &Arc<AppState>, source: &Source) -> ApiResult<()> {
+pub(crate) async fn verify_owner(state: &Arc<AppState>, source: &Source) -> ApiResult<()> {
     if let Some(next) = &source.next {
         if !state.loudness_next_matches(next).await {
             return Err(changed());
@@ -831,9 +876,8 @@ fn scan(
     remeasure: bool,
     control: &Control,
 ) -> ApiResult<(TrackMeasurement, Vec<f64>, bool, Witness)> {
-    let mut guard = open_guard(&source.path)?;
+    let mut guard = StableFile::open(&source.path, control)?;
     let (sha256, bytes) = fingerprint_guard(&mut guard, control)?;
-    let before = guard.metadata().map_err(|_| changed())?;
     let cached = stored.filter(|s| {
         !remeasure
             && s.sha256 == sha256
@@ -867,24 +911,10 @@ fn scan(
         )
     };
     control.check().map_err(analysis_error)?;
-    let after = guard.metadata().map_err(|_| changed())?;
-    if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
-        return Err(changed());
-    }
-    // A second full hash also catches path replacement with identical size/mtime.
-    let (_, after_media) =
-        crate::stage_project::fingerprinted_file(&source.path, control.until, || {
-            control.check().map_err(analysis_error)
-        })
-        .map_err(media_error)?;
-    if after_media.sha256 != sha256 || after_media.byte_length != bytes.to_string() {
-        return Err(changed());
-    }
+    guard.verify_original(control)?;
     let witness = Witness {
         source: source.clone(),
-        metadata: guard.metadata().map_err(|_| changed())?,
         file: guard,
-        sha256: measurement.sha256.clone(),
     };
     Ok((measurement, energies, was_cached, witness))
 }
@@ -935,7 +965,7 @@ pub(crate) async fn request(state: &Arc<AppState>, request: AnalyzeRequest) -> A
         }
         let c = control.clone();
         let sources = tokio::task::spawn_blocking(move || {
-            for witness in &sources {
+            for witness in &mut sources {
                 witness.verify(&c)?;
             }
             Ok::<_, ApiError>(sources)
@@ -1018,14 +1048,18 @@ pub(crate) async fn status(state: &Arc<AppState>, track_id: &str) -> ApiResult<V
     Ok(
         json!({"state":state_name, "track":track, "album":album, "identity_verified":false,
         "busy":READER.available_permits()==0, "algorithm":loudness::ALGORITHM,
-        "verified_source_available":cfg!(windows), "candidate_ready":state.loudness_candidates.ready_for_track(track_id), "candidate_unavailable_reason":
-        if cfg!(windows) {None} else {Some("immutable_file_snapshot_not_implemented")}}),
+        "verified_source_available":crate::audio_source_snapshot::available(),
+        "snapshot_strategy":if cfg!(windows){"read_sharing_lease"}else{"unlinked_read_only_copy"},
+        "snapshot_disk_limit_bytes":crate::audio_source_snapshot::MAX_SNAPSHOT_BYTES,
+        "candidate_ready":state.loudness_candidates.ready_for_track(track_id), "candidate_unavailable_reason":
+        if crate::audio_source_snapshot::available() {None} else {Some("immutable_file_snapshot_unavailable")}}),
     )
 }
 
 fn selection(lufs: Option<f64>, peak: f64, state: &str, target: f64, album: bool) -> GainSelection {
     let Some(lufs) = lufs.filter(|v| v.is_finite() && state == "measured") else {
         return GainSelection {
+            source_sha256: None,
             state: state.into(),
             gain_db: 0.0,
             requested_gain_db: None,
@@ -1052,6 +1086,7 @@ fn selection(lufs: Option<f64>, peak: f64, state: &str, target: f64, album: bool
         None
     };
     GainSelection {
+        source_sha256: None,
         state: "ready".into(),
         gain_db: gain,
         requested_gain_db: Some(requested),
@@ -1168,7 +1203,6 @@ pub(crate) async fn gain_for_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     #[test]
     fn fixed_gain_is_peak_limited_and_silence_is_not_amplified() {
         let gain = selection(Some(-30.0), 0.8, "measured", -18.0, false);
@@ -1195,10 +1229,57 @@ mod tests {
         assert!(!candidates.finish_next_worker());
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn new_source_generation_does_not_deduplicate_against_stale_candidate() {
+        let path = std::env::temp_dir().join(format!(
+            "hertz-candidate-generation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"source").unwrap();
+        let control = Control {
+            until: Instant::now() + DEADLINE,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let file = StableFile::open(&path, &control).unwrap();
+        let len = file.len();
+        let candidates = Candidates::default();
+        let epoch = candidates.begin("track", "17", 1).unwrap();
+        candidates.finish(
+            epoch,
+            Some(VerifiedSource {
+                serial: 0,
+                id: "track".into(),
+                revision: "17".into(),
+                path: path.clone(),
+                prepared_at: Instant::now(),
+                source_generation: 1,
+                source: StableAudioSource {
+                    file,
+                    _album_guards: Vec::new(),
+                    len,
+                },
+                gain: selection(Some(-20.0), 0.5, "measured", -18.0, false),
+                next: None,
+            }),
+        );
+        assert!(candidates.begin("track", "17", 1).is_none());
+        #[cfg(unix)]
+        {
+            std::fs::write(&path, b"changed source length").unwrap();
+            let epoch = candidates.begin("track", "17", 1).unwrap();
+            candidates.finish(epoch, None);
+        }
+        let epoch = candidates.begin("track", "17", 2).unwrap();
+        candidates.finish(epoch, None);
+        candidates.invalidate();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(any(windows, unix))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn next_online_candidate_requires_playback_confirmed_path_and_intent() {
-        let _serial = SERIAL.lock().await;
+        let _serial = ANALYSIS_TEST_SERIAL.lock().await;
         let dir =
             std::env::temp_dir().join(format!("hertz-next-loudness-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
@@ -1219,9 +1300,12 @@ mod tests {
             until: Instant::now() + DEADLINE,
             cancelled: Arc::new(AtomicBool::new(false)),
         };
-        let mut file = std::fs::File::open(&path).unwrap();
+        let mut file = StableFile::open(&path, &control).unwrap();
         let (sha256, byte_length) = fingerprint_guard(&mut file, &control).unwrap();
-        let m = loudness::analyze_file(file, &control).unwrap().measurement;
+        let m = loudness::analyze_file(file.try_clone().unwrap(), &control)
+            .unwrap()
+            .measurement;
+        drop(file);
         vmusic_store::loudness::save_success(
             &state.db,
             &[TrackMeasurement {
@@ -1262,6 +1346,7 @@ mod tests {
             false,
             &control,
             Some(next.clone()),
+            next.loudness_source_generation(),
         )
         .await
         .unwrap()
@@ -1279,7 +1364,8 @@ mod tests {
                 -18.0,
                 false,
                 &control,
-                Some(next)
+                Some(next.clone()),
+                next.loudness_source_generation(),
             )
             .await
             .err()
@@ -1296,7 +1382,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_observer_retains_slots_until_blocking_and_async_work_exit() {
-        let _serial = SERIAL.lock().await;
+        let _serial = ANALYSIS_TEST_SERIAL.lock().await;
         let slots = Arc::new(Semaphore::new(2));
         let task_slots = slots.clone();
         let (started_tx, started) = tokio::sync::oneshot::channel();
@@ -1332,6 +1418,86 @@ mod tests {
         drop(all);
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn candidate_rejects_same_path_replacement_after_snapshot() {
+        let _serial = ANALYSIS_TEST_SERIAL.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("hertz-loudness-replace-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, audio) = crate::state::tests::playback_state_with_db(db).await;
+        let state = Arc::new(state);
+        let track = Track {
+            id: "replace".into(),
+            path: dir.join("replace.wav").to_string_lossy().into_owned(),
+            source: TrackSource::Local,
+            title: "Replace".into(),
+            artist: None,
+            album: None,
+            duration_ms: Some(2000),
+            bitrate: None,
+            sample_rate: Some(48_000),
+            channels: Some(1),
+            has_cover: false,
+            file_mtime: None,
+            file_size: None,
+            added_at: 0,
+        };
+        write_wav(Path::new(&track.path), 0.1);
+        vmusic_store::upsert_track(&state.db, &track).await.unwrap();
+        request(
+            &state,
+            AnalyzeRequest {
+                track_ids: vec![track.id.clone()],
+                album: false,
+            },
+        )
+        .await
+        .unwrap();
+        let control = Control {
+            until: Instant::now() + DEADLINE,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let candidate = prepare_candidate(
+            &state,
+            track.id.clone(),
+            "17".into(),
+            -18.0,
+            false,
+            &control,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let candidates = Candidates::default();
+        let source_generation = state.audio.snapshot().source_generation;
+        let epoch = candidates
+            .begin(&track.id, "17", source_generation)
+            .unwrap();
+        candidates.finish(epoch, Some(candidate));
+        let replacement = dir.join("replacement.wav");
+        write_wav(&replacement, 0.2);
+        std::fs::rename(&replacement, Path::new(&track.path)).unwrap();
+        assert!(candidates
+            .ready_for_load(&track.id, "17", Path::new(&track.path), source_generation)
+            .await
+            .is_none());
+        candidates.invalidate();
+        assert!(candidates
+            .take_for_load(
+                &track.id,
+                "17",
+                Path::new(&track.path),
+                source_generation,
+                0,
+            )
+            .is_none());
+        state.audio.shutdown();
+        audio.join().unwrap();
+        state.db.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn write_wav(path: &Path, gain: f64) {
         let pcm: Vec<u8> = (0..96_000)
             .flat_map(|i| {
@@ -1355,7 +1521,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn complete_sources_cache_identity_album_and_failure_preservation() {
-        let _serial = SERIAL.lock().await;
+        let _serial = ANALYSIS_TEST_SERIAL.lock().await;
         let dir = std::env::temp_dir().join(format!("hertz-loudness-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
         let (mut state, audio) = crate::state::tests::playback_state_with_db(db).await;
@@ -1450,7 +1616,7 @@ mod tests {
             .unwrap()
             .gain_db;
         assert_eq!(loud_gain, quiet_gain);
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         {
             let c = Control {
                 until: Instant::now() + DEADLINE,
@@ -1463,25 +1629,71 @@ mod tests {
                     .unwrap();
             // Exact bytes remain protected even when another member supplied
             // the album's loudness/true-peak limit.
-            assert!(std::fs::OpenOptions::new()
-                .write(true)
-                .open(&track.path)
-                .is_err());
-            assert!(std::fs::OpenOptions::new()
-                .write(true)
-                .open(&quiet.path)
-                .is_err());
+            #[cfg(windows)]
+            {
+                assert!(std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&track.path)
+                    .is_err());
+                assert!(std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&quiet.path)
+                    .is_err());
+            }
             let candidates = Candidates::default();
-            let epoch = candidates.begin(&track.id, "17").unwrap();
+            let source_generation = state.audio.snapshot().source_generation;
+            let epoch = candidates
+                .begin(&track.id, "17", source_generation)
+                .unwrap();
             candidates.finish(epoch, Some(candidate));
-            assert!(candidates
-                .take_for_load(&track.id, "18", Path::new(&track.path))
-                .is_none());
-            let verified = candidates
-                .take_for_load(&track.id, "17", Path::new(&track.path))
+            let serial = candidates
+                .ready_for_load(&track.id, "17", Path::new(&track.path), source_generation)
+                .await
                 .unwrap();
             assert!(candidates
-                .take_for_load(&track.id, "17", Path::new(&track.path))
+                .take_for_load(
+                    &track.id,
+                    "18",
+                    Path::new(&track.path),
+                    source_generation,
+                    serial,
+                )
+                .is_none());
+            assert!(candidates
+                .take_for_load(
+                    &track.id,
+                    "17",
+                    Path::new(&track.path),
+                    source_generation + 1,
+                    serial,
+                )
+                .is_none());
+            assert!(candidates
+                .take_for_load(
+                    &track.id,
+                    "17",
+                    Path::new(&track.path),
+                    source_generation,
+                    serial + 1,
+                )
+                .is_none());
+            let verified = candidates
+                .take_for_load(
+                    &track.id,
+                    "17",
+                    Path::new(&track.path),
+                    source_generation,
+                    serial,
+                )
+                .unwrap();
+            assert!(candidates
+                .take_for_load(
+                    &track.id,
+                    "17",
+                    Path::new(&track.path),
+                    source_generation,
+                    serial,
+                )
                 .is_none());
             let (mut source, ext, gain) = verified.into_parts();
             let mut header = [0u8; 4];
@@ -1498,6 +1710,26 @@ mod tests {
                 .write(true)
                 .open(&quiet.path)
                 .is_ok());
+            #[cfg(unix)]
+            {
+                let candidate =
+                    prepare_candidate(&state, track.id.clone(), "17".into(), -18.0, true, &c)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let epoch = candidates
+                    .begin(&track.id, "17", source_generation)
+                    .unwrap();
+                candidates.finish(epoch, Some(candidate));
+                let replacement = dir.join("quiet-replacement.wav");
+                write_wav(&replacement, 0.02);
+                std::fs::rename(&replacement, Path::new(&quiet.path)).unwrap();
+                assert!(candidates
+                    .ready_for_load(&track.id, "17", Path::new(&track.path), source_generation)
+                    .await
+                    .is_none());
+                candidates.invalidate();
+            }
         }
         let saved = vmusic_store::loudness::get_track(&state.db, &track.id)
             .await

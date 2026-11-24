@@ -1,0 +1,12 @@
+
+running 1 test
+test render::dsp::tests::warmup_consumes_history_then_each_live_frame_once_without_lapping ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 280 filtered out; finished in 0.01s
+
+
+running 1 test
+test render::dsp::parametric_tests::tone_adoption_completes_within_response_budget ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 280 filtered out; finished in 0.03s
+

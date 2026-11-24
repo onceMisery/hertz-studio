@@ -1,0 +1,137 @@
+{
+  "retained": [
+    {
+      "name": "remaining-windows-lib-regression",
+      "status": "failed-compile",
+      "exit_code": 101,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-windows-lib-regression.log",
+      "log_sha256": "feae7f825d46e7f63c5cb2fc14742da5f5e255f7655bbbeb194b2aaf60e222bf",
+      "log_bytes": 2134,
+      "disposition": "New fixture compile errors; corrected before full current regression, not terminal evidence.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-windows-lib-regression-2",
+      "status": "failed-tests",
+      "exit_code": 101,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-windows-lib-regression-2.log",
+      "log_sha256": "7e9c028a798a1279aa6b1a6fdeb66a2fd5788837e7a944265e2de5284a15ba8f",
+      "log_bytes": 91148,
+      "disposition": "979 passed/2 failed in early service tests; owner fixes and current981 full regression passed.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-linux-regression",
+      "status": "failed-test",
+      "exit_code": 101,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-linux-regression.log",
+      "log_sha256": "221df6883fe438b17d0dd410890601c2dd1278e6aa91c6488bc02291d8e007f6",
+      "log_bytes": 24457,
+      "disposition": "Hertz audio_27 passed, audio preview12 passed/1 failed due first-callback progress expectation; explicit contention/no-heap and condition waiting now pass13 plus comparison6.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-frontend-contract",
+      "status": "failed-guard",
+      "exit_code": null,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-frontend-contract.log",
+      "log_sha256": "0362174fa018d167ac32d7a29ec4c2bd4ffdb98a65305b62a049629f93435eab",
+      "log_bytes": 13503,
+      "disposition": "Four guard/dependency failures; missing preview registration/generated route/script registration and locked Three fixture installation resolved by current87-step run and real HTTP asset test.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-preview-chrome-5",
+      "status": "withdrawn-theme-qualification",
+      "exit_code": 0,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-preview-chrome-5.log",
+      "log_sha256": "13ca83f42637aed278fb926694e9fd2d5d34951e58e719a74b00eaad7701b75b",
+      "log_bytes": 1009,
+      "disposition": "Exit0 did not prove light Theme, missing production Theme in fixture. Current6th run asserts actual palette and passed both themes.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-shared-zero-service",
+      "status": "failed-fixture",
+      "exit_code": 101,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-shared-zero-service.log",
+      "log_sha256": "93fdfa1e948b28e5d0c6ddacf49e33ce2c8c4f8a686c565786ccbf8a7b26aea0",
+      "log_bytes": 800,
+      "disposition": "R128 fixture omitted required true_peak; only fixture corrected, production requirement retained.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-shared-zero-service-2",
+      "status": "failed-debug-runtime",
+      "exit_code": 101,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-shared-zero-service-2.log",
+      "log_sha256": "0d7d88c1a3f370bfc81ad12c628d364bbd62b981fe1b7c762cf30748b5b97b42",
+      "log_bytes": 993,
+      "disposition": "Actual renderer remained active afterpause deadline; no completed causal proof.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-shared-zero-service-3",
+      "status": "failed-debug-runtime",
+      "exit_code": 101,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-shared-zero-service-3.log",
+      "log_sha256": "6da5a6066f34bc42af3aabd4f4819108e1dd768aefd996c451d485e61bbcf89c",
+      "log_bytes": 3245,
+      "disposition": "Same actualpause failure with full diagnostic; renderer.active derives playing, not streamliveness. Release equivalent passed, debug realtime qualification notgranted.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-preview-chain-600s",
+      "status": "invalid-empty-output",
+      "exit_code": 0,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-preview-chain-600s.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0,
+      "disposition": "Launcher exited0 with no test output; withdrawn and excluded.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-preview-chain-600s-file",
+      "status": "invalid-empty-output",
+      "exit_code": 0,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-preview-chain-600s-file.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0,
+      "disposition": "File launcher also exited0 with no test output; excluded. Direct binary env invocation produced six rows and ran600.52s.",
+      "terminal_pass_evidence": false
+    },
+    {
+      "name": "remaining-final-feature-checks",
+      "status": "failed-launcher-syntax",
+      "exit_code": 1,
+      "log_path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/remaining-final-feature-checks.log",
+      "log_sha256": "00ce237bac8ed18a101bec4767c8f53fdfb5073765e60f6fb2c6c94bc3cc7508",
+      "log_bytes": 2097,
+      "disposition": "Temporary Node runner syntax failure beforeCargo; direct structured sequential launches completed all three checks.",
+      "terminal_pass_evidence": false
+    }
+  ],
+  "tone_candidate": {
+    "observed_p95_ms": [
+      263.8542,
+      270.6725
+    ],
+    "observed_max_ms": 271.0683,
+    "target_ms": 100,
+    "target_met": false,
+    "source": "crates/vmusic-audio/src/render/dsp.rs:717",
+    "disposition": "Keep current250ms smooth adoption and50ms compensation behavior; report unmet response candidate, no blanket ordinary-scope qualification."
+  },
+  "independent_review": {
+    "status": "unavailable",
+    "reason": "Repeated model-service capacity/stream disconnect errors; no review findings or conclusion received.",
+    "current_names": [
+      "/root/review_audio_remaining",
+      "/root/review_audio_final",
+      "/root/review_audio_delivery"
+    ],
+    "coordinator_direct_review": true,
+    "claim": "No independent-review pass."
+  },
+  "scope": "Bounded historical observations and logSHA references retained in ignored output/; failed attempt raw telemetry is not terminal evidence or part of ordinary task code."
+}

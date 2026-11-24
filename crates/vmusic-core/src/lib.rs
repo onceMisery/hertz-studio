@@ -8,6 +8,7 @@
 //! it stays cheap to unit-test and impossible to tangle.
 
 pub mod audio;
+pub mod audio_preview;
 pub mod audio_quality;
 pub mod error;
 pub mod impulse;

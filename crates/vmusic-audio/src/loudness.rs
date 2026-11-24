@@ -113,16 +113,21 @@ pub fn gated_loudness(energies: &[f64]) -> (Option<f64>, u64) {
     (Some(-0.691 + 10.0 * (sum / count as f64).log10()), count)
 }
 
-struct Meter {
+pub(crate) struct Meter {
     ebu: EbuR128,
     rate: u32,
     channels: u32,
     frames: u64,
     sample_peak: f64,
     energies: Vec<f64>,
+    max_frames: u64,
+    max_blocks: usize,
 }
 impl Meter {
     fn new(rate: u32, channels: u32) -> Result<Self, AnalyzeError> {
+        Self::bounded(rate, channels, MAX_TRACK_SECONDS)
+    }
+    pub(crate) fn bounded(rate: u32, channels: u32, seconds: u64) -> Result<Self, AnalyzeError> {
         // Initial qualification matrix. No resampling/channel downmix for analysis.
         if !matches!(rate, 44_100 | 48_000 | 96_000) || !(1..=2).contains(&channels) {
             return Err(AnalyzeError::Unsupported);
@@ -134,10 +139,12 @@ impl Meter {
             channels,
             frames: 0,
             sample_peak: 0.0,
-            energies: Vec::with_capacity(MAX_TRACK_BLOCKS),
+            energies: Vec::with_capacity((seconds as usize * 10).min(MAX_TRACK_BLOCKS)),
+            max_frames: u64::from(rate) * seconds.min(MAX_TRACK_SECONDS),
+            max_blocks: (seconds as usize * 10).min(MAX_TRACK_BLOCKS),
         })
     }
-    fn push(&mut self, mut pcm: &[f32], control: &Control) -> Result<(), AnalyzeError> {
+    pub(crate) fn push(&mut self, mut pcm: &[f32], control: &Control) -> Result<(), AnalyzeError> {
         if !pcm.len().is_multiple_of(self.channels as usize) {
             return Err(AnalyzeError::Decode);
         }
@@ -145,7 +152,7 @@ impl Meter {
         while !pcm.is_empty() {
             control.check()?;
             let frames = (hop - self.frames % hop).min((pcm.len() / self.channels as usize) as u64);
-            if self.frames + frames > u64::from(self.rate) * MAX_TRACK_SECONDS {
+            if self.frames + frames > self.max_frames {
                 return Err(AnalyzeError::Limit);
             }
             let n = frames as usize * self.channels as usize;
@@ -161,7 +168,7 @@ impl Meter {
                 .map_err(|_| AnalyzeError::Decode)?;
             self.frames += frames;
             if self.frames >= 4 * hop && self.frames.is_multiple_of(hop) {
-                if self.energies.len() >= MAX_TRACK_BLOCKS {
+                if self.energies.len() >= self.max_blocks {
                     return Err(AnalyzeError::Limit);
                 }
                 let lufs = self
@@ -182,7 +189,7 @@ impl Meter {
         }
         Ok(())
     }
-    fn finish(mut self) -> Result<Analysis, AnalyzeError> {
+    pub(crate) fn finish(mut self) -> Result<Analysis, AnalyzeError> {
         let (integrated_lufs, gated_blocks) = gated_loudness(&self.energies);
         let state = if self.sample_peak == 0.0 {
             MeasurementState::Silence
@@ -283,6 +290,64 @@ fn qualified_layout(channels: Channels) -> bool {
 /// Retains no whole-track PCM. Decoder buffers + interleaved copy are capped;
 /// block energies use <1.7 MiB; album owner reserves at most 8 MiB separately.
 pub fn analyze_file(file: File, control: &Control) -> Result<Analysis, AnalyzeError> {
+    let mut meter: Option<Meter> = None;
+    let info = visit_file(file, control, None, |rate, channels, pcm| {
+        if meter.is_none() {
+            meter = Some(Meter::new(rate, channels.count() as u32)?);
+        }
+        meter
+            .as_mut()
+            .ok_or(AnalyzeError::Decode)?
+            .push(pcm, control)
+    })?;
+    let mut analysis = meter.ok_or(AnalyzeError::Decode)?.finish()?;
+    analysis.measurement.channel_mask = info.channel_mask;
+    Ok(analysis)
+}
+
+pub(crate) struct DecodedPrefix {
+    pub pcm: Vec<f32>,
+    pub rate: u32,
+    pub channels: usize,
+}
+/// Reference preparation reads a finite prefix plus one source block of sinc lookahead.
+/// The qualified decoder/layout/trim path is exactly the whole-track analysis path.
+pub(crate) fn prefix_file(
+    file: File,
+    seconds: u64,
+    control: &Control,
+) -> Result<DecodedPrefix, AnalyzeError> {
+    let mut pcm = Vec::new();
+    let info = visit_file(file, control, Some(seconds), |rate, channels, samples| {
+        if pcm.capacity() == 0 {
+            pcm.reserve_exact(
+                (rate as usize * seconds as usize + crate::resample::INPUT_BLOCK)
+                    * channels.count(),
+            );
+        }
+        if samples.iter().any(|s| !s.is_finite()) {
+            return Err(AnalyzeError::Decode);
+        }
+        pcm.extend_from_slice(samples);
+        Ok(())
+    })?;
+    Ok(DecodedPrefix {
+        pcm,
+        rate: info.rate,
+        channels: info.channels,
+    })
+}
+struct DecodedInfo {
+    rate: u32,
+    channels: usize,
+    channel_mask: u32,
+}
+fn visit_file(
+    file: File,
+    control: &Control,
+    prefix_seconds: Option<u64>,
+    mut visit: impl FnMut(u32, Channels, &[f32]) -> Result<(), AnalyzeError>,
+) -> Result<DecodedInfo, AnalyzeError> {
     control.check()?;
     let source = MediaSourceStream::new(
         Box::new(Source {
@@ -310,7 +375,9 @@ pub fn analyze_file(file: File, control: &Control) -> Result<Analysis, AnalyzeEr
         .default_track()
         .ok_or(AnalyzeError::Unsupported)?;
     let params = &track.codec_params;
+    let rate = params.sample_rate.ok_or(AnalyzeError::Unsupported)?;
     if !qualified(params)
+        || !matches!(rate, 44_100 | 48_000 | 96_000)
         || params
             .max_frames_per_packet
             .is_some_and(|n| n > MAX_PACKET_FRAMES)
@@ -318,18 +385,18 @@ pub fn analyze_file(file: File, control: &Control) -> Result<Analysis, AnalyzeEr
         return Err(AnalyzeError::Unsupported);
     }
     let track_id = track.id;
-    let rate = params.sample_rate.ok_or(AnalyzeError::Unsupported)?;
+    let expected_frames = params.n_frames;
     let mut channels = params.channels;
     if channels.is_some_and(|c| !qualified_layout(c)) {
         return Err(AnalyzeError::Unsupported);
     }
-    let expected_frames = params.n_frames;
-    let mut meter = channels
-        .map(|c| Meter::new(rate, c.count() as u32))
-        .transpose()?;
+    let limit = prefix_seconds
+        .map(|s| s.min(MAX_TRACK_SECONDS) * u64::from(rate) + crate::resample::INPUT_BLOCK as u64);
     let mut decoder = symphonia::default::get_codecs()
         .make(params, &DecoderOptions::default())
         .map_err(|_| AnalyzeError::Unsupported)?;
+    let mut frames = 0u64;
+    let mut prefix_complete = false;
     loop {
         control.check()?;
         let packet = match probed.format.next_packet() {
@@ -355,28 +422,37 @@ pub fn analyze_file(file: File, control: &Control) -> Result<Analysis, AnalyzeEr
         {
             return Err(AnalyzeError::Unsupported);
         }
+        channels = Some(spec.channels);
         let mut samples = SampleBuffer::<f32>::new(decoded.frames() as u64, spec);
         samples.copy_interleaved_ref(decoded);
-        // MP4/ALAC carries its speaker layout in the codec cookie, not the
-        // demuxer's CodecParameters. First decoded PCM is the layout authority.
-        if meter.is_none() {
-            meter = Some(Meter::new(spec.rate, spec.channels.count() as u32)?);
-            channels = Some(spec.channels);
+        let count = samples.samples().len() / spec.channels.count();
+        let take = limit.map_or(count, |max| count.min(max.saturating_sub(frames) as usize));
+        visit(
+            rate,
+            spec.channels,
+            &samples.samples()[..take * spec.channels.count()],
+        )?;
+        frames += take as u64;
+        if frames > u64::from(rate) * MAX_TRACK_SECONDS {
+            return Err(AnalyzeError::Limit);
         }
-        meter
-            .as_mut()
-            .ok_or(AnalyzeError::Decode)?
-            .push(samples.samples(), control)?;
+        if limit.is_some_and(|limit| frames == limit) {
+            prefix_complete = true;
+            break;
+        }
     }
     control.check()?;
-    let meter = meter.ok_or(AnalyzeError::Decode)?;
-    // Missing decoded tail must not turn a damaged file into a valid measurement.
-    if expected_frames.is_some_and(|frames| frames != meter.frames) {
+    // A bounded prefix deliberately does not qualify an unread tail. When EOF
+    // occurs within the reference, the same exact-count check rejects truncation.
+    if !prefix_complete && expected_frames.is_some_and(|expected| expected != frames) {
         return Err(AnalyzeError::Decode);
     }
-    let mut analysis = meter.finish()?;
-    analysis.measurement.channel_mask = channels.ok_or(AnalyzeError::Decode)?.bits();
-    Ok(analysis)
+    let channels = channels.ok_or(AnalyzeError::Decode)?;
+    Ok(DecodedInfo {
+        rate,
+        channels: channels.count(),
+        channel_mask: channels.bits(),
+    })
 }
 
 #[cfg(test)]

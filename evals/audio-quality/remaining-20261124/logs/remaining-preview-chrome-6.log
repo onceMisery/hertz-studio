@@ -1,0 +1,14 @@
+PASS unknown-phase acknowledgement blocks preview and preserves ordinary native save
+PASS implicit keyboard submit clears only preview validation
+PASS native saved-value validation remains active
+PASS matched comparison switches the same reference and keeps the draft and revision
+PASS ordinary bypass and unknown-phase explanation preserve frozen controls
+PASS save waits for cancellation and disables a competing preview
+PASS cancelled late preparation cannot re-adopt or overwrite a newer draft
+PASS late side-selection receipt cannot restore cancelled preview
+PASS lost cancel receipt reconciles through GET without repeated cancellation
+PASS foreign preview offers explicit cancellation and preserves local draft
+PASS disconnected heartbeat reconciles expired server preview through GET
+PASS ancestor hiding, native hiding and page exit cancel and retire subscriptions
+PASS keyboard controls activate preview and switch reference sides
+PASS 390 px at 200 percent, both themes and clean browser execution

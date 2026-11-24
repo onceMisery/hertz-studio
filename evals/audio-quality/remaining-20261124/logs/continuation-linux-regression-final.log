@@ -1,0 +1,76 @@
+   Compiling hertz-studio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/hertz-studio)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 32s
+   Compiling hertz-studio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/hertz-studio)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11m 32s
+     Running unittests src/lib.rs (output/audio-quality/linux-target/debug/deps/hertz_studio-34a0f24e9806d833)
+
+running 32 tests
+test audio_impulse::tests::cancelled_generation_and_staged_publication_leave_no_resource ... ok
+test audio_impulse::tests::generated_resource_is_content_addressed_with_provenance_and_regular_preparation ... ok
+test audio_impulse::tests::generation_requests_are_strict_and_require_provenance ... ok
+test audio_impulse::tests::identical_wav_cannot_overwrite_existing_provenance ... ok
+test audio_impulse::tests::managed_ids_are_canonical_lowercase ... ok
+test audio_impulse::tests::request_drop_keeps_worker_slot_and_stale_cancel_cannot_cancel_new_job ... ok
+test audio_loudness::tests::cancelled_observer_retains_slots_until_blocking_and_async_work_exit ... ok
+test audio_loudness::tests::candidate_rejects_same_path_replacement_after_snapshot ... ok
+test audio_loudness::tests::complete_sources_cache_identity_album_and_failure_preservation ... ok
+test audio_loudness::tests::fixed_gain_is_peak_limited_and_silence_is_not_amplified ... ok
+test audio_loudness::tests::new_source_generation_does_not_deduplicate_against_stale_candidate ... ok
+test audio_loudness::tests::next_online_candidate_requires_playback_confirmed_path_and_intent ... ok
+test audio_loudness::tests::next_preparation_coalesces_notifications_without_an_unbounded_queue ... ok
+test audio_preview::tests::http_and_dbx_preview_errors_and_stale_cancel_share_the_service_owner ... ok
+test audio_preview::tests::measured_gain_requires_identical_bytes_before_preview_source_rebinding ... ok
+test audio_preview::tests::null_preview_never_claims_audio_or_writes_preferences_and_saved_revision_invalidates_it ... ok
+test audio_preview::tests::observer_cancellation_does_not_release_analysis_or_reader_before_worker_cleanup ... ok
+test audio_quality::tests::correction_capabilities_follow_software_rate_qualification ... ok
+test audio_quality::tests::migration_cas_legacy_projection_and_failed_transaction ... ok
+test audio_quality::tests::strict_patch_preserves_disabled_curve_and_rejects_unknowns ... ok
+test audio_source_snapshot::tests::cancellation_and_source_size_are_checked_before_snapshot_work ... ok
+test audio_source_snapshot::tests::empty_and_nonempty_copies_can_be_rewound_for_independent_consumers ... ok
+test audio_source_snapshot::tests::unlinked_copy_retains_exact_bytes_and_no_writable_handle_after_source_change ... ok
+test online::jamendo::tests::malformed_ids_and_non_http_audio_are_not_playable ... ok
+test podcasts::tests::atom_accepts_public_audio_enclosures_and_rejects_local_or_live_links ... ok
+test podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges ... ignored, 访问 Apple 目录、三份真实中文 RSS，并只读取音频的第一个 Range 块
+test podcasts::tests::live_overseas_directory_feed_and_audio_range ... ignored, 访问海外 Apple 目录、NPR RSS，并只读取音频第一个 Range 块
+test podcasts::tests::rss_preserves_chinese_cdata_and_namespaces_with_audio_only_entries ... ok
+test podcasts::tests::stable_identity_uses_canonical_feed_and_guid_not_rotating_audio_urls ... ok
+test room::receiver::tests::ready_never_authorizes_audio_without_commit ... ok
+test system_media::tests::local_play_respects_the_audio_sleep_deadline ... ok
+test window_lifecycle::tests::a_room_without_local_audio_also_requires_a_fresh_decision ... ok
+
+test result: ok. 30 passed; 0 failed; 2 ignored; 0 measured; 930 filtered out; finished in 2.00s
+
+   Compiling vmusic-audio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/vmusic-audio)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 13s
+     Running unittests src/lib.rs (output/audio-quality/linux-target/debug/deps/vmusic_audio-682bcd4a673650a1)
+
+running 13 tests
+test actor::preview_tests::preview_preparation_rejects_each_stale_source_intent_and_allows_position_progress ... ok
+test actor::preview_tests::preview_start_reserves_restore_generation_and_sleep_cannot_authorize_it ... ok
+test actor::preview_tests::start_select_and_matching_cancel_keep_source_and_restore_generations_distinct ... ok
+test impulse::tests::preview_wav_obeys_realtime_limits_without_narrowing_formal_offline_parser ... ok
+test render::preview::tests::expired_gate_silences_first_callback_before_actor_restores_without_consuming ... ok
+test render::preview::tests::output_rebuild_sleep_and_revision_exhaustion_revoke_or_reject_preview ... ok
+test render::preview::tests::paused_preview_preserves_preferences_and_first_callback_has_no_heap_operations ... ok
+test render::preview::tests::pending_preview_keeps_old_dsp_and_pause_cancel_never_installs_the_reference ... ok
+test render::preview::tests::ready_identity_and_expiry_do_not_mutate_the_saved_timeline ... ok
+test render::preview::tests::reference_boundary_drains_exact_real_frames_with_all_declared_delays ... ok
+test render::preview::tests::save_and_transport_changes_revoke_preview_and_late_uuid_cannot_restore_new_values ... ok
+test render::preview::tests::select_replays_the_same_source_and_rearms_both_deadlines ... ok
+test scheduled_output::tests::retained_grid_midpoints_have_one_owner_and_match_preview_and_writes ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 259 filtered out; finished in 3.48s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.80s
+     Running unittests src/lib.rs (output/audio-quality/linux-target/debug/deps/vmusic_audio-682bcd4a673650a1)
+
+running 6 tests
+test render::comparison::tests::comparison_obeys_cancellation_limits_and_frozen_protection ... ok
+test render::comparison::tests::delayed_tone_and_known_ir_match_without_removing_real_reference_frames ... ok
+test render::comparison::tests::each_louder_side_gets_its_own_attenuation_and_analytic_gain_matches ... ok
+test render::comparison::tests::silence_below_gate_short_source_and_protection_failure_do_not_claim_a_match ... ok
+test render::comparison::tests::unknown_intrinsic_phase_is_preserved_while_only_algorithm_delay_is_aligned ... ok
+test render::comparison::tests::warmup_transient_is_included_in_common_safe_margin_and_actual_protection_recheck ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 266 filtered out; finished in 36.83s
+

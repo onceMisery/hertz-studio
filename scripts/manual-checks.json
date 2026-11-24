@@ -643,6 +643,10 @@
       "purpose": "真实 Chromium 加载生产音频输出/分析/校正控制器：输出保存失败保留草稿并可重试、整张专辑响度分析、显式测量采用、校正资源导入/生成/取消与迟到回执、不支持输出的草稿保留，390px/200% 布局。自带 HTTP 夹具，需 PLAYWRIGHT_MODULE。"
     },
     {
+      "script": "check-audio-preview-browser.js",
+      "purpose": "真实 Chromium 加载生产 DSP/试听控制器与 Theme：同响度和普通旁路标注、未知相位告知、保存前撤销、隐藏/断连/迟到请求、外部试听身份、键盘及深浅主题 390px/200% 布局。自带 HTTP 夹具，需 PLAYWRIGHT_MODULE；真实共享静音服务与有声设备听测分别验证。"
+    },
+    {
       "script": "check-dsp-settings-browser.js",
       "purpose": "真实 Chromium 加载生产 DSP 设置表单与控制器：失败采用保持可见、隐藏页停止轮询并在恢复时刷新、原生约束校验与键盘提交、参数编辑与冲突重定基、不可用效果的说明与焦点、支持输出刷新清除陈旧错误、390px/200% 布局。需 PLAYWRIGHT_MODULE。"
     },

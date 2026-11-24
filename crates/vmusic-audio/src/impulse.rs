@@ -291,6 +291,26 @@ pub fn prepare_wav_cancellable(
     rate: u32,
     cancelled: &AtomicBool,
 ) -> Result<ImpulseKernel, AudioError> {
+    prepare_wav_kind(bytes, id, rate, cancelled, false).map(|p| p.kernel)
+}
+
+pub fn prepare_preview_wav_cancellable(
+    bytes: &[u8],
+    id: String,
+    rate: u32,
+    cancelled: &AtomicBool,
+) -> Result<vmusic_core::audio_preview::PreviewImpulse, AudioError> {
+    prepare_wav_kind(bytes, id, rate, cancelled, true)
+}
+
+fn prepare_wav_kind(
+    bytes: &[u8],
+    id: String,
+    rate: u32,
+    cancelled: &AtomicBool,
+    allow_unknown: bool,
+) -> Result<vmusic_core::audio_preview::PreviewImpulse, AudioError> {
+    use vmusic_core::audio_preview::{ImpulsePhase, PreviewImpulse};
     check_cancelled(cancelled)?;
     if bytes.len() > MAX_BYTES
         || bytes.len() < 44
@@ -379,13 +399,13 @@ pub fn prepare_wav_cancellable(
     if source.iter().flatten().any(|v| !v.is_finite()) {
         return Err(invalid("IR 含非有限样本"));
     }
-    if frames.is_multiple_of(2)
-        || source.iter().any(|c| {
+    let symmetric = !frames.is_multiple_of(2)
+        && !source.iter().any(|c| {
             c.iter()
                 .zip(c.iter().rev())
                 .any(|(a, b)| (a - b).abs() > 1e-6)
-        })
-    {
+        });
+    if !symmetric && !allow_unknown {
         return Err(invalid(
             "此 IR 的固定群延迟未确定；正式播放仅接受奇数长度的对称线性相位校正核",
         ));
@@ -396,7 +416,20 @@ pub fn prepare_wav_cancellable(
     let support = if source_rate == rate { 0.0 } else { 32.0 };
     let target_half =
         (((frames - 1) as f64 * 0.5 + support) * rate as f64 / source_rate as f64).ceil() as usize;
-    let target_frames = target_half * 2 + 1;
+    let buffering = if source_rate == rate || symmetric {
+        0
+    } else {
+        (32.0 * rate as f64 / source_rate as f64).ceil() as usize
+    };
+    let target_frames = if symmetric {
+        target_half * 2 + 1
+    } else if source_rate == rate {
+        frames
+    } else {
+        (((frames - 1) as f64 * rate as f64 / source_rate as f64).ceil() as usize)
+            + buffering * 2
+            + 1
+    };
     if target_frames > 257 {
         return Err(invalid(
             "重采样后的校正核超过首批实时预算（257 taps）；请使用更短的线性相位校正",
@@ -413,8 +446,11 @@ pub fn prepare_wav_cancellable(
                 let cutoff = (rate as f64 / source_rate as f64).min(1.0);
                 for (n, out) in result.iter_mut().enumerate() {
                     check_cancelled(cancelled)?;
-                    let position =
-                        center + (n as f64 - target_half as f64) * source_rate as f64 / rate as f64;
+                    let position = if symmetric {
+                        center + (n as f64 - target_half as f64) * source_rate as f64 / rate as f64
+                    } else {
+                        (n as f64 - buffering as f64) * source_rate as f64 / rate as f64
+                    };
                     let mut value = 0.0;
                     for k in (position.floor() as isize - 32)..=(position.floor() as isize + 32) {
                         if k < 0 || k as usize >= samples.len() {
@@ -436,10 +472,12 @@ pub fn prepare_wav_cancellable(
                     *out = (value * source_rate as f64 / rate as f64) as f32;
                 }
                 // Remove only floating-point roundoff asymmetry, not source phase.
-                for i in 0..target_half {
-                    let v = (result[i] + result[target_frames - 1 - i]) * 0.5;
-                    result[i] = v;
-                    result[target_frames - 1 - i] = v;
+                if symmetric {
+                    for i in 0..target_half {
+                        let v = (result[i] + result[target_frames - 1 - i]) * 0.5;
+                        result[i] = v;
+                        result[target_frames - 1 - i] = v;
+                    }
                 }
                 Ok(result)
             })
@@ -450,12 +488,26 @@ pub fn prepare_wav_cancellable(
         resource_id: id,
         sample_rate: rate,
         channels: prepared,
-        delay_frames: target_half,
+        delay_frames: if symmetric { target_half } else { buffering },
         attenuation_db: attenuation,
     };
-    kernel.validate()?;
+    let result = PreviewImpulse {
+        kernel,
+        phase: if symmetric {
+            ImpulsePhase::SymmetricLinear
+        } else {
+            ImpulsePhase::Unknown
+        },
+    };
+    if allow_unknown {
+        result.validate()?;
+    } else {
+        // Offline parsing keeps its original rate range. Realtime admission
+        // belongs to the formal render/API owner, not the audition contract.
+        result.kernel.validate()?;
+    }
     check_cancelled(cancelled)?;
-    Ok(kernel)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -667,5 +719,91 @@ mod tests {
                 assert_eq!(k.delay_frames, (k.channels[0].len() - 1) / 2);
             }
         }
+    }
+    #[test]
+    fn unknown_phase_wav_is_temporary_only_and_retains_the_original_level() {
+        let samples = [0.6, 0.2, 0.1, -0.1];
+        let wav = encode_mono_float_wav(&samples, 48_000);
+        let p =
+            prepare_preview_wav_cancellable(&wav, "d".repeat(64), 48_000, &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(p.phase, vmusic_core::audio_preview::ImpulsePhase::Unknown);
+        assert_eq!(p.kernel.delay_frames, 0);
+        assert_eq!(p.kernel.channels[0], samples);
+        assert!(p.kernel.attenuation_db.abs() < 1e-6);
+        assert!(prepare_wav(&wav, "d".repeat(64), 48_000).is_err());
+        assert!(
+            p.kernel.validate().is_err(),
+            "an unknown kernel is never a formal resource"
+        );
+    }
+
+    #[test]
+    fn unknown_phase_resampling_keeps_complex_response_and_declares_only_filter_buffering() {
+        let samples = [0.1, 0.7, 0.0, -0.2];
+        let wav = encode_mono_float_wav(&samples, 44_100);
+        let p =
+            prepare_preview_wav_cancellable(&wav, "e".repeat(64), 48_000, &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(p.phase, vmusic_core::audio_preview::ImpulsePhase::Unknown);
+        assert_eq!(p.kernel.delay_frames, 35);
+        assert!(p.kernel.channels[0].len() <= 257);
+        // Physical-frequency response of the source plus the declared resampling
+        // buffer. No peak-based intrinsic group-delay estimate is subtracted.
+        let response = |taps: &[f32], rate: f64, frequency: f64| {
+            taps.iter()
+                .enumerate()
+                .fold((0.0, 0.0), |(re, im), (i, x)| {
+                    let angle = std::f64::consts::TAU * frequency * i as f64 / rate;
+                    (
+                        re + f64::from(*x) * angle.cos(),
+                        im - f64::from(*x) * angle.sin(),
+                    )
+                })
+        };
+        for f in [0.0, 1000.0, 5000.0] {
+            let (re, im) = response(&samples, 44_100.0, f);
+            let angle = std::f64::consts::TAU * f * p.kernel.delay_frames as f64 / 48_000.0;
+            let expected = (
+                re * angle.cos() + im * angle.sin(),
+                im * angle.cos() - re * angle.sin(),
+            );
+            let actual = response(&p.kernel.channels[0], 48_000.0, f);
+            assert!(
+                (actual.0 - expected.0).hypot(actual.1 - expected.1) < 0.002,
+                "complex response changed at {f} Hz: {actual:?} vs {expected:?}"
+            );
+        }
+        assert!(prepare_wav(&wav, "e".repeat(64), 48_000).is_err());
+    }
+
+    #[test]
+    fn preview_wav_obeys_realtime_limits_without_narrowing_formal_offline_parser() {
+        let cancelled = AtomicBool::new(false);
+        let known = encode_mono_float_wav(&[0.0, 1.0, 0.0], 96_000);
+        assert!(prepare_wav(&known, "f".repeat(64), 96_000).is_ok());
+        assert!(
+            prepare_preview_wav_cancellable(&known, "f".repeat(64), 96_000, &cancelled).is_err()
+        );
+        let unknown = encode_mono_float_wav(&[0.6, 0.1], 48_000);
+        assert!(
+            prepare_preview_wav_cancellable(&unknown, "f".repeat(64), 192_000, &cancelled).is_err()
+        );
+        let too_long = encode_mono_float_wav(&vec![0.01; 258], 48_000);
+        assert!(
+            prepare_preview_wav_cancellable(&too_long, "f".repeat(64), 48_000, &cancelled).is_err()
+        );
+        let nonfinite = encode_mono_float_wav(&[1.0, f32::NAN], 48_000);
+        assert!(
+            prepare_preview_wav_cancellable(&nonfinite, "f".repeat(64), 48_000, &cancelled)
+                .is_err()
+        );
+        assert!(prepare_preview_wav_cancellable(
+            &unknown[..unknown.len() - 1],
+            "f".repeat(64),
+            48_000,
+            &cancelled
+        )
+        .is_err());
     }
 }

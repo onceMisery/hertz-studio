@@ -61,6 +61,48 @@ fn fixed_eq_transition_matches_long_history_and_survives_block_fragmentation() {
 }
 
 #[test]
+fn warmup_consumes_history_then_each_live_frame_once_without_lapping() {
+    let rate = 48_000;
+    let control = DspControl::new();
+    control.publish(rate, [0.0; 6]).unwrap();
+    let mut runtime = DspRuntime::new(rate, 1);
+    runtime.begin_block(&control);
+    let history = rate as usize / 10;
+    for _ in 0..history {
+        runtime.process(&mut [0.01]);
+    }
+    runtime.finish_block(&control);
+    control.publish(rate, [12.0; 6]).unwrap();
+    runtime.begin_block(&control);
+    let Transition::Warming {
+        read: start_read,
+        remaining: requested,
+    } = runtime.transition
+    else {
+        panic!("parametric change must warm the new filter");
+    };
+    assert_eq!(requested, history);
+    let mut warming_frames = 0;
+    while let Transition::Warming { read, remaining } = runtime.transition {
+        assert_eq!(
+            read,
+            (start_read + EQ_WARMUP_FRAMES_PER_FRAME * warming_frames) % runtime.history_frames
+        );
+        assert_eq!(remaining, requested - 3 * warming_frames);
+        runtime.process(&mut [0.01]);
+        warming_frames += 1;
+    }
+    assert_eq!(warming_frames, (requested - 1).div_ceil(3));
+
+    let mut frames = warming_frames;
+    while !matches!(runtime.transition, Transition::Idle) {
+        runtime.process(&mut [0.01]);
+        frames += 1;
+    }
+    assert_eq!(frames, warming_frames + runtime.fade_frames - 1);
+}
+
+#[test]
 fn rapid_requests_keep_only_the_latest_and_reset_clears_pending_history() {
     let control = DspControl::new();
     let mut runtime = DspRuntime::new(48_000, 1);

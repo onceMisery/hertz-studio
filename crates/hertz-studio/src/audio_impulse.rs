@@ -21,7 +21,7 @@ static CURRENT_JOB: Mutex<Option<Arc<Job>>> = Mutex::new(None);
 #[derive(Default)]
 struct Job {
     request_id: String,
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
     /// Publication and cancellation have one linearization point. Staging and
     /// sync run outside this lock; only the final filesystem links run inside.
     committed: Mutex<bool>,
@@ -86,12 +86,19 @@ impl Drop for WorkerLease {
     }
 }
 fn begin_job(request_id: String) -> Result<(RequestGuard, WorkerLease), ApiError> {
+    begin_job_with_cancel(request_id, Arc::new(AtomicBool::new(false)))
+}
+fn begin_job_with_cancel(
+    request_id: String,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(RequestGuard, WorkerLease), ApiError> {
     let permit = IMPORT
         .clone()
         .try_acquire_owned()
         .map_err(|_| bad_request("另一个校正任务正在进行或取消清理中，请稍后再试"))?;
     let job = Arc::new(Job {
         request_id,
+        cancelled,
         ..Default::default()
     });
     let mut current = CURRENT_JOB
@@ -168,14 +175,18 @@ fn folder(state: &AppState) -> PathBuf {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn managed_id(id: &str) -> Result<String, ApiError> {
+    if vmusic_core::audio_quality::decode_id(id).is_none() {
+        return Err(bad_request("校正资源 ID 无效"));
+    }
+    Ok(id.to_ascii_lowercase())
+}
 
 pub async fn prepare(
     state: &AppState,
     id: &str,
 ) -> Result<vmusic_core::impulse::ImpulseKernel, ApiError> {
-    if vmusic_core::audio_quality::decode_id(id).is_none() {
-        return Err(bad_request("校正资源 ID 无效"));
-    }
+    let id = managed_id(id)?;
     // Internal preparation is not identified by a previous import/generation
     // request, so a delayed UI cancellation cannot interrupt a saved adoption.
     let (mut guard, lease) = begin_job(uuid::Uuid::new_v4().to_string())?;
@@ -199,6 +210,68 @@ pub async fn prepare(
     guard.armed = false;
     result
 }
+/// Audition-only WAV preparation shares the import/generation worker and cancellation.
+/// Unknown phase never becomes a managed resource and never enters formal adoption.
+pub(crate) async fn prepare_preview(
+    state: &AppState,
+    request_id: String,
+    path: Option<String>,
+    resource_id: Option<String>,
+    rate: u32,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Option<vmusic_core::audio_preview::PreviewImpulse>, ApiError> {
+    use vmusic_core::audio_preview::{ImpulsePhase, PreviewImpulse};
+    if path.is_none() && resource_id.is_none() {
+        return Ok(None);
+    }
+    let expected = if path.is_some() {
+        None
+    } else {
+        resource_id.map(|id| managed_id(&id)).transpose()?
+    };
+    let path = path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| folder(state).join(format!("{}.wav", expected.as_ref().unwrap())));
+    let (mut guard, lease) = begin_job_with_cancel(request_id, cancelled)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        let job = &_lease.job;
+        let bytes = read_bounded(&path, job)?;
+        let actual = digest(&bytes);
+        if expected
+            .as_ref()
+            .is_some_and(|expected| expected != &actual)
+        {
+            return Err(bad_request("校正资源内容已改变，请重新导入"));
+        }
+        let impulse = if expected.is_some() {
+            PreviewImpulse {
+                kernel: vmusic_audio::impulse::prepare_wav_cancellable(
+                    &bytes,
+                    actual,
+                    rate,
+                    &job.cancelled,
+                )
+                .map_err(|e| bad_request(e.to_string()))?,
+                phase: ImpulsePhase::SymmetricLinear,
+            }
+        } else {
+            vmusic_audio::impulse::prepare_preview_wav_cancellable(
+                &bytes,
+                actual,
+                rate,
+                &job.cancelled,
+            )
+            .map_err(|e| bad_request(e.to_string()))?
+        };
+        job.complete(|| Ok(Some(impulse)))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    guard.armed = false;
+    result
+}
+
 fn read_bounded(path: &std::path::Path, job: &Job) -> Result<Vec<u8>, ApiError> {
     use std::io::Read;
     job.check()?;
@@ -466,6 +539,13 @@ fn publish_resource(
 mod tests {
     use super::*;
     use vmusic_audio::impulse::FrequencyPoint;
+
+    #[test]
+    fn managed_ids_are_canonical_lowercase() {
+        let id = "A".repeat(64);
+        assert_eq!(managed_id(&id).unwrap(), "a".repeat(64));
+        assert!(managed_id("not-a-digest").is_err());
+    }
 
     fn request() -> GenerateRequest {
         GenerateRequest {

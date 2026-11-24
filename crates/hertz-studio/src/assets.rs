@@ -84,6 +84,7 @@ ui_assets! {
     "/ui-preferences.js", JS => const UI_PREFERENCES_JS: &str = edition_ui!("ui-preferences.js");
     "/ui-preference-settings.js", JS => const UI_PREFERENCE_SETTINGS_JS: &str = edition_ui!("ui-preference-settings.js");
     "/dsp-settings.js", JS => const DSP_SETTINGS_JS: &str = edition_ui!("dsp-settings.js");
+    "/audio-preview-settings.js", JS => const AUDIO_PREVIEW_SETTINGS_JS: &str = edition_ui!("audio-preview-settings.js");
     "/audio-output-settings.js", JS => const AUDIO_OUTPUT_SETTINGS_JS: &str = edition_ui!("audio-output-settings.js");
     "/audio-analysis-settings.js", JS => const AUDIO_ANALYSIS_SETTINGS_JS: &str = edition_ui!("audio-analysis-settings.js");
     "/audio-quality.css", CSS => const AUDIO_QUALITY_CSS: &str = edition_ui!("audio-quality.css");

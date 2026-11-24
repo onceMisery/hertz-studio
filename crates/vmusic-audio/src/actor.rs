@@ -52,6 +52,9 @@ impl BackendKind {
     }
 }
 
+#[cfg(all(test, feature = "playback"))]
+mod preview_tests;
+
 const SPECTRUM_BANDS: usize = 64;
 const SPECTRUM_INTERVAL: Duration = Duration::from_millis(33);
 const TICK: Duration = Duration::from_millis(20);
@@ -60,6 +63,11 @@ const TICK: Duration = Duration::from_millis(20);
 pub enum AudioEvent {
     Snapshot(PlayerSnapshot),
     Spectrum(Vec<f32>),
+    PreviewRestored {
+        generation: u64,
+        source_generation: u64,
+        request_id: String,
+    },
     Transitioned {
         from_generation: u64,
         generation: u64,
@@ -129,6 +137,26 @@ enum Command {
         Reply<Result<(), AudioError>>,
     ),
     QualityStatus(Reply<Option<vmusic_core::audio_quality::QualityStatus>>),
+    PrepareQualityPreview {
+        plan: vmusic_core::audio_preview::PreviewPlan,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        expected: PlayerSnapshot,
+        reply: Reply<Result<MediaInfo, AudioError>>,
+    },
+    StartQualityPreview {
+        id: String,
+        side: vmusic_core::audio_preview::PreviewSide,
+        expected: PlayerSnapshot,
+        reply: Reply<Result<MediaInfo, AudioError>>,
+    },
+    SelectQualityPreview(
+        String,
+        vmusic_core::audio_preview::PreviewSide,
+        Reply<Result<(), AudioError>>,
+    ),
+    CancelQualityPreview(Option<String>, Reply<Result<bool, AudioError>>),
+    RefreshQualityPreview(String, Reply<Result<bool, AudioError>>),
     PrepareImpulse(
         vmusic_core::impulse::ImpulseKernel,
         Reply<Result<(), AudioError>>,
@@ -459,10 +487,10 @@ impl AudioHandle {
     }
 
     /// Send a command that carries a reply and wait for the actor to run it.
-    async fn ask(
+    async fn ask<T>(
         &self,
-        make: impl FnOnce(Reply<Result<(), AudioError>>) -> Command,
-    ) -> Result<(), AudioError> {
+        make: impl FnOnce(Reply<Result<T, AudioError>>) -> Command,
+    ) -> Result<T, AudioError> {
         let (tx, rx) = oneshot::channel();
         self.send(make(tx))?;
         rx.await
@@ -490,6 +518,57 @@ impl AudioHandle {
         params.validate()?;
         self.ask(|reply| Command::SetQuality(params, reply)).await
     }
+    pub async fn prepare_quality_preview(
+        &self,
+        plan: vmusic_core::audio_preview::PreviewPlan,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        expected: PlayerSnapshot,
+    ) -> Result<MediaInfo, AudioError> {
+        self.ask(|reply| Command::PrepareQualityPreview {
+            plan,
+            source,
+            ext,
+            expected,
+            reply,
+        })
+        .await
+    }
+    pub async fn start_quality_preview(
+        &self,
+        id: String,
+        side: vmusic_core::audio_preview::PreviewSide,
+        expected: PlayerSnapshot,
+    ) -> Result<MediaInfo, AudioError> {
+        self.ask(|reply| Command::StartQualityPreview {
+            id,
+            side,
+            expected,
+            reply,
+        })
+        .await
+    }
+    pub async fn select_quality_preview(
+        &self,
+        id: String,
+        side: vmusic_core::audio_preview::PreviewSide,
+    ) -> Result<(), AudioError> {
+        self.ask(|reply| Command::SelectQualityPreview(id, side, reply))
+            .await
+    }
+    pub async fn cancel_quality_preview(&self, id: Option<String>) -> Result<bool, AudioError> {
+        let (reply, rx) = oneshot::channel();
+        // A retired actor has no live preview. Keep backend and room errors intact.
+        if !self.send_if_running(Command::CancelQualityPreview(id, reply))? {
+            return Ok(false);
+        }
+        rx.await.unwrap_or(Ok(false))
+    }
+    pub async fn refresh_quality_preview(&self, id: String) -> Result<bool, AudioError> {
+        self.ask(|reply| Command::RefreshQualityPreview(id, reply))
+            .await
+    }
+
     pub async fn prepare_impulse(
         &self,
         kernel: vmusic_core::impulse::ImpulseKernel,
@@ -543,13 +622,19 @@ impl AudioHandle {
     }
 
     fn send(&self, cmd: Command) -> Result<(), AudioError> {
+        if self.send_if_running(cmd)? {
+            Ok(())
+        } else {
+            Err(AudioError::Other("audio actor is not running".into()))
+        }
+    }
+
+    fn send_if_running(&self, cmd: Command) -> Result<bool, AudioError> {
         let owned = self.ingress.lock().unwrap_or_else(|e| e.into_inner());
         if *owned && !matches!(cmd, Command::Devices(_)) {
             return Err(AudioError::Other("room_mode_requires_room_command".into()));
         }
-        self.tx
-            .send(cmd)
-            .map_err(|_| AudioError::Other("audio actor is not running".into()))
+        Ok(self.tx.send(cmd).is_ok())
     }
 }
 
@@ -824,6 +909,17 @@ fn run(
             &mut ended_emitted,
         );
         backend.maintain();
+        if let Some(request_id) = backend.take_quality_preview_restore() {
+            state.generation = state.generation.saturating_add(1);
+            state.position_ms = backend.position_ms();
+            publish(&snapshot, &state);
+            let restored = AudioEvent::PreviewRestored {
+                generation: state.generation,
+                source_generation: state.source_generation,
+                request_id,
+            };
+            let _ = control_events.send(restored);
+        }
         let expired = enforce_sleep_deadline(
             &sleep_deadline,
             &mut *backend,
@@ -1081,6 +1177,7 @@ fn enforce_sleep_deadline(
             let _ = events.send(AudioEvent::Error(error.to_string()));
         }
     }
+    let _ = backend.cancel_quality_preview(None);
     backend.clear_next();
     // A callback may have promoted a deck immediately before expiry. Consume
     // that already-completed edge now so clearing the gate cannot replay it as
@@ -1189,12 +1286,28 @@ fn apply_with_sleep_deadline(
             let _ = reply.send(Err(AudioError::Other("sleep_timer_expired".into())));
             Ok(false)
         }
+        Command::StartQualityPreview { reply, .. } if gate.expired() => {
+            let _ = reply.send(Err(AudioError::Other("sleep_timer_expired".into())));
+            Ok(false)
+        }
+        Command::SelectQualityPreview(_, _, reply) if gate.expired() => {
+            let _ = reply.send(Err(AudioError::Other("sleep_timer_expired".into())));
+            Ok(false)
+        }
         Command::PrepareNext(_, reply) if gate.expired() => {
             let _ = reply.send(Err(AudioError::Other("sleep_timer_expired".into())));
             Ok(false)
         }
         cmd => apply(backend, state, sink, cmd),
     }
+}
+
+fn same_preview_source(state: &PlayerSnapshot, expected: &PlayerSnapshot) -> bool {
+    state.generation == expected.generation
+        && state.source_generation == expected.source_generation
+        && state.track_id == expected.track_id
+        && state.track_id.is_some()
+        && state.volume == expected.volume
 }
 
 fn apply(
@@ -1327,6 +1440,76 @@ fn apply(
         }
         Command::PrepareImpulse(kernel, reply) => {
             let _ = reply.send(backend.prepare_impulse(kernel));
+            Ok(false)
+        }
+        Command::PrepareQualityPreview {
+            plan,
+            source,
+            ext,
+            expected,
+            reply,
+        } => {
+            let result = if same_preview_source(state, &expected) {
+                backend.prepare_quality_preview(plan, source, ext)
+            } else {
+                Err(AudioError::Other("试听准备期间播放意图已改变".into()))
+            };
+            let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::StartQualityPreview {
+            id,
+            side,
+            expected,
+            reply,
+        } => {
+            let result = if state.generation.checked_add(2).is_none()
+                || state.source_generation == u64::MAX
+            {
+                Err(AudioError::Other("播放代际耗尽，无法开始试听".into()))
+            } else if same_preview_source(state, &expected) {
+                backend.start_quality_preview(&id, side)
+            } else {
+                Err(AudioError::Other("试听准备期间播放意图已改变".into()))
+            };
+            if result.is_ok() {
+                state.source_generation += 1;
+                state.generation += 1;
+                state.position_ms = backend.position_ms();
+            }
+            publish(sink, state);
+            let reset = result.is_ok();
+            let _ = reply.send(result);
+            Ok(reset)
+        }
+        Command::SelectQualityPreview(id, side, reply) => {
+            let result = if state.generation.checked_add(2).is_none() {
+                Err(AudioError::Other("播放代际耗尽，无法切换试听".into()))
+            } else {
+                backend.select_quality_preview(&id, side)
+            };
+            if result.is_ok() {
+                state.generation = state.generation.saturating_add(1);
+                state.position_ms = backend.position_ms();
+            }
+            publish(sink, state);
+            let reset = result.is_ok();
+            let _ = reply.send(result);
+            Ok(reset)
+        }
+        Command::CancelQualityPreview(id, reply) => {
+            let result = backend.cancel_quality_preview(id.as_deref());
+            let _ = backend.take_quality_preview_restore();
+            if result.as_ref().is_ok_and(|c| *c) {
+                state.generation = state.generation.saturating_add(1);
+                state.position_ms = backend.position_ms();
+            }
+            publish(sink, state);
+            let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::RefreshQualityPreview(id, reply) => {
+            let _ = reply.send(Ok(backend.refresh_quality_preview(&id)));
             Ok(false)
         }
         Command::QualityStatus(reply) => {
