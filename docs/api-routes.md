@@ -25,7 +25,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 221 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 184 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 170 条内嵌静态资源路由。
+REST 路由表共 231 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 191 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 174 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -149,12 +149,22 @@ REST 路由表共 221 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/online/sources` |
 | GET | `/v1/online/stream` |
 | GET | `/v1/overlay/lyric` |
+| GET | `/v1/player/audio-quality` |
+| POST | `/v1/player/audio-quality` |
 | POST | `/v1/player/depart` |
 | GET | `/v1/player/dsp` |
 | POST | `/v1/player/dsp` |
+| POST | `/v1/player/impulses` |
+| POST | `/v1/player/impulses/cancel` |
+| POST | `/v1/player/impulses/generate` |
 | POST | `/v1/player/load` |
+| GET | `/v1/player/loudness` |
+| POST | `/v1/player/loudness` |
+| POST | `/v1/player/loudness/apply` |
 | POST | `/v1/player/mode` |
 | POST | `/v1/player/next` |
+| GET | `/v1/player/output` |
+| POST | `/v1/player/output` |
 | POST | `/v1/player/pause` |
 | POST | `/v1/player/play` |
 | POST | `/v1/player/previous` |
