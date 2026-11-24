@@ -5156,6 +5156,7 @@ pub(crate) mod tests {
         )
     }
 
+    #[cfg(windows)]
     pub(crate) async fn loudness_next_fixture(
         state: &AppState,
         target: &str,

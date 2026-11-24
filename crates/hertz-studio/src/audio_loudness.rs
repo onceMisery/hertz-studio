@@ -367,7 +367,7 @@ fn schedule_candidate_inner(
     true
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 async fn prepare_candidate(
     state: &Arc<AppState>,
     id: String,
