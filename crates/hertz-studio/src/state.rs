@@ -550,6 +550,16 @@ pub struct DspConfig {
 
 impl DspConfig {
     pub fn from_settings(settings: &std::collections::BTreeMap<String, serde_json::Value>) -> Self {
+        // Callers loading persisted data validate through audio_quality first.
+        if let Ok((config, _)) = crate::audio_quality::from_settings(settings) {
+            return crate::audio_quality::legacy(&config);
+        }
+        Self::from_legacy_settings(&Default::default())
+    }
+
+    pub fn from_legacy_settings(
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Self {
         let eq = settings
             .get("dsp_eq")
             .and_then(|v| serde_json::from_value::<[f32; 6]>(v.clone()).ok())
@@ -736,6 +746,7 @@ pub(crate) struct CommittedQuality {
     track_id: String,
     play_generation: usize,
     actor_generation: u64,
+    source_generation: u64,
     actual: Option<crate::online::quality::Quality>,
     cached_path: Option<PathBuf>,
     download: Option<crate::online::progressive::DownloadView>,
@@ -748,6 +759,7 @@ pub(crate) struct PreparedPlayback {
     sequence: usize,
     play_generation: usize,
     actor_generation: u64,
+    source_generation: u64,
     from_index: usize,
     from_track_id: String,
     to_index: usize,
@@ -757,6 +769,18 @@ pub(crate) struct PreparedPlayback {
     path: PathBuf,
     actual_quality: Option<crate::online::quality::Quality>,
     track_gain_db: f32,
+    measured: Option<(
+        crate::audio_loudness::GainSelection,
+        vmusic_core::audio_quality::QualityConfig,
+    )>,
+}
+impl PreparedPlayback {
+    pub(crate) fn loudness_track_id(&self) -> &str {
+        &self.to_track_id
+    }
+    pub(crate) fn loudness_path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -841,6 +865,9 @@ pub struct AppState {
     /// DSP 设置（EQ/增益/响度归一化/交叉淡化）。
     pub(crate) dsp: Mutex<DspConfig>,
     pub(crate) dsp_application_error: Mutex<Option<crate::error::ApiError>>,
+    pub(crate) quality_update: Mutex<()>,
+    pub(crate) loudness_candidates: crate::audio_loudness::Candidates,
+    pub(crate) measured_loudness: Mutex<Option<crate::measured_loudness::Applied>>,
     /// 用户显式保留的缓存条目（`{stem}.` 前缀，含全部音质档）。启动时从
     /// settings 装载、pin/unpin 即时更新；LRU 回收与手动清理都豁免它。
     pub(crate) keep: Mutex<Vec<String>>,
@@ -1028,6 +1055,7 @@ impl AppState {
                 next.actual_quality.map(|_| next.path.clone()),
             )
             .await;
+            crate::measured_loudness::committed(self, next.measured.clone()).await;
             let mut protected = self.protected.lock().await;
             protected.clear();
             if next.actual_quality.is_some() {
@@ -1346,7 +1374,7 @@ impl AppState {
 
     /// 在线曲在当前档位下应下的增益（已含防削波），与本地曲同一条规则。
     ///
-    /// current_loudness（对外汇报「用了多少增益」）与播放落地（apply_online_loudness）
+    /// current_loudness（对外汇报「用了多少增益」）与播放装载时的固定增益选择
     /// 都走它：两处各算一遍迟早会漂成不一致的答案。
     async fn online_gain(&self, track_id: &str) -> Option<(f64, &'static str)> {
         self.online_rg(track_id)
@@ -1391,39 +1419,6 @@ impl AppState {
             }
         }
         map.insert(id, snap);
-    }
-
-    /// 把在线曲的响度增益推给 audio actor。
-    ///
-    /// 每次提交都要推（哪怕结果为 0 dB）：在线链路原先完全不碰 DSP，上一首
-    /// 本地曲的增益会一直留在链上，切到在线曲时等于套用了别人的增益。
-    /// 与 play_local 同一套规则，含 anti_clip_gain 防削波。
-    async fn apply_online_loudness(&self, track_id: &str) {
-        let dsp = self.dsp.lock().await.clone();
-        let track_gain_db = if dsp.loudness_enabled() {
-            match self.online_gain(track_id).await {
-                Some((gain, from)) => {
-                    crate::diaglog!(
-                        "loudness.apply",
-                        mode = dsp.loudness_mode.as_str(),
-                        from = from,
-                        gain_db = gain
-                    );
-                    gain as f32
-                }
-                None => 0.0,
-            }
-        } else {
-            0.0
-        };
-        let _ = self
-            .audio
-            .set_dsp(vmusic_core::DspParams {
-                eq_gains_db: dsp.eq_gains_db,
-                preamp_db: dsp.preamp_db,
-                track_gain_db,
-            })
-            .await;
     }
 
     /// LRU 回收与手动清理的豁免名单：当前播放 + 用户保留项。
@@ -1632,8 +1627,24 @@ impl AppState {
         reserve_gen: Option<usize>,
         trigger: PlayTrigger,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
-        self.play_index_internal(index, reserve_gen, trigger, false)
+        self.play_index_internal(index, reserve_gen, trigger, false, None)
             .await
+    }
+
+    pub(crate) async fn replay_measured_expected(
+        &self,
+        index: usize,
+        play_generation: usize,
+        snapshot: PlayerSnapshot,
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        self.play_index_internal(
+            index,
+            Some(play_generation),
+            PlayTrigger::Pick,
+            false,
+            Some(snapshot),
+        )
+        .await
     }
 
     async fn play_index_internal(
@@ -1642,12 +1653,25 @@ impl AppState {
         reserve_gen: Option<usize>,
         trigger: PlayTrigger,
         restore: bool,
+        expected_audio: Option<PlayerSnapshot>,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         // 预留区整段持 commit：验代际、读曲、顶新代际、写乐观 cursor 必须相对
         // set_queue 与别的播放预留原子——否则多 worker 下「预闸后队列被换」或
         // 「同队列秒切」都可能让迟到的提交劫持正在听的曲。
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
+        if expected_audio.as_ref().is_some_and(|expected| {
+            let snapshot = self.audio.snapshot();
+            snapshot.generation != expected.generation
+                || snapshot.source_generation != expected.source_generation
+                || snapshot.track_id != expected.track_id
+        }) {
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+
         if self.native_sleep_due_locked().await {
             return Ok(PlayOutcome {
                 committed: false,
@@ -1752,6 +1776,18 @@ impl AppState {
                     if restore {
                         self.consume_restore_seek(pending).await;
                     }
+                    // Restore this replay's position before releasing its own
+                    // commit token. A later seek/skip can never be overwritten
+                    // by history I/O completing after the replay returns.
+                    if let Some(expected) = &expected_audio {
+                        if expected.position_ms > 0 {
+                            self.audio.seek(expected.position_ms).await?;
+                        }
+                        if !expected.playing {
+                            self.audio.pause().await?;
+                        }
+                        self.transport_committed().await;
+                    }
                     self.on_track_committed(&track_id, outcome.actual_quality)
                         .await;
                     true
@@ -1791,33 +1827,6 @@ impl AppState {
                 );
                 vmusic_core::CoreError::NotFound(track_id.clone())
             })?;
-        // 响度归一化：按档位挑标签（album 缺专辑值回落曲目），增益为正时
-        // 用峰值做防削波。失败不影响播放。
-        let dsp = self.dsp.lock().await.clone();
-        let track_gain_db = if dsp.loudness_enabled() {
-            self.current_loudness(&dsp.loudness_mode)
-                .await
-                .map(|(gain, from)| {
-                    crate::diaglog!(
-                        "loudness.apply",
-                        mode = dsp.loudness_mode.as_str(),
-                        from = from,
-                        gain_db = gain
-                    );
-                    gain
-                })
-                .unwrap_or(0.0) as f32
-        } else {
-            0.0
-        };
-        let _ = self
-            .audio
-            .set_dsp(vmusic_core::DspParams {
-                eq_gains_db: dsp.eq_gains_db,
-                preamp_db: dsp.preamp_db,
-                track_gain_db,
-            })
-            .await;
         // 远程直链的取流准备放在提交锁外：`auth_for_url` 打 DB + 系统钥匙串，
         // `HttpRangeStream::open` 是真实网络建连——WebDAV 慢源上这两步各自都
         // 可能是秒级。原先它们连同 `load_source` 一起在 `play_commit` 锁内，
@@ -1869,6 +1878,12 @@ impl AppState {
                 actual_quality: None,
             });
         }
+        let decision = crate::measured_loudness::for_load_locked(
+            self,
+            &track_id,
+            remote.is_none().then_some(Path::new(&track.path)),
+        )
+        .await?;
         match remote {
             Some((url, ext, stream)) => {
                 // 远程直链的凭据可能在 userinfo 或 query 里，与在线流同规则脱敏。
@@ -1880,7 +1895,7 @@ impl AppState {
                     url = crate::diag::redact_url(&url)
                 );
                 self.audio
-                    .load_source(stream, ext, Some(track_id.clone()))
+                    .load_source_with_gain(stream, ext, Some(track_id.clone()), decision.gain_db)
                     .await
                     .map_err(vmusic_core::CoreError::Audio)?;
             }
@@ -1892,12 +1907,24 @@ impl AppState {
                     via = "file",
                     path = track.path
                 );
-                self.audio
-                    .load(&track.path, Some(track_id.clone()))
-                    .await
-                    .map_err(vmusic_core::CoreError::Audio)?;
+                if let Some((source, ext)) = decision.source {
+                    self.audio
+                        .load_source_with_gain(
+                            source,
+                            ext,
+                            Some(track_id.clone()),
+                            decision.gain_db,
+                        )
+                        .await?;
+                } else {
+                    self.audio
+                        .load_with_gain(&track.path, Some(track_id.clone()), decision.gain_db)
+                        .await?;
+                }
             }
         }
+        crate::measured_loudness::committed(self, decision.measured).await;
+
         // load 已被 actor 处理：若这期间又切了歌，更新一代的命令已排在后面，
         // 本调用绝不能再 play() 或写 cursor。
         if !self.attempt_alive(gen, index, &track_id).await {
@@ -1913,6 +1940,7 @@ impl AppState {
                 actual_quality: None,
             });
         }
+        self.transport_committed().await;
         crate::diaglog!("play.commit", idx = index, gen = gen, via = "local");
         Ok(PlayOutcome {
             committed: self.attempt_alive(gen, index, &track_id).await,
@@ -2073,7 +2101,6 @@ impl AppState {
             );
             // 响度先落地再提交：缓存命中不走取流接口，值来自上一轮存在
             // online_meta 里的标签（没有就是 0 dB）。
-            self.apply_online_loudness(&track_id).await;
             match self
                 .try_commit_cached(gen, index, &track_id, &path, Some(hit_quality))
                 .await?
@@ -2416,12 +2443,14 @@ impl AppState {
                 actual_quality: None,
             });
         }
+        let decision = crate::measured_loudness::for_load_locked(self, &track_id, None).await?;
         if let Err(e) = self
             .audio
-            .load_source(
+            .load_source_with_gain(
                 Box::new(media),
                 Some(ext.to_string()),
                 Some(track_id.clone()),
+                decision.gain_db,
             )
             .await
         {
@@ -2443,6 +2472,9 @@ impl AppState {
                 )
                 .await;
         }
+        // A new progressive source has no measured candidate even if its ID
+        // equals the previous cache selection. Clear the old source binding.
+        crate::measured_loudness::committed(self, None).await;
         if !self.attempt_alive(gen, index, &track_id).await {
             crate::diaglog!("play.stale", idx = index, gen = gen, via = "progressive");
             self.set_buffering(false, None).await;
@@ -2458,7 +2490,6 @@ impl AppState {
         // 响度要在三条提交路径上都推（缓存命中 / 整首下载 / 这条渐进式），
         // 漏一条就会出现「有时归一化、有时不归一化」。位置放在存活复核之后：
         // 只有真要提交的这一首才改链上的增益。
-        self.apply_online_loudness(&track_id).await;
         let play = self.play_with_native_deadline_locked().await;
         if matches!(play, Ok(false)) {
             return Ok(PlayOutcome {
@@ -2530,7 +2561,18 @@ impl AppState {
                 "路径含非 UTF-8 字符".into(),
             ));
         };
-        if let Err(e) = self.audio.load(uri, Some(track_id.to_string())).await {
+        let decision =
+            crate::measured_loudness::for_load_locked(self, track_id, Some(path)).await?;
+        let result = if let Some((source, ext)) = decision.source {
+            self.audio
+                .load_source_with_gain(source, ext, Some(track_id.to_owned()), decision.gain_db)
+                .await
+        } else {
+            self.audio
+                .load_with_gain(uri, Some(track_id.to_owned()), decision.gain_db)
+                .await
+        };
+        if let Err(e) = result {
             let in_cache_dir = path.parent().is_some_and(|p| p == self.online_cache_dir());
             if in_cache_dir {
                 tracing::warn!(?path, error = %e, "缓存文件 load 失败，判为坏缓存");
@@ -2538,12 +2580,14 @@ impl AppState {
             }
             return Err(vmusic_core::CoreError::Audio(e));
         }
+        crate::measured_loudness::committed(self, decision.measured).await;
         if !self.attempt_alive(gen, index, track_id).await {
             return Ok(Commit::Stale);
         }
         if !self.play_with_native_deadline_locked().await? {
             return Ok(Commit::Stale);
         }
+        self.transport_committed().await;
         let committed = self.attempt_alive(gen, index, track_id).await;
         if committed {
             self.remember_committed_quality(gen, track_id, actual, Some(path.to_path_buf()))
@@ -2571,7 +2615,6 @@ impl AppState {
         source: String,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         // 新鲜取流路径的响度落地：标签已在上游存进 online_meta。
-        self.apply_online_loudness(&track_id).await;
         match self
             .try_commit_cached(gen, index, &track_id, &path, actual)
             .await
@@ -2740,17 +2783,77 @@ impl AppState {
         let _ = self.audio.cancel_next();
     }
 
+    /// Metadata invalidation cannot cut an overlap which has already emitted
+    /// audio. Keep its exact source/gain record through the transition event.
+    pub(crate) async fn cancel_unstarted_loudness_preparation(&self) {
+        self.prepare_sequence.fetch_add(1, Ordering::Relaxed);
+        let pending = self.prepared_playback.lock().await.clone();
+        let cleared = self.audio.clear_unstarted_next().await.unwrap_or(false);
+        let snapshot = self.audio.snapshot();
+        let promoted = pending.as_ref().is_some_and(|next| {
+            snapshot.source_generation != next.source_generation
+                && snapshot.track_id.as_deref() == Some(&next.to_track_id)
+        });
+        if cleared && !promoted {
+            self.prepared_playback.lock().await.take();
+        }
+    }
+
     pub(crate) fn schedule_prepare_next(&self) {
         if let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+            if !self.loudness_candidates.request_next_worker() {
+                return;
+            }
             tokio::spawn(async move {
-                state.prepare_next_playback().await;
+                loop {
+                    state.prepare_next_playback().await;
+                    if !state.loudness_candidates.finish_next_worker() {
+                        break;
+                    }
+                }
             });
+        }
+    }
+
+    /// Recheck a complete-cache path selected by this playback owner. This
+    /// grants no authority to arbitrary cache paths supplied by an API caller.
+    pub(crate) async fn loudness_next_matches(&self, next: &PreparedPlayback) -> bool {
+        let _commit = self.play_commit.lock().await;
+        self.loudness_next_matches_locked(next).await
+    }
+    pub(crate) async fn loudness_next_matches_locked(&self, next: &PreparedPlayback) -> bool {
+        if self.prepare_sequence.load(Ordering::Relaxed) != next.sequence
+            || !self
+                .preparation_matches(next, &self.audio.snapshot(), false)
+                .await
+        {
+            return false;
+        }
+        if let Some((source, id)) = crate::online::split_virtual_id(&next.to_track_id) {
+            let quality = self.online_quality_for(&source, &next.to_track_id).await;
+            self.find_online_cached(&source, &id, quality)
+                .await
+                .is_some_and(|(path, actual)| {
+                    path == next.path && Some(actual) == next.actual_quality
+                })
+        } else {
+            vmusic_store::get_track(&self.db, &next.to_track_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|track| {
+                    track.source == vmusic_core::TrackSource::Local
+                        && Path::new(&track.path) == next.path
+                })
         }
     }
 
     async fn prepare_next_playback(&self) {
         let (mut next, sequence) = {
             let _commit = self.play_commit.lock().await;
+            if self.scan.lock().await.running {
+                return;
+            }
             if self.native_sleep_due_locked().await {
                 return;
             }
@@ -2801,6 +2904,7 @@ impl AppState {
                     sequence,
                     play_generation: generation,
                     actor_generation: snapshot.generation,
+                    source_generation: snapshot.source_generation,
                     from_index,
                     from_track_id: from_track_id.clone(),
                     to_index,
@@ -2810,6 +2914,7 @@ impl AppState {
                     path: PathBuf::new(),
                     actual_quality: None,
                     track_gain_db: 0.0,
+                    measured: None,
                 },
                 sequence,
             )
@@ -2839,7 +2944,12 @@ impl AppState {
             return;
         }
         let dsp = self.dsp.lock().await.clone();
-        if dsp.loudness_enabled() {
+        let quality = crate::measured_loudness::config(self).await.ok();
+        let measured_mode = quality.as_ref().is_some_and(|q| {
+            q.loudness_source == vmusic_core::audio_quality::LoudnessSource::R128
+                && q.loudness_mode != "off"
+        });
+        if !measured_mode && dsp.loudness_enabled() {
             next.track_gain_db = self
                 .loudness_for(&next.to_track_id, &dsp.loudness_mode)
                 .await
@@ -2863,11 +2973,48 @@ impl AppState {
                 return;
             }
         }
+        let candidate_epoch = self.loudness_candidates.epoch();
+        let mut measured_next = None;
+        if measured_mode {
+            let config = quality.as_ref().unwrap();
+            measured_next = self
+                .loudness_candidates
+                .take_for_load(&next.to_track_id, &config.revision, &next.path)
+                .map(|v| v.into_parts());
+            if let Some((_, _, gain)) = &measured_next {
+                next.track_gain_db = gain.gain_db as f32;
+                next.measured = Some((gain.clone(), config.clone()));
+            } else {
+                if let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+                    crate::audio_loudness::schedule_next_candidate(
+                        &state,
+                        next.clone(),
+                        config.revision.clone(),
+                        config.target_lufs as f64,
+                        config.loudness_mode == "album",
+                    );
+                }
+                return;
+            }
+        }
         let Some(uri) = next.path.to_str() else {
             return;
         };
         let receipt = {
             let _commit = self.play_commit.lock().await;
+            if measured_mode && self.loudness_candidates.epoch() != candidate_epoch {
+                return;
+            }
+            if crate::measured_loudness::config(self)
+                .await
+                .ok()
+                .as_ref()
+                .map(|q| &q.revision)
+                != quality.as_ref().map(|q| &q.revision)
+            {
+                return;
+            }
+
             if self.native_sleep_due_locked().await {
                 return;
             }
@@ -2894,12 +3041,26 @@ impl AppState {
             }
             next.sequence = self.prepare_sequence.fetch_add(1, Ordering::Relaxed) + 1;
             *self.prepared_playback.lock().await = Some(next.clone());
-            self.audio.begin_prepare_next(
-                uri,
-                next.to_track_id.clone(),
-                next.actor_generation,
-                next.crossfade_ms,
-            )
+            if let Some((source, ext, gain)) = measured_next {
+                self.audio.begin_prepare_next_source(
+                    vmusic_core::NextTrack {
+                        uri: uri.into(),
+                        track_id: next.to_track_id.clone(),
+                        generation: next.actor_generation,
+                        crossfade_ms: next.crossfade_ms,
+                    },
+                    source,
+                    ext,
+                    gain.gain_db as f32,
+                )
+            } else {
+                self.audio.begin_prepare_next(
+                    uri,
+                    next.to_track_id.clone(),
+                    next.actor_generation,
+                    next.crossfade_ms,
+                )
+            }
         };
         let result = match receipt {
             Ok(receipt) => receipt.await.unwrap_or(Err(vmusic_core::AudioError::Other(
@@ -3003,13 +3164,14 @@ impl AppState {
             }
         }
         drop(protected);
+        crate::measured_loudness::committed(self, next.measured.clone()).await;
         let dsp = self.dsp.lock().await.clone();
         let _ = self
             .audio
             .set_dsp(vmusic_core::DspParams {
                 eq_gains_db: dsp.eq_gains_db,
                 preamp_db: dsp.preamp_db,
-                track_gain_db: if dsp.loudness_enabled() {
+                track_gain_db: if dsp.loudness_enabled() || next.measured.is_some() {
                     next.track_gain_db
                 } else {
                     0.0
@@ -3024,11 +3186,21 @@ impl AppState {
     /// Caller holds play_commit after the successful actor transport command.
     pub(crate) async fn transport_committed(&self) {
         let snapshot = self.audio.snapshot();
+        let mut measured = self.measured_loudness.lock().await;
+        if let Some(applied) = measured.as_mut() {
+            if applied.matches(&snapshot) {
+                applied.generation = snapshot.generation;
+            } else {
+                *measured = None;
+            }
+        }
+        drop(measured);
+
         let mut quality = self.committed_quality.lock().await;
-        if let Some(quality) = quality
-            .as_mut()
-            .filter(|q| snapshot.track_id.as_ref() == Some(&q.track_id))
-        {
+        if let Some(quality) = quality.as_mut().filter(|q| {
+            snapshot.track_id.as_ref() == Some(&q.track_id)
+                && q.source_generation == snapshot.source_generation
+        }) {
             quality.actor_generation = snapshot.generation;
             quality.play_generation = self.play_generation.load(Ordering::Relaxed);
         }
@@ -3112,6 +3284,7 @@ impl AppState {
             track_id: track_id.to_string(),
             play_generation: gen,
             actor_generation: self.audio.snapshot().generation,
+            source_generation: self.audio.snapshot().source_generation,
             actual,
             cached_path,
             download: None,
@@ -3128,6 +3301,7 @@ impl AppState {
                 && snapshot.track_id.as_deref() == Some(track_id)
                 && c.play_generation == self.play_generation.load(Ordering::Relaxed)
                 && c.actor_generation == snapshot.generation
+                && c.source_generation == snapshot.source_generation
         })?;
         current
             .cached_path
@@ -3161,6 +3335,7 @@ impl AppState {
     /// 当前播放曲经 protected 名单显式豁免（外加「最新文件始终保留」兜底），
     /// 不会被 LRU 回收掉。
     pub(crate) fn post_commit_background(self: &Arc<Self>) {
+        crate::measured_loudness::schedule_current(self);
         let s = self.clone();
         tokio::spawn(async move {
             let _ = tokio::join!(
@@ -4314,7 +4489,7 @@ impl AppState {
             // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
             if let Some(index) = self.current_index().await {
                 let outcome = self
-                    .play_index_internal(index, None, PlayTrigger::Pick, true)
+                    .play_index_internal(index, None, PlayTrigger::Pick, true, None)
                     .await?;
                 if !outcome.committed {
                     return Ok(ControlOutcome::Superseded {
@@ -4959,6 +5134,235 @@ pub async fn remove_discovery(data_dir: &std::path::Path) {
 pub(crate) mod tests {
     use super::*;
 
+    fn measured_fixture(snapshot: &PlayerSnapshot) -> crate::measured_loudness::Applied {
+        let mut config = vmusic_store::audio_quality::from_settings(&Default::default())
+            .unwrap()
+            .0;
+        config.schema_version = 3;
+        config.loudness_mode = "track".into();
+        config.loudness_source = vmusic_core::audio_quality::LoudnessSource::R128;
+        config.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+        crate::measured_loudness::Applied::from_selection(
+            snapshot,
+            crate::audio_loudness::GainSelection {
+                state: "ready".into(),
+                gain_db: 4.0,
+                requested_gain_db: Some(4.0),
+                integrated_lufs: Some(-22.0),
+                limited_by: None,
+                album: false,
+            },
+            &config,
+        )
+    }
+
+    pub(crate) async fn loudness_next_fixture(
+        state: &AppState,
+        target: &str,
+        path: PathBuf,
+        actual: Option<crate::online::quality::Quality>,
+    ) -> PreparedPlayback {
+        let mut next = transition_fixture(state, target).await;
+        next.path = path;
+        next.actual_quality = actual;
+        state.prepared_playback.lock().await.take();
+        next
+    }
+
+    #[tokio::test]
+    async fn loudness_same_id_reload_cannot_resurrect_previous_source_gain() {
+        let (state, actor) = playback_state().await;
+        let id = "online:ccmixter:same";
+        state
+            .audio
+            .load("original.wav", Some(id.into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        *state.measured_loudness.lock().await = Some(measured_fixture(&state.audio.snapshot()));
+        state
+            .remember_committed_quality(0, id, None, Some("original.wav".into()))
+            .await;
+        state.audio.seek(3000).await.unwrap();
+        state.transport_committed().await;
+        assert!(state
+            .measured_loudness
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .matches(&state.audio.snapshot()));
+        state
+            .audio
+            .load("different-content.wav", Some(id.into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        state.transport_committed().await;
+        assert!(state.measured_loudness.lock().await.is_none());
+        assert!(state.project_online_media(id).await.is_none());
+        state.audio.shutdown();
+        actor.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loudness_replay_restores_inside_commit_and_never_overwrites_later_seek() {
+        let dir = std::env::temp_dir().join(format!("measured-replay-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, actor) = playback_state_with_db(db).await;
+        let state = Arc::new(state);
+        vmusic_store::upsert_track(
+            &state.db,
+            &vmusic_core::Track {
+                id: "same".into(),
+                path: "original.wav".into(),
+                source: vmusic_core::TrackSource::Local,
+                title: "same".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+        state.set_queue(vec!["same".into()], Some(0)).await.unwrap();
+        state
+            .audio
+            .load("original.wav", Some("same".into()))
+            .await
+            .unwrap();
+        state.audio.seek(4000).await.unwrap();
+        let expected = state.audio.snapshot();
+        let intent = state.play_generation.load(Ordering::Relaxed);
+        let blocker = vmusic_store::begin_immediate(&state.db).await.unwrap();
+        let owner = state.clone();
+        let expected_copy = expected.clone();
+        let replay = tokio::spawn(async move {
+            owner
+                .replay_measured_expected(0, intent, expected_copy)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let snapshot = state.audio.snapshot();
+                if snapshot.source_generation > expected.source_generation
+                    && !snapshot.playing
+                    && snapshot.position_ms == 4000
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !replay.is_finished(),
+            "history should still await the held write transaction"
+        );
+        state.seek_control(9000).await.unwrap();
+        blocker.rollback().await.unwrap();
+        assert!(replay.await.unwrap().unwrap().committed);
+        assert_eq!(state.audio.snapshot().position_ms, 9000);
+        let stale = state
+            .replay_measured_expected(0, intent, expected)
+            .await
+            .unwrap();
+        assert!(!stale.committed);
+        assert_eq!(state.audio.snapshot().position_ms, 9000);
+        state.audio.shutdown();
+        actor.join().unwrap();
+        state.db.close().await;
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn loudness_library_invalidation_retires_next_without_changing_current_gain() {
+        let (state, actor) = playback_state().await;
+        transition_fixture(&state, "next").await;
+        let applied = measured_fixture(&state.audio.snapshot());
+        *state.measured_loudness.lock().await = Some(applied);
+        let before = state.loudness_candidates.epoch();
+        {
+            let _commit = state.play_commit.lock().await;
+            crate::measured_loudness::invalidate_pending_locked(&state).await;
+        }
+        assert!(state.prepared_playback.lock().await.is_none());
+        assert_ne!(state.loudness_candidates.epoch(), before);
+        assert_eq!(
+            state
+                .measured_loudness
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .gain_db,
+            4.0
+        );
+        state.audio.shutdown();
+        actor.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loudness_invalidation_preserves_a_promotion_already_seen_by_actor() {
+        let (state, actor) = playback_state().await;
+        let mut next = transition_fixture(&state, "next").await;
+        let config = vmusic_store::audio_quality::from_settings(&Default::default())
+            .unwrap()
+            .0;
+        let selection = crate::audio_loudness::GainSelection {
+            state: "ready".into(),
+            gain_db: 2.0,
+            requested_gain_db: Some(3.0),
+            integrated_lufs: Some(-21.0),
+            limited_by: Some("true_peak"),
+            album: false,
+        };
+        next.measured = Some((selection, config));
+        next.track_gain_db = 2.0;
+        *state.prepared_playback.lock().await = Some(next.clone());
+        // Null has no actual crossfade; this actor Load simulates its completed
+        // source switch before the service consumes the reliable control event.
+        state
+            .audio
+            .load("next.wav", Some("next".into()))
+            .await
+            .unwrap();
+        {
+            let _commit = state.play_commit.lock().await;
+            crate::measured_loudness::invalidate_pending_locked(&state).await;
+        }
+        assert!(state.prepared_playback.lock().await.is_some());
+        let snapshot = state.audio.snapshot();
+        state
+            .commit_prepared_transition(next.actor_generation, snapshot.generation, "next")
+            .await
+            .unwrap();
+        let applied = state.measured_loudness.lock().await;
+        assert!(applied.as_ref().unwrap().matches(&snapshot));
+        assert_eq!(
+            applied
+                .as_ref()
+                .unwrap()
+                .selection
+                .as_ref()
+                .unwrap()
+                .limited_by,
+            Some("true_peak")
+        );
+        drop(applied);
+        state.audio.shutdown();
+        actor.join().unwrap();
+    }
+
     pub(crate) async fn playback_state() -> (AppState, std::thread::JoinHandle<()>) {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -5015,6 +5419,9 @@ pub(crate) mod tests {
             protected: Default::default(),
             dsp: Mutex::new(DspConfig::from_settings(&Default::default())),
             dsp_application_error: Mutex::new(None),
+            quality_update: Mutex::new(()),
+            loudness_candidates: Default::default(),
+            measured_loudness: Mutex::new(None),
             keep: Default::default(),
             cache_max: Mutex::new(0),
             // 不存在的空目录即可：索引为空，测试都不碰缓存目录（cache_max=0）。
@@ -5334,6 +5741,7 @@ pub(crate) mod tests {
             sequence: state.prepare_sequence.load(Ordering::Relaxed),
             play_generation: state.play_generation.load(Ordering::Relaxed),
             actor_generation: snapshot.generation,
+            source_generation: snapshot.source_generation,
             from_index: 0,
             from_track_id: "first".into(),
             to_index: 1,
@@ -5343,6 +5751,7 @@ pub(crate) mod tests {
             path: PathBuf::from("second.wav"),
             actual_quality: None,
             track_gain_db: 0.0,
+            measured: None,
         };
         *state.prepared_playback.lock().await = Some(next.clone());
         next

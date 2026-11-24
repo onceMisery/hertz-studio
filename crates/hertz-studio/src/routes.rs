@@ -126,6 +126,18 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/mode", post(mode))
         .route("/v1/player/dsp", get(get_dsp).post(set_dsp))
         .route(
+            "/v1/player/audio-quality",
+            get(get_audio_quality).post(set_audio_quality),
+        )
+        .route(
+            "/v1/player/loudness",
+            get(get_loudness).post(analyze_loudness),
+        )
+        .route("/v1/player/loudness/apply", post(apply_measured_loudness))
+        .route("/v1/player/impulses", post(import_audio_impulse))
+        .route("/v1/player/impulses/generate", post(generate_audio_impulse))
+        .route("/v1/player/impulses/cancel", post(cancel_audio_impulse))
+        .route(
             "/v1/remote/roots",
             get(list_remote_roots).post(add_remote_root),
         )
@@ -135,6 +147,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/remote/roots/{id}/browse", get(browse_remote_root))
         .route("/v1/remote/roots/{id}/import", post(import_remote_files))
+        .route(
+            "/v1/player/output",
+            get(get_audio_output).post(set_audio_output),
+        )
         .route("/v1/devices", get(devices))
         .route("/v1/devices/select", post(select_device))
         .route("/v1/tracks", get(list_tracks))
@@ -2207,6 +2223,64 @@ async fn mode(
 }
 
 /// 读取 DSP 设置（EQ/preamp/响度归一化/交叉淡化）。
+#[derive(Deserialize)]
+pub(crate) struct LoudnessQuery {
+    pub track: String,
+}
+async fn get_loudness(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LoudnessQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::audio_loudness::status(&state, &query.track).await?,
+    ))
+}
+async fn analyze_loudness(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_loudness::AnalyzeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = crate::audio_loudness::request(&state, body).await?;
+    crate::measured_loudness::schedule_current(&state);
+    Ok(Json(result))
+}
+async fn apply_measured_loudness(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::measured_loudness::apply_current(&state).await?))
+}
+
+async fn import_audio_impulse(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_impulse::ImportRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_impulse::import(&state, body).await?))
+}
+async fn get_audio_quality(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_quality::read(&state).await?))
+}
+
+async fn generate_audio_impulse(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_impulse::GenerateRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_impulse::generate(&state, body).await?))
+}
+
+async fn cancel_audio_impulse(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_impulse::CancelRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_impulse::cancel(&state, body).await?))
+}
+async fn set_audio_quality(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_quality::QualityUpdate>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_quality::update(&state, body).await?))
+}
+
 async fn get_dsp(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(crate::player_dsp::read(&state).await?))
 }
@@ -2218,6 +2292,18 @@ async fn set_dsp(
     Json(body): Json<DspUpdate>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(crate::player_dsp::update(&state, body).await?))
+}
+
+async fn get_audio_output(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_output::read(&state).await?))
+}
+async fn set_audio_output(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<vmusic_core::output::OutputPreferences>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_output::update(&state, body).await?))
 }
 
 async fn devices(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -2238,11 +2324,7 @@ async fn select_device(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SelectDeviceRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state
-        .audio
-        .select_device(body.id)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
+    crate::audio_output::select_legacy(&state, body.id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -2364,6 +2446,8 @@ async fn batch_edit_tracks(
         artist: body.artist,
         album: body.album,
     };
+    let _commit = state.play_commit.lock().await;
+    crate::measured_loudness::invalidate_pending_locked(&state).await;
     let changed = vmusic_store::track_edits::apply_batch(&state.db, &body.track_ids, &input)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
@@ -2386,6 +2470,8 @@ async fn clear_track_edit(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let _commit = state.play_commit.lock().await;
+    crate::measured_loudness::invalidate_pending_locked(&state).await;
     vmusic_store::track_edits::remove(&state.db, &id)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
@@ -2496,9 +2582,12 @@ async fn batch_delete_tracks(
     if let Some(bad) = body.track_ids.iter().find(|id| safe_cover_id(id).is_none()) {
         return Err(bad_request(format!("invalid cover id: {bad}")));
     }
+    let commit = state.play_commit.lock().await;
+    crate::measured_loudness::invalidate_pending_locked(&state).await;
     let deleted = vmusic_store::delete_tracks(&state.db, &body.track_ids)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    drop(commit);
     let dir = state.cover_dir();
     tokio::task::spawn_blocking(move || {
         for id in &body.track_ids {
@@ -3506,10 +3595,20 @@ pub(crate) async fn restore_backup_data(
     {
         return Err(bad_request("普通用户备份不能修改本机主窗口位置与尺寸"));
     }
-    crate::stage_media::store(state)
+    let _quality = state.quality_update.lock().await;
+    let report = crate::stage_media::store(state)
         .await?
         .restore_backup(backup)
-        .await
+        .await?;
+    if backup.settings.keys().any(|key| {
+        key == crate::audio_quality::KEY
+            || crate::audio_quality::LEGACY_KEYS.contains(&key.as_str())
+    }) {
+        if let Err(error) = crate::audio_quality::reapply_saved(state).await {
+            *state.dsp_application_error.lock().await = Some(error);
+        }
+    }
+    Ok(report)
 }
 
 /// 歌单导出为 M3U8 文本（在线曲没有本地路径，不输出）。
@@ -3594,6 +3693,13 @@ pub(crate) async fn apply_settings(
     state: &Arc<AppState>,
     body: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> ApiResult<()> {
+    if body.keys().any(|key| {
+        key == crate::audio_quality::KEY
+            || key == crate::audio_output::KEY
+            || crate::audio_quality::LEGACY_KEYS.contains(&key.as_str())
+    }) {
+        return Err(bad_request("音质设置必须通过音效设置接口修改"));
+    }
     if body.contains_key(crate::window_lifecycle::CLOSE_BEHAVIOR_KEY) {
         return Err(bad_request("主窗口关闭行为必须通过原生窗口设置接口修改"));
     }

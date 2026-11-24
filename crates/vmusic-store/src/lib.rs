@@ -18,6 +18,7 @@ use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource}
 pub mod ai;
 pub mod ai_jobs;
 pub mod ai_ledger;
+pub mod audio_quality;
 pub mod backup;
 pub mod emotion;
 pub mod favorites;
@@ -1967,3 +1968,5 @@ mod tests {
         );
     }
 }
+
+pub mod loudness;

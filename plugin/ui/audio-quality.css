@@ -1,0 +1,10 @@
+.quality-advanced { margin-block: 1rem; }
+.quality-advanced > summary { cursor: pointer; padding-block: .75rem; }
+.quality-bands { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: 1rem; margin-block: 1rem; }
+.quality-band { display: grid; grid-template-columns: 1fr minmax(4rem, 6rem); align-items: center; gap: .5rem; min-inline-size: 0; padding: .75rem; border: 1px solid currentColor; border-radius: .4rem; }
+.quality-band legend { padding-inline: .25rem; }
+.quality-band input { inline-size: 100%; min-inline-size: 0; box-sizing: border-box; font: inherit; font-size: max(1rem, 1em); min-block-size: 2.75rem; }
+.quality-band input:user-invalid { outline: 2px solid currentColor; }
+#dsp-output-status, #dsp-headroom-status { overflow-wrap: anywhere; }
+#fir-points { inline-size: 100%; min-inline-size: 0; max-inline-size: 100%; box-sizing: border-box; font: inherit; resize: vertical; }
+@media (pointer: coarse) { .quality-band input, .quality-advanced > summary { min-block-size: 3rem; } }

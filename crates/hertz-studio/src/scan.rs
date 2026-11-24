@@ -186,6 +186,7 @@ struct ScanJob {
     progress: Arc<Mutex<ScanProgress>>,
     cancel: Arc<AtomicBool>,
     events: broadcast::Sender<WsEvent>,
+    playback: std::sync::Weak<AppState>,
 }
 
 impl ScanJob {
@@ -196,6 +197,7 @@ impl ScanJob {
             progress: state.scan.clone(),
             cancel: state.scan_cancel.clone(),
             events: state.events.clone(),
+            playback: state.weak_self.get().cloned().unwrap_or_default(),
         }
     }
 
@@ -204,6 +206,11 @@ impl ScanJob {
     }
 
     async fn reserve_enabled(&self, root: &Path, saved_only: bool) -> Result<(), String> {
+        let playback = self.playback.upgrade();
+        let _commit = match &playback {
+            Some(state) => Some(state.play_commit.lock().await),
+            None => None,
+        };
         let mut progress = self.progress.lock().await;
         if progress.running {
             return Err("a library scan is already running".into());
@@ -221,6 +228,9 @@ impl ScanJob {
             if enabled != Some(true) {
                 return Err("saved directory is disabled or removed".into());
             }
+        }
+        if let Some(state) = &playback {
+            crate::measured_loudness::invalidate_pending_locked(state).await;
         }
         self.cancel.store(false, Ordering::Relaxed);
         *progress = ScanProgress {
@@ -867,6 +877,7 @@ mod tests {
                     progress: Default::default(),
                     cancel: Default::default(),
                     events,
+                    playback: Default::default(),
                 },
                 base,
                 root,

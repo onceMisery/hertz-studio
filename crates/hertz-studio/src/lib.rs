@@ -16,6 +16,8 @@
 //! 内部才碰得到，所以 `rpc` 在这里而不在 `plugin/backend`。
 
 pub mod ai;
+mod audio_output;
+mod audio_quality;
 pub mod bootstrap;
 pub mod collection;
 pub mod complete;
@@ -72,3 +74,9 @@ pub mod window_lifecycle;
 pub mod window_placement;
 pub mod window_sleep;
 pub mod ws;
+
+mod audio_loudness;
+
+mod measured_loudness;
+
+mod audio_impulse;

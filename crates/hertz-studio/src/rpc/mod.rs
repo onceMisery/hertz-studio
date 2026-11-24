@@ -306,10 +306,45 @@ impl Rpc {
             (Op::Post, ["v1", "player", "replay"]) => playback::replay(state, body).await,
             (Op::Get, ["v1", "player", "queue"]) => playback::get_queue(state).await,
             (Op::Put, ["v1", "player", "queue"]) => playback::set_queue(state, body).await,
+            (Op::Get, ["v1", "player", "loudness"]) => {
+                let q: crate::routes::LoudnessQuery = query_as(query)?;
+                Ok(Reply::ok(
+                    crate::audio_loudness::status(state, &q.track).await?,
+                ))
+            }
+            (Op::Post, ["v1", "player", "loudness"]) => {
+                let value = crate::audio_loudness::request(state, body_as(body)?).await?;
+                crate::measured_loudness::schedule_current(state);
+                Ok(Reply::ok(value))
+            }
+            (Op::Post, ["v1", "player", "loudness", "apply"]) => Ok(Reply::ok(
+                crate::measured_loudness::apply_current(state).await?,
+            )),
+            (Op::Post, ["v1", "player", "impulses"]) => Ok(Reply::ok(
+                crate::audio_impulse::import(state, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "player", "impulses", "generate"]) => Ok(Reply::ok(
+                crate::audio_impulse::generate(state, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "player", "impulses", "cancel"]) => Ok(Reply::ok(
+                crate::audio_impulse::cancel(state, body_as(body)?).await?,
+            )),
+            (Op::Get, ["v1", "player", "audio-quality"]) => {
+                Ok(Reply::ok(crate::audio_quality::read(state).await?))
+            }
+            (Op::Post, ["v1", "player", "audio-quality"]) => Ok(Reply::ok(
+                crate::audio_quality::update(state, body_as(body)?).await?,
+            )),
             (Op::Get, ["v1", "player", "dsp"]) => playback::get_dsp(state).await,
             (Op::Post, ["v1", "player", "dsp"]) => playback::set_dsp(state, body).await,
 
             // --- 音频设备 ---
+            (Op::Get, ["v1", "player", "output"]) => {
+                Ok(Reply::ok(crate::audio_output::read(state).await?))
+            }
+            (Op::Post, ["v1", "player", "output"]) => Ok(Reply::ok(
+                crate::audio_output::update(state, body_as(body)?).await?,
+            )),
             (Op::Get, ["v1", "devices"]) => playback::devices(state).await,
             (Op::Post, ["v1", "devices", "select"]) => playback::select_device(state, body).await,
 

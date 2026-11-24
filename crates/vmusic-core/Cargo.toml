@@ -11,3 +11,6 @@ description = "Domain model, traits and errors shared by every hertz-studio crat
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

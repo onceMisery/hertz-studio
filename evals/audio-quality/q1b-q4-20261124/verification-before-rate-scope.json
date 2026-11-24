@@ -1,0 +1,107 @@
+[
+  {
+    "log": "output\\audio-quality\\audio-polyphase-msrv-final.log",
+    "sha256": "b1fa7af258ac90ab671425a4b569512d7568163b8ebd970e5d1d676f9411614e",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.27s",
+      "test result: ok. 247 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 19.40s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.42s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\audio-null-final.log",
+    "sha256": "c9771c0847b5d4a3d3c663fc7531870b79566c409b6005881e5e30eeb4d2787a",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.90s",
+      "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\core-store-msrv-final.log",
+    "sha256": "de78cb1143dd24d65d13e63d05283f3b05fdcdccf16857063fde03c6bdffcffd",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 31s",
+      "test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.49s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\hertz-msrv-final-tests.log",
+    "sha256": "a0d83867696014e0dcebe042525ff2d28ec9dbad59680f2c92f81a5ecd0d5790",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 59s",
+      "test result: ok. 973 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 23.02s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\embedded-msrv-final.log",
+    "sha256": "18faaf3ad7cae29ba9642f839e400be6e77f40e6ad96493282a0cc59071abd2b",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 15s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.85s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\msrv-hertz-isolated-final.log",
+    "sha256": "c5cfe3219083b66568cab9cd9dc8641c289345df6cce53ec3ce54946a82eeb49",
+    "results": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 34s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\msrv-dbx-standard-final.log",
+    "sha256": "8395a7be9320a1cc9e95eddb39282238b4e5474db7b7d70a2b49fbaacc754192",
+    "results": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 34.40s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\msrv-dbx-full-final.log",
+    "sha256": "cd0240a5f2b4183e393efb129c4c462f43e7308919e2e6054cc6b62d3b25db6c",
+    "results": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.33s"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\browser-dsp-final-verified.log",
+    "sha256": "7e847aa0cd97f3c63abe409a4e35a45f191a337a0836dbed7d669cd30f4911e1",
+    "results": [
+      "PASS valid submit blocks duplicate POST and preserves newer edits",
+      "PASS stale GET cannot overwrite a newer save",
+      "PASS initial GET failure retries and fills saved values before reporting readiness",
+      "PASS lost POST receipt reconciles with GET without resubmitting",
+      "PASS failed adoption remains visible; hidden page stops polling and resume refreshes",
+      "PASS native constraint validation and keyboard submit",
+      "PASS parameter editing and explicit conflict rebase preserve draft",
+      "PASS 390px, 200% scaling and clean browser execution"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\browser-actions-scoped-cancel.log",
+    "sha256": "e96194636a34058f2296119ad621bd06cec7cad05f89edf7f9174d876c6e983f",
+    "results": [
+      "PASS output failure preserves draft and explicit retry succeeds",
+      "PASS complete compilation album includes every artist",
+      "PASS explicit measured adoption shows preparation truthfully",
+      "PASS managed correction import fills draft without auto-applying",
+      "PASS FIR curve validation, achieved error and draft-only adoption",
+      "PASS late FIR reply preserves newer correction draft",
+      "PASS explicit cancel prevents late draft adoption",
+      "PASS narrow 200% controls and clean browser execution"
+    ]
+  },
+  {
+    "log": "output\\audio-quality\\adr-final-verified.log",
+    "sha256": "0d722054fb709f119bdf00b93d3fde83d7c0b3c68af69ead3d894b44936ff753",
+    "results": [
+      "ADR 契约检查：430 项全部通过"
+    ]
+  }
+]

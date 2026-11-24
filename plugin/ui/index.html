@@ -1216,23 +1216,54 @@
         <div class="hz-lyric-size-preview" aria-label="歌词字号预览">让旋律，陪你慢慢走</div>
       </div>
 
-      <form class="set-group" id="dsp-settings" aria-labelledby="dsp-title" action="/v1/player/dsp" method="post">
+      <form class="set-group" id="dsp-settings" aria-labelledby="dsp-title" action="/v1/player/audio-quality" method="post">
         <h2 class="set-title" id="dsp-title">音效与均衡器</h2>
-        <div class="set-row" id="dsp-eq-row">
-          <label>均衡器 (Hz)</label>
-          <span class="dsp-eq" id="dsp-eq">
-            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="0" name="eq_gain_0"><span>60</span></label>
-            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="1" name="eq_gain_1"><span>150</span></label>
-            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="2" name="eq_gain_2"><span>400</span></label>
-            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="3" name="eq_gain_3"><span>1k</span></label>
-            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="4" name="eq_gain_4"><span>2.4k</span></label>
-            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="5" name="eq_gain_5"><span>6k</span></label>
-          </span>
-        </div>
+        <p class="hint" id="dsp-output-status" aria-live="polite">正在读取实际输出…</p>
+        <div class="set-row"><span>均衡器</span><label><input id="dsp-eq-enabled" name="eq_enabled" type="checkbox"> 启用六段参数 EQ</label></div>
+        <details class="quality-advanced"><summary>编辑六段频率、Q 与增益</summary>
+          <p class="hint">关闭时保留曲线。低频与高 Q 的组合受历史预算限制；保存前会检查，未通过时继续当前声音。</p>
+          <div class="quality-bands">
+            <fieldset class="quality-band"><legend>第 1 段</legend>
+              <label for="dsp-frequency-0">频率 (Hz)</label><input id="dsp-frequency-0" name="frequency_0" data-frequency="0" type="number" min="20" max="20000" step="1" value="60" required>
+              <label for="dsp-q-0">Q</label><input id="dsp-q-0" name="q_0" data-q="0" type="number" min="0.25" max="8" step="0.01" value="1.2" required>
+              <label for="dsp-gain-0">增益 (dB)</label><input id="dsp-gain-0" name="eq_gain_0" data-band="0" type="number" min="-12" max="12" step="0.1" value="0" required>
+            </fieldset>
+            <fieldset class="quality-band"><legend>第 2 段</legend>
+              <label for="dsp-frequency-1">频率 (Hz)</label><input id="dsp-frequency-1" name="frequency_1" data-frequency="1" type="number" min="20" max="20000" step="1" value="150" required>
+              <label for="dsp-q-1">Q</label><input id="dsp-q-1" name="q_1" data-q="1" type="number" min="0.25" max="8" step="0.01" value="1.2" required>
+              <label for="dsp-gain-1">增益 (dB)</label><input id="dsp-gain-1" name="eq_gain_1" data-band="1" type="number" min="-12" max="12" step="0.1" value="0" required>
+            </fieldset>
+            <fieldset class="quality-band"><legend>第 3 段</legend>
+              <label for="dsp-frequency-2">频率 (Hz)</label><input id="dsp-frequency-2" name="frequency_2" data-frequency="2" type="number" min="20" max="20000" step="1" value="400" required>
+              <label for="dsp-q-2">Q</label><input id="dsp-q-2" name="q_2" data-q="2" type="number" min="0.25" max="8" step="0.01" value="1.2" required>
+              <label for="dsp-gain-2">增益 (dB)</label><input id="dsp-gain-2" name="eq_gain_2" data-band="2" type="number" min="-12" max="12" step="0.1" value="0" required>
+            </fieldset>
+            <fieldset class="quality-band"><legend>第 4 段</legend>
+              <label for="dsp-frequency-3">频率 (Hz)</label><input id="dsp-frequency-3" name="frequency_3" data-frequency="3" type="number" min="20" max="20000" step="1" value="1000" required>
+              <label for="dsp-q-3">Q</label><input id="dsp-q-3" name="q_3" data-q="3" type="number" min="0.25" max="8" step="0.01" value="1.2" required>
+              <label for="dsp-gain-3">增益 (dB)</label><input id="dsp-gain-3" name="eq_gain_3" data-band="3" type="number" min="-12" max="12" step="0.1" value="0" required>
+            </fieldset>
+            <fieldset class="quality-band"><legend>第 5 段</legend>
+              <label for="dsp-frequency-4">频率 (Hz)</label><input id="dsp-frequency-4" name="frequency_4" data-frequency="4" type="number" min="20" max="20000" step="1" value="2400" required>
+              <label for="dsp-q-4">Q</label><input id="dsp-q-4" name="q_4" data-q="4" type="number" min="0.25" max="8" step="0.01" value="1.2" required>
+              <label for="dsp-gain-4">增益 (dB)</label><input id="dsp-gain-4" name="eq_gain_4" data-band="4" type="number" min="-12" max="12" step="0.1" value="0" required>
+            </fieldset>
+            <fieldset class="quality-band"><legend>第 6 段</legend>
+              <label for="dsp-frequency-5">频率 (Hz)</label><input id="dsp-frequency-5" name="frequency_5" data-frequency="5" type="number" min="20" max="20000" step="1" value="6000" required>
+              <label for="dsp-q-5">Q</label><input id="dsp-q-5" name="q_5" data-q="5" type="number" min="0.25" max="8" step="0.01" value="1.2" required>
+              <label for="dsp-gain-5">增益 (dB)</label><input id="dsp-gain-5" name="eq_gain_5" data-band="5" type="number" min="-12" max="12" step="0.1" value="0" required>
+            </fieldset>
+          </div>
+        </details>
+        <div class="set-row"><label for="dsp-headroom">自动余量</label><select id="dsp-headroom" name="headroom"><option value="off">关闭，保持原增益</option><option value="auto">自动预留 EQ、混音与保护余量</option></select></div>
+        <p class="hint" id="dsp-headroom-status"></p>
+        <div class="set-row"><label for="dsp-limiter">峰值保护</label><select id="dsp-limiter" name="limiter"><option value="soft">兼容软限幅</option><option value="true_peak">真峰值保护（本机，增加约 6 ms 延迟）</option></select><p class="hint">处理策略改变会在下一次定位或载入后采用；不会自动提高歌曲响度。</p></div>
         <div class="set-row">
           <label for="dsp-preamp">增益补偿 (dB)</label>
           <input id="dsp-preamp" name="preamp" required type="number" min="-24" max="12" step="0.5" value="0">
         </div>
+        <div class="set-row"><label for="dsp-loudness-source">响度来源</label><select id="dsp-loudness-source" name="loudness_source"><option value="file_tags">文件 ReplayGain 标签</option><option value="r128">本机 R128 测量</option></select></div>
+        <div class="set-row"><label for="dsp-target-lufs">本机测量目标 (LUFS)</label><input id="dsp-target-lufs" name="target_lufs" type="number" required min="-24" max="-12" step="0.5" value="-18"><p class="hint">只选择一种响度来源。未分析或内容未核验时以 0 dB 播放；测量完成不自动改变当前歌曲增益。</p></div>
         <div class="set-row">
           <label for="dsp-loudness">响度归一化</label>
           <select id="dsp-loudness" name="loudness">
@@ -1251,11 +1282,61 @@
           <span></span>
           <span class="set-actions">
             <button type="submit" id="dsp-save" class="btn primary">保存音效</button>
-            <button type="button" id="dsp-reset" class="btn">复位</button>
+            <button type="button" id="dsp-reset" class="btn">重置均衡草稿</button>
+            <button type="button" id="dsp-rebase" class="btn">保留草稿，读取最新版本</button>
           </span>
         </div>
+        <details class="quality-advanced"><summary>耳机与音色（默认关闭）</summary>
+          <div class="set-row"><label for="dsp-crossfeed">耳机交叉馈送</label><input id="dsp-crossfeed" name="crossfeed" type="checkbox"><p class="hint">700 Hz 低通串音与直达声补偿，仅适用于双声道。</p></div>
+          <div class="set-row"><label for="dsp-crossfeed-amount">交叉馈送强度</label><input id="dsp-crossfeed-amount" name="crossfeed_amount" type="number" min="0" max="1" step="0.05" value="0.25" required></div>
+          <div class="set-row"><label for="dsp-compensation">小音量补偿</label><input id="dsp-compensation" name="compensation" type="checkbox"><p class="hint">按播放器数字音量近似补偿，最多低频 6 dB、高频 3 dB；不代表实际声压校准。</p></div>
+          <div class="set-row"><label for="dsp-saturation">轻微软饱和</label><input id="dsp-saturation" name="saturation" type="checkbox" aria-describedby="dsp-saturation-status"><p class="hint" id="dsp-saturation-status">4× 过采样，仅支持 44.1/48 kHz，干湿延迟对齐；改变启用状态在下一次定位或载入后采用。</p></div>
+          <div class="set-row"><label for="dsp-drive">驱动强度</label><input id="dsp-drive" name="drive" type="number" min="0" max="1" step="0.05" value="0.15" required></div>
+          <div class="set-row"><label for="dsp-mix">饱和混合</label><input id="dsp-mix" name="mix" type="number" min="0" max="1" step="0.05" value="0.1" required></div>
+          <div class="set-row"><label for="dsp-impulse">校正资源 ID（空为关闭）</label><input id="dsp-impulse" name="impulse_id" type="text" maxlength="64" pattern="[0-9a-fA-F]{64}" spellcheck="false" aria-describedby="dsp-impulse-status"><p class="hint" id="dsp-impulse-status">使用下方导入返回的资源 ID。正式播放仅支持 44.1/48 kHz 的短对称线性相位核；不会自动应用通用耳机曲线。</p></div>
+        </details>
+        <p class="hint" id="dsp-measured-status" role="status" aria-live="polite"></p>
         <p class="hint" id="dsp-status" role="status" aria-live="polite" aria-atomic="true">正在读取音效设置…</p>
       </form>
+      <form class="set-group" id="audio-analysis-settings" aria-labelledby="audio-analysis-title" action="/v1/player/loudness" method="post">
+        <h2 class="set-title" id="audio-analysis-title">本机响度分析</h2>
+        <p class="hint">分析当前曲目或完整专辑，不下载远程音频。准备和内容核验完成后，显式应用会通过原播放流程重新载入并接续位置。</p>
+        <button class="btn" type="submit" name="scope" value="track">分析当前曲目</button>
+        <button class="btn" type="submit" name="scope" value="album">分析当前完整专辑</button>
+        <button class="btn" type="button" id="loudness-apply">应用到当前曲目</button>
+        <p class="hint" id="loudness-state" role="status" aria-live="polite"></p>
+      </form>
+      <form class="set-group" id="audio-impulse-import" aria-labelledby="audio-impulse-title" action="/v1/player/impulses" method="post">
+        <h2 class="set-title" id="audio-impulse-title">导入校正 WAV</h2>
+        <div class="set-row"><label for="impulse-path">本机 WAV 文件路径</label><input id="impulse-path" name="path" type="text" required maxlength="4096"></div>
+        <div class="set-row"><label for="impulse-device">适用设备型号</label><input id="impulse-device" name="device_model" type="text" required maxlength="1024"></div>
+        <div class="set-row"><label for="impulse-source">测量数据来源</label><input id="impulse-source" name="source" type="text" required maxlength="1024"></div>
+        <div class="set-row"><label for="impulse-target">目标曲线与测量条件</label><input id="impulse-target" name="target_curve" type="text" required maxlength="1024"></div>
+        <button class="btn" type="submit">复制并准备校正资源</button>
+        <button class="btn" type="button" id="impulse-cancel">取消校正准备</button>
+        <p class="hint" id="impulse-state" role="status" aria-live="polite">最多 8 MiB；首批仅支持 44.1/48 kHz、转换后 257 taps 的对称线性相位核。超预算或相位未知的核会明确拒绝。</p>
+      </form>
+      <form class="set-group" id="audio-impulse-generate" aria-labelledby="audio-fir-title" action="/v1/player/impulses/generate" method="post">
+        <h2 class="set-title" id="audio-fir-title">从目标频响生成校正</h2>
+        <p class="hint">输入有来源的目标校正增益，左右声道共用；不会自动反转原始测量数据。每行填写频率 Hz 和增益 dB，以逗号分隔，频率递增；2–64 个点，增益 −24 至 +12 dB。点间按对数频率平滑连接，两端保持端点增益。短 FIR 不能准确表达所有窄峰和低频曲线，生成结果会报告误差。</p>
+        <div class="set-row"><label for="fir-points">频率与校正增益</label><textarea id="fir-points" name="points" rows="5" required maxlength="8192" placeholder="20, 0&#10;20000, 0" spellcheck="false" aria-describedby="fir-state"></textarea></div>
+        <div class="set-row"><label for="fir-device">适用设备型号</label><input id="fir-device" name="device_model" type="text" required maxlength="1024"></div>
+        <div class="set-row"><label for="fir-source">测量数据来源</label><input id="fir-source" name="source" type="text" required maxlength="1024"></div>
+        <div class="set-row"><label for="fir-target">目标曲线与测量条件</label><input id="fir-target" name="target_curve" type="text" required maxlength="1024"></div>
+        <button class="btn" type="submit">生成并检查校正曲线</button>
+        <button class="btn" type="button" id="fir-cancel">取消曲线生成</button>
+        <p class="hint" id="fir-state" role="status" aria-live="polite">仅支持 44.1/48 kHz；生成后仅填入音效草稿，检查误差、延迟和衰减，再保存音效。不会自动应用。</p>
+      </form>
+      <form class="set-group" id="audio-output-settings" aria-labelledby="audio-output-title" action="/v1/player/output" method="post">
+        <h2 class="set-title" id="audio-output-title">音频输出</h2>
+        <p class="hint">使用上方选择的输出设备。独占能力取决于声卡与驱动，失败时保留可用输出；不会静默改用其它设备。</p>
+        <div class="set-row"><label for="output-mode">模式</label><select id="output-mode" name="mode"><option value="shared">共享（默认）</option><option value="exclusive">Windows 独占</option></select></div>
+        <div class="set-row"><label for="output-format">样本格式</label><select id="output-format" name="sample_format"><option value="auto">自动协商</option><option value="f32">32 位浮点</option><option value="s16">16 位 PCM（独占）</option><option value="s24">24 位 PCM（独占）</option></select></div>
+        <div class="set-row"><label for="output-dither">整数抖动</label><select id="output-dither" name="dither"><option value="auto">自动，仅最终整数量化</option><option value="off">关闭</option></select></div>
+        <div class="set-row"><span></span><button class="btn primary" type="submit">应用并保存输出</button></div>
+        <p class="hint" id="output-state" role="status" aria-live="polite">正在读取输出状态…</p>
+      </form>
+
 
       <!-- 播放：与播放行为有关、但与音频处理无关的偏好（DSP 之上一层的语义）。
            「加入队列的默认行为」管的是列表行的快捷按钮与右键菜单那条动作；
@@ -3108,6 +3189,9 @@
 <script defer src="ui-preferences.js"></script>
 <script defer src="ui-preference-settings.js"></script>
 <script defer src="native-music-import.js"></script>
+<link rel="stylesheet" href="audio-quality.css">
+<script defer src="audio-analysis-settings.js"></script>
+<script defer src="audio-output-settings.js"></script>
 <script defer src="dsp-settings.js"></script>
 <script defer src="app.js"></script>
 </body>

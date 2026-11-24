@@ -211,11 +211,12 @@ pub async fn boot(
         .and_then(|v| v.as_u64())
         .unwrap_or(config.online.cache_max_bytes);
     // DSP 设置：EQ/响度归一化/交叉淡化，跨重启恢复。
-    let dsp_config = DspConfig::from_settings(
-        &vmusic_store::settings::get_all(&db)
-            .await
-            .unwrap_or_default(),
-    );
+    let quality_settings = vmusic_store::settings::get_all(&db).await?;
+    let saved_quality = crate::audio_quality::from_settings(&quality_settings);
+    let dsp_config = saved_quality
+        .as_ref()
+        .map(|(q, _)| crate::audio_quality::legacy(q))
+        .unwrap_or_else(|_| DspConfig::from_legacy_settings(&Default::default()));
 
     let (events, _) = broadcast::channel(128);
     // 会话快照要在 db move 进 AppState 之前读出来。
@@ -274,6 +275,9 @@ pub async fn boot(
         cache_index,
         dsp: tokio::sync::Mutex::new(dsp_config.clone()),
         dsp_application_error: tokio::sync::Mutex::new(None),
+        quality_update: tokio::sync::Mutex::new(()),
+        loudness_candidates: Default::default(),
+        measured_loudness: tokio::sync::Mutex::new(None),
         auto_failures: Default::default(),
         skip_walk_from: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
@@ -339,6 +343,7 @@ pub async fn boot(
         }
     }
     spawn_session_saver(state.clone());
+    crate::measured_loudness::invalidate_on_library_changes(&state);
     // 历史自愈：把上一会话退化成平台 id 的在线历史行补回真实元数据（detach）。
     state.spawn_history_repair_sweep();
     // DSP 即时下发（播放时再按曲目追加 track_gain）。
@@ -351,10 +356,40 @@ pub async fn boot(
         })
         .await;
     let crossfade_result = state.audio.set_crossfade(dsp_config.crossfade_ms).await;
+    let quality_result = match saved_quality {
+        Ok((config, _)) if state.audio.backend_name() != "null" => {
+            if let Some(id) = &config.impulse_id {
+                match crate::audio_impulse::prepare(&state, id).await {
+                    Ok(kernel) => {
+                        let _ = state.audio.prepare_impulse(kernel).await;
+                    }
+                    Err(error) => {
+                        *state.dsp_application_error.lock().await = Some(error);
+                    }
+                }
+            }
+            state
+                .audio
+                .set_quality(config.params())
+                .await
+                .map_err(|e| crate::error::ApiError::from(vmusic_core::CoreError::Audio(e)))
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    };
     *state.dsp_application_error.lock().await = dsp_result
         .err()
         .or_else(|| crossfade_result.err())
         .map(|error| crate::error::ApiError::from(vmusic_core::CoreError::Audio(error)));
+    if let Err(error) = quality_result {
+        *state.dsp_application_error.lock().await = Some(error);
+    }
+
+    if state.audio.backend_name() != "null" {
+        if let Err(error) = crate::audio_output::restore(&state).await {
+            tracing::warn!("saved audio output could not be applied: {}", error.message);
+        }
+    }
 
     // 凭据迁移：SQLite 旧明文凭据 → 系统钥匙串。失败保留旧数据并记 ERROR。
     let db_handle = state.db.clone();

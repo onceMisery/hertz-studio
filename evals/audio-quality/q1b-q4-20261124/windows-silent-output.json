@@ -1,0 +1,328 @@
+{
+  "audibleQualityVerified": false,
+  "checks": [
+    "initial deferred",
+    "first PCM acknowledgement",
+    "EQ transition",
+    "pause deferred",
+    "resume",
+    "seek reset",
+    "default device reselect",
+    "parametric EQ and headroom",
+    "true peak/saturation delay adoption after seek",
+    "hard mute"
+  ],
+  "exclusive_silent_attempts": [
+    {
+      "error": "unsupported format: device_has_no_supported_exclusive_mono_stereo_pcm_format",
+      "opened": false,
+      "output": {
+        "accepted": {
+          "device_id": null,
+          "dither": "auto",
+          "mode": "shared",
+          "sample_format": "auto"
+        },
+        "active": true,
+        "actual": {
+          "backend": "cpal/Wasapi",
+          "channels": 2,
+          "container_bits": 32,
+          "device_id": "扬声器 (Realtek(R) Audio)",
+          "dither_active": false,
+          "dither_reason": "not_applicable_float_output",
+          "endpoint_id": null,
+          "mode": "shared",
+          "sample_format": "f32",
+          "sample_rate": 48000,
+          "valid_bits": 32
+        },
+        "capabilities": {
+          "device_qualified": false,
+          "exclusive_available": true,
+          "exclusive_reason": null,
+          "qualification_reason": "physical_device_qualification_pending"
+        },
+        "last_error": "unsupported format: device_has_no_supported_exclusive_mono_stereo_pcm_format",
+        "requested": {
+          "device_id": null,
+          "dither": "auto",
+          "mode": "exclusive",
+          "sample_format": "f32"
+        }
+      },
+      "requested_format": "f32"
+    },
+    {
+      "opened": true,
+      "output": {
+        "accepted": {
+          "device_id": null,
+          "dither": "auto",
+          "mode": "exclusive",
+          "sample_format": "s16"
+        },
+        "active": true,
+        "actual": {
+          "backend": "wasapi/local-exclusive-event",
+          "channels": 2,
+          "container_bits": 16,
+          "device_id": "扬声器 (Realtek(R) Audio)",
+          "dither_active": true,
+          "dither_reason": null,
+          "endpoint_id": "{0.0.0.00000000}.{78def816-8caa-4715-9719-1b29eb7c0a0c}",
+          "mode": "exclusive",
+          "sample_format": "s16",
+          "sample_rate": 48000,
+          "valid_bits": 16
+        },
+        "capabilities": {
+          "device_qualified": false,
+          "exclusive_available": true,
+          "exclusive_reason": null,
+          "qualification_reason": "physical_device_qualification_pending"
+        },
+        "last_error": null,
+        "requested": {
+          "device_id": null,
+          "dither": "auto",
+          "mode": "exclusive",
+          "sample_format": "s16"
+        }
+      },
+      "requested_format": "s16"
+    },
+    {
+      "opened": true,
+      "output": {
+        "accepted": {
+          "device_id": null,
+          "dither": "auto",
+          "mode": "exclusive",
+          "sample_format": "s24"
+        },
+        "active": true,
+        "actual": {
+          "backend": "wasapi/local-exclusive-event",
+          "channels": 2,
+          "container_bits": 32,
+          "device_id": "扬声器 (Realtek(R) Audio)",
+          "dither_active": true,
+          "dither_reason": null,
+          "endpoint_id": "{0.0.0.00000000}.{78def816-8caa-4715-9719-1b29eb7c0a0c}",
+          "mode": "exclusive",
+          "sample_format": "s24",
+          "sample_rate": 48000,
+          "valid_bits": 24
+        },
+        "capabilities": {
+          "device_qualified": false,
+          "exclusive_available": true,
+          "exclusive_reason": null,
+          "qualification_reason": "physical_device_qualification_pending"
+        },
+        "last_error": null,
+        "requested": {
+          "device_id": null,
+          "dither": "auto",
+          "mode": "exclusive",
+          "sample_format": "s24"
+        }
+      },
+      "requested_format": "s24"
+    }
+  ],
+  "finalGeneration": "2:3",
+  "firstGeneration": "1:2",
+  "output": {
+    "accepted": {
+      "device_id": null,
+      "dither": "auto",
+      "mode": "shared",
+      "sample_format": "auto"
+    },
+    "active": true,
+    "actual": {
+      "backend": "cpal/Wasapi",
+      "channels": 2,
+      "container_bits": 32,
+      "device_id": "扬声器 (Realtek(R) Audio)",
+      "dither_active": false,
+      "dither_reason": "not_applicable_float_output",
+      "endpoint_id": null,
+      "mode": "shared",
+      "sample_format": "f32",
+      "sample_rate": 48000,
+      "valid_bits": 32
+    },
+    "capabilities": {
+      "device_qualified": false,
+      "exclusive_available": true,
+      "exclusive_reason": null,
+      "qualification_reason": "physical_device_qualification_pending"
+    },
+    "last_error": null,
+    "requested": {
+      "device_id": null,
+      "dither": "auto",
+      "mode": "shared",
+      "sample_format": "auto"
+    }
+  },
+  "quality": {
+    "applied": {
+      "configuration_revision": "1",
+      "crossfade_ms": 0,
+      "eq": {
+        "bands": [
+          {
+            "frequency_hz": 80,
+            "gain_db": 3,
+            "q": 3
+          },
+          {
+            "frequency_hz": 150,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 400,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 1000,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 2400,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 6000,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          }
+        ],
+        "enabled": true
+      },
+      "headroom_mode": "auto",
+      "impulse_id": null,
+      "limiter": "true_peak",
+      "preamp_db": 0,
+      "tone": {
+        "crossfeed": true,
+        "crossfeed_amount": 0.25,
+        "drive": 0.15000000596046448,
+        "loudness_compensation": false,
+        "mix": 0.10000000149011612,
+        "saturation": true
+      }
+    },
+    "deferred_reason": null,
+    "eq": {
+      "active": false,
+      "applied_revision": "5",
+      "processing_rate": 48000,
+      "render_generation": "2:4",
+      "requested_gains_db": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_preamp_db": 0,
+      "requested_revision": "5",
+      "state": "applied"
+    },
+    "headroom": {
+      "attenuation_db": -4,
+      "effective_preamp_db": -4,
+      "eq_peak_db": 3,
+      "margin_db": 1,
+      "mix_peak_db": 0
+    },
+    "latency_frames": 312,
+    "overload_samples": 0,
+    "protection_reduction_db": 0,
+    "requested": {
+      "configuration_revision": "1",
+      "crossfade_ms": 0,
+      "eq": {
+        "bands": [
+          {
+            "frequency_hz": 80,
+            "gain_db": 3,
+            "q": 3
+          },
+          {
+            "frequency_hz": 150,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 400,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 1000,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 2400,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          },
+          {
+            "frequency_hz": 6000,
+            "gain_db": 0,
+            "q": 1.2000000476837158
+          }
+        ],
+        "enabled": true
+      },
+      "headroom_mode": "auto",
+      "impulse_id": null,
+      "limiter": "true_peak",
+      "preamp_db": 0,
+      "tone": {
+        "crossfeed": true,
+        "crossfeed_amount": 0.25,
+        "drive": 0.15000000596046448,
+        "loudness_compensation": false,
+        "mix": 0.10000000149011612,
+        "saturation": true
+      }
+    },
+    "requested_headroom": {
+      "attenuation_db": -4,
+      "effective_preamp_db": -4,
+      "eq_peak_db": 3,
+      "margin_db": 1,
+      "mix_peak_db": 0
+    },
+    "sample_peak": 0,
+    "transition_from": null,
+    "transition_progress": 1,
+    "transition_target": null,
+    "true_peak": 0
+  },
+  "sampleRate": 48000,
+  "silentActualOutputLifecycle": true,
+  "_evidence": {
+    "log": "output/audio-quality/resume-exclusive-silent-closeout.log",
+    "sha256": "fbcb6969687c519b4b8e3f402a6c0c29fd51c98ba976a60cfe75649b31a2a98d",
+    "exit_code": 0,
+    "executed_binary": {
+      "path": "target/release/examples/eq_output_probe.exe",
+      "sha256": "26f3b0c51d0de4a4feb2f3ce9ad674bd0102064af809ddddf46e1a4fa4eb549a"
+    },
+    "qualification": "Bounded silent lifecycle only; device_qualified remainsfalse."
+  }
+}

@@ -37,9 +37,17 @@ pub(super) async fn start_selected(job: ScanJob, paths: Vec<PathBuf>) -> Result<
         return Err("请选择 1 至 256 个文件或目录".into());
     }
     {
+        let playback = job.playback.upgrade();
+        let _commit = match &playback {
+            Some(state) => Some(state.play_commit.lock().await),
+            None => None,
+        };
         let mut progress = job.progress.lock().await;
         if progress.running {
             return Err("已有扫描正在进行，请等待完成或取消后重试".into());
+        }
+        if let Some(state) = &playback {
+            crate::measured_loudness::invalidate_pending_locked(state).await;
         }
         job.cancel.store(false, Ordering::Relaxed);
         *progress = ScanProgress {

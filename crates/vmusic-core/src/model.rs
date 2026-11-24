@@ -72,6 +72,10 @@ pub struct PlayerSnapshot {
     pub mode: PlayMode,
     pub device: Option<String>,
     pub generation: u64,
+    /// Identity of the installed media source. Transport commands preserve it;
+    /// successful loads and actual prepared-deck promotions advance it.
+    #[serde(default)]
+    pub source_generation: u64,
 }
 
 impl Default for PlayerSnapshot {
@@ -85,6 +89,7 @@ impl Default for PlayerSnapshot {
             mode: PlayMode::Repeat,
             device: None,
             generation: 0,
+            source_generation: 0,
         }
     }
 }

@@ -95,6 +95,7 @@ enum Command {
     Load {
         uri: String,
         track_id: Option<String>,
+        gain: Option<f32>,
         reply: Reply<Result<MediaInfo, AudioError>>,
     },
     /// 直接喂一个可读可定位的媒体源（边下边播）。命令只携带标准库
@@ -104,6 +105,7 @@ enum Command {
         source: Box<dyn AudioSource>,
         ext: Option<String>,
         track_id: Option<String>,
+        gain: Option<f32>,
         reply: Reply<Result<MediaInfo, AudioError>>,
     },
     /// Every transport command carries a reply so the caller sees the *result*
@@ -118,11 +120,38 @@ enum Command {
     SetDsp(vmusic_core::DspParams, Reply<Result<(), AudioError>>),
     SetCrossfade(u64, Reply<Result<(), AudioError>>),
     EqStatus(Reply<Option<vmusic_core::EqStatus>>),
+    ValidateQuality(
+        vmusic_core::audio_quality::QualityParams,
+        Reply<Result<(), AudioError>>,
+    ),
+    SetQuality(
+        vmusic_core::audio_quality::QualityParams,
+        Reply<Result<(), AudioError>>,
+    ),
+    QualityStatus(Reply<Option<vmusic_core::audio_quality::QualityStatus>>),
+    PrepareImpulse(
+        vmusic_core::impulse::ImpulseKernel,
+        Reply<Result<(), AudioError>>,
+    ),
+    OutputStatus(Reply<Option<vmusic_core::output::OutputStatus>>),
+    InvalidateOutput(String, Reply<Result<(), AudioError>>),
+    ConfigureOutput(
+        vmusic_core::output::OutputPreferences,
+        Reply<Result<(), AudioError>>,
+    ),
+    PrepareNextSource(
+        vmusic_core::NextTrack,
+        Box<dyn AudioSource>,
+        Option<String>,
+        f32,
+        Reply<Result<vmusic_core::PrepareResult, AudioError>>,
+    ),
     PrepareNext(
         vmusic_core::NextTrack,
         Reply<Result<vmusic_core::PrepareResult, AudioError>>,
     ),
     ClearNext(Reply<Result<(), AudioError>>),
+    ClearUnstartedNext(Reply<Result<bool, AudioError>>),
     SetMode(PlayMode, Reply<Result<(), AudioError>>),
     Devices(Reply<Vec<DeviceInfo>>),
     SelectDevice(Option<String>, Reply<Result<(), AudioError>>),
@@ -267,6 +296,7 @@ impl AudioHandle {
         self.send(Command::Load {
             uri: uri.to_string(),
             track_id,
+            gain: None,
             reply: tx,
         })?;
         rx.await
@@ -285,12 +315,58 @@ impl AudioHandle {
             source,
             ext,
             track_id,
+            gain: None,
             reply: tx,
         })?;
         rx.await
             .unwrap_or(Err(AudioError::Other("actor gone".into())))
     }
 
+    pub async fn load_with_gain(
+        &self,
+        uri: &str,
+        id: Option<String>,
+        gain: f32,
+    ) -> Result<MediaInfo, AudioError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Load {
+            uri: uri.into(),
+            track_id: id,
+            gain: Some(gain),
+            reply,
+        })?;
+        rx.await
+            .unwrap_or_else(|_| Err(AudioError::Other("audio actor stopped".into())))
+    }
+    pub async fn load_source_with_gain(
+        &self,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        id: Option<String>,
+        gain: f32,
+    ) -> Result<MediaInfo, AudioError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::LoadSource {
+            source,
+            ext,
+            track_id: id,
+            gain: Some(gain),
+            reply,
+        })?;
+        rx.await
+            .unwrap_or_else(|_| Err(AudioError::Other("audio actor stopped".into())))
+    }
+    pub fn begin_prepare_next_source(
+        &self,
+        next: vmusic_core::NextTrack,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        gain: f32,
+    ) -> Result<oneshot::Receiver<Result<vmusic_core::PrepareResult, AudioError>>, AudioError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::PrepareNextSource(next, source, ext, gain, reply))?;
+        Ok(rx)
+    }
     pub async fn play(&self) -> Result<(), AudioError> {
         self.ask(Command::Play).await
     }
@@ -370,6 +446,13 @@ impl AudioHandle {
     pub async fn clear_next(&self) -> Result<(), AudioError> {
         self.ask(Command::ClearNext).await
     }
+    pub async fn clear_unstarted_next(&self) -> Result<bool, AudioError> {
+        let (reply, result) = oneshot::channel();
+        self.send(Command::ClearUnstartedNext(reply))?;
+        result
+            .await
+            .unwrap_or_else(|_| Err(AudioError::Other("audio actor stopped".into())))
+    }
 
     pub async fn set_mode(&self, mode: PlayMode) -> Result<(), AudioError> {
         self.ask(|reply| Command::SetMode(mode, reply)).await
@@ -390,6 +473,56 @@ impl AudioHandle {
         let (tx, rx) = oneshot::channel();
         self.send(Command::Devices(tx))?;
         Ok(rx.await.unwrap_or_default())
+    }
+
+    pub async fn validate_quality(
+        &self,
+        params: vmusic_core::audio_quality::QualityParams,
+    ) -> Result<(), AudioError> {
+        params.validate()?;
+        self.ask(|reply| Command::ValidateQuality(params, reply))
+            .await
+    }
+    pub async fn set_quality(
+        &self,
+        params: vmusic_core::audio_quality::QualityParams,
+    ) -> Result<(), AudioError> {
+        params.validate()?;
+        self.ask(|reply| Command::SetQuality(params, reply)).await
+    }
+    pub async fn prepare_impulse(
+        &self,
+        kernel: vmusic_core::impulse::ImpulseKernel,
+    ) -> Result<(), AudioError> {
+        self.ask(|reply| Command::PrepareImpulse(kernel, reply))
+            .await
+    }
+    pub async fn quality_status(
+        &self,
+    ) -> Result<Option<vmusic_core::audio_quality::QualityStatus>, AudioError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::QualityStatus(tx))?;
+        rx.await
+            .map_err(|_| AudioError::Other("audio actor stopped".into()))
+    }
+    pub async fn output_status(
+        &self,
+    ) -> Result<Option<vmusic_core::output::OutputStatus>, AudioError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::OutputStatus(tx))?;
+        rx.await
+            .map_err(|_| AudioError::Other("audio actor stopped".into()))
+    }
+    pub async fn invalidate_output(&self, reason: String) -> Result<(), AudioError> {
+        self.ask(|reply| Command::InvalidateOutput(reason, reply))
+            .await
+    }
+    pub async fn configure_output(
+        &self,
+        prefs: vmusic_core::output::OutputPreferences,
+    ) -> Result<(), AudioError> {
+        self.ask(|reply| Command::ConfigureOutput(prefs, reply))
+            .await
     }
 
     pub async fn eq_status(&self) -> Result<Option<vmusic_core::EqStatus>, AudioError> {
@@ -513,8 +646,17 @@ fn run(
     let mut ended_emitted = false;
     let mut restore_dsp = vmusic_core::DspParams::default();
     let mut restore_crossfade = 0;
+    let mut restore_quality = None;
+    let mut restore_impulse: Option<vmusic_core::impulse::ImpulseKernel> = None;
+    let mut restore_output = None;
 
     loop {
+        if let Some(status) = backend.quality_status() {
+            restore_quality = Some(status.requested);
+        }
+        if let Some(status) = backend.output_status() {
+            restore_output = Some(status.accepted);
+        }
         let command = rx.recv_timeout(TICK);
         let expired = enforce_sleep_deadline(
             &sleep_deadline,
@@ -557,20 +699,75 @@ fn run(
                 state.duration_ms = None;
                 state.playing = false;
                 state.generation = state.generation.saturating_add(1);
+                state.source_generation = state.source_generation.saturating_add(1);
                 ended_emitted = true;
                 publish(&snapshot, &state);
                 let _ = reply.send(Ok(()));
             }
+            Ok(Command::PrepareImpulse(kernel, reply)) => {
+                let result = backend.prepare_impulse(kernel.clone());
+                if result.is_ok() {
+                    restore_impulse = Some(kernel);
+                }
+                let _ = reply.send(result);
+            }
             Ok(Command::LeaveExclusive) => {
+                let mut idle = state.clone();
+                if restore_output.is_some() {
+                    idle.device = None;
+                }
                 backend = restore_idle_backend(
                     kind,
-                    &state,
+                    &idle,
                     &events,
                     restore_dsp,
                     restore_crossfade,
                     &sleep_deadline,
                 );
+                if let Some(kernel) = restore_impulse.clone() {
+                    if let Err(error) = backend.prepare_impulse(kernel) {
+                        let _ = events.send(AudioEvent::Error(error.to_string()));
+                    }
+                }
+                if let Some(params) = restore_quality {
+                    if let Err(error) = backend.set_quality(params) {
+                        let _ = events.send(AudioEvent::Error(error.to_string()));
+                    }
+                }
+                if let Some(prefs) = restore_output.clone() {
+                    if let Err(error) = backend.configure_output(prefs) {
+                        let _ = events.send(AudioEvent::Error(error.to_string()));
+                    }
+                }
                 ended_emitted = true;
+            }
+            Ok(Command::ConfigureOutput(prefs, reply)) if backend.name() == "unavailable" => {
+                let mut requested = state.clone();
+                requested.device = None;
+                let mut restored = restore_idle_backend(
+                    kind,
+                    &requested,
+                    &events,
+                    restore_dsp,
+                    restore_crossfade,
+                    &sleep_deadline,
+                );
+                let result = if restored.name() == "unavailable" {
+                    Err(AudioError::DeviceUnavailable("所选输出设备仍不可用".into()))
+                } else {
+                    restored.configure_output(prefs.clone())
+                };
+                if result.is_ok() {
+                    if let Some(params) = restore_quality {
+                        if let Err(error) = restored.set_quality(params) {
+                            let _ = events.send(AudioEvent::Error(error.to_string()));
+                        }
+                    }
+                    backend = restored;
+                    state.device = prefs.device_id;
+                }
+                publish(&snapshot, &state);
+                let _ = reply.send(result);
             }
             Ok(Command::SelectDevice(id, reply)) if backend.name() == "unavailable" => {
                 let mut requested = state.clone();
@@ -826,6 +1023,7 @@ fn same_snapshot(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
         mode,
         device,
         generation,
+        source_generation,
     } = a;
     track_id == &b.track_id
         && *position_ms == b.position_ms
@@ -835,6 +1033,7 @@ fn same_snapshot(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
         && *mode == b.mode
         && device == &b.device
         && *generation == b.generation
+        && *source_generation == b.source_generation
 }
 
 fn emit_ended(
@@ -894,6 +1093,7 @@ fn enforce_sleep_deadline(
     {
         if state.generation == from_generation {
             state.generation += 1;
+            state.source_generation = state.source_generation.saturating_add(1);
             state.track_id = Some(track_id.clone());
             state.duration_ms = info.duration_ms;
             Some(AudioEvent::Transitioned {
@@ -936,6 +1136,7 @@ fn settle_transition(
             info,
         }) if state.generation == from_generation => {
             state.generation += 1;
+            state.source_generation = state.source_generation.saturating_add(1);
             state.track_id = Some(track_id.clone());
             state.duration_ms = info.duration_ms;
             state.position_ms = backend.position_ms();
@@ -1009,11 +1210,16 @@ fn apply(
         Command::Load {
             uri,
             track_id,
+            gain,
             reply,
         } => {
-            let info = backend.load(&uri);
+            let info = match gain {
+                Some(gain) => backend.load_with_gain(&uri, gain),
+                None => backend.load(&uri),
+            };
             if let Ok(info) = &info {
                 state.track_id = track_id;
+                state.source_generation = state.source_generation.saturating_add(1);
                 state.duration_ms = info.duration_ms;
                 state.position_ms = 0;
                 state.playing = false;
@@ -1028,11 +1234,16 @@ fn apply(
             source,
             ext,
             track_id,
+            gain,
             reply,
         } => {
-            let info = backend.load_source(source, ext);
+            let info = match gain {
+                Some(gain) => backend.load_source_with_gain(source, ext, gain),
+                None => backend.load_source(source, ext),
+            };
             if let Ok(info) = &info {
                 state.track_id = track_id;
+                state.source_generation = state.source_generation.saturating_add(1);
                 state.duration_ms = info.duration_ms;
                 state.position_ms = 0;
                 state.playing = false;
@@ -1106,8 +1317,55 @@ fn apply(
             let _ = reply.send(result);
             Ok(false)
         }
+        Command::ValidateQuality(params, reply) => {
+            let _ = reply.send(backend.validate_quality(params));
+            Ok(false)
+        }
+        Command::SetQuality(params, reply) => {
+            let _ = reply.send(backend.set_quality(params));
+            Ok(false)
+        }
+        Command::PrepareImpulse(kernel, reply) => {
+            let _ = reply.send(backend.prepare_impulse(kernel));
+            Ok(false)
+        }
+        Command::QualityStatus(reply) => {
+            let _ = reply.send(backend.quality_status());
+            Ok(false)
+        }
+        Command::OutputStatus(reply) => {
+            let _ = reply.send(backend.output_status());
+            Ok(false)
+        }
+        Command::InvalidateOutput(reason, reply) => {
+            backend.invalidate_output(reason);
+            state.playing = false;
+            publish(sink, state);
+            let _ = reply.send(Ok(()));
+            Ok(false)
+        }
+        Command::ConfigureOutput(prefs, reply) => {
+            let result = backend.configure_output(prefs.clone());
+            if result.is_ok() {
+                state.device = prefs.device_id;
+            }
+            publish(sink, state);
+            let _ = reply.send(result);
+            Ok(false)
+        }
         Command::EqStatus(reply) => {
             let _ = reply.send(backend.eq_status());
+            Ok(false)
+        }
+        Command::PrepareNextSource(next, source, ext, gain, reply) => {
+            let result = if next.generation != state.generation || !state.playing {
+                Ok(vmusic_core::PrepareResult::Bypassed {
+                    reason: "stale verified-source preparation".into(),
+                })
+            } else {
+                backend.prepare_next_source(next, source, ext, gain)
+            };
+            let _ = reply.send(result);
             Ok(false)
         }
         Command::PrepareNext(next, reply) => {
@@ -1126,6 +1384,11 @@ fn apply(
                 }
             };
             let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::ClearUnstartedNext(reply) => {
+            let cancelled = backend.clear_unstarted_next();
+            let _ = reply.send(Ok(cancelled));
             Ok(false)
         }
         Command::ClearNext(reply) => {
@@ -1812,6 +2075,7 @@ mod tests {
             Command::Load {
                 uri: "a".into(),
                 track_id: Some("t1".into()),
+                gain: None,
                 reply: unit_reply(),
             }
         )
@@ -1842,6 +2106,7 @@ mod tests {
             Command::Load {
                 uri: "b".into(),
                 track_id: Some("t2".into()),
+                gain: None,
                 reply: unit_reply(),
             }
         )
@@ -1866,6 +2131,7 @@ mod tests {
             Command::Load {
                 uri: "c".into(),
                 track_id: Some("t3".into()),
+                gain: None,
                 reply: unit_reply(),
             }
         )
@@ -1879,6 +2145,7 @@ mod tests {
             Command::Load {
                 uri: "broken".into(),
                 track_id: Some("t4".into()),
+                gain: None,
                 reply: unit_reply(),
             }
         )
@@ -1985,6 +2252,7 @@ mod tests {
                 source: Box::new(MemSource(std::io::Cursor::new(b"ID3fake".to_vec()))),
                 ext: Some("mp3".into()),
                 track_id: Some("online:qq:1".into()),
+                gain: None,
                 reply: unit_reply(),
             },
         )
@@ -1994,7 +2262,53 @@ mod tests {
         assert_eq!(state.position_ms, 0);
         assert!(!state.playing);
         assert_eq!(state.generation, 1);
+        assert_eq!(state.source_generation, 1);
         // Cell<Option<String>> 不是 Copy，用 take() 取出标记。
         assert_eq!(backend.loaded.take(), Some("stream".to_string()));
+    }
+
+    #[test]
+    fn source_identity_changes_only_when_media_is_replaced() {
+        let mut backend = InstantEndBackend::default();
+        let mut state = PlayerSnapshot::default();
+        let sink = ArcSwap::from_pointee(state.clone());
+        let load = || Command::Load {
+            uri: "same.wav".into(),
+            track_id: Some("same".into()),
+            gain: Some(0.0),
+            reply: unit_reply(),
+        };
+        apply(&mut backend, &mut state, &sink, load()).unwrap();
+        assert_eq!(state.source_generation, 1);
+        for command in [
+            Command::Play(unit_reply()),
+            Command::Pause(unit_reply()),
+            Command::Seek(3000, unit_reply()),
+            Command::Stop(unit_reply()),
+        ] {
+            apply(&mut backend, &mut state, &sink, command).unwrap();
+            assert_eq!(state.source_generation, 1);
+        }
+        backend.load_fails = true;
+        apply(&mut backend, &mut state, &sink, load()).unwrap();
+        assert_eq!(state.source_generation, 1);
+        backend.load_fails = false;
+        apply(&mut backend, &mut state, &sink, load()).unwrap();
+        assert_eq!(state.source_generation, 2);
+        backend.next_event = Some(vmusic_core::NextEvent::Transitioned {
+            from_generation: state.generation,
+            track_id: "same".into(),
+            info: MediaInfo::default(),
+        });
+        let (events, _) = broadcast::channel(8);
+        let (controls, _) = tokio::sync::mpsc::unbounded_channel();
+        assert!(settle_transition(
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &controls
+        ));
+        assert_eq!(state.source_generation, 3);
     }
 }

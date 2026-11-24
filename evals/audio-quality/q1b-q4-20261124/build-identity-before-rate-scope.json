@@ -1,0 +1,276 @@
+{
+  "base_commit": "11dc60503a084dd899b7ebe5ae39e324433d2fc2",
+  "branch": "master",
+  "captured_at": "2026-11-24T00:40:29.8678173+08:00",
+  "source_state": "uncommitted task sources; source hashes bind these checks",
+  "sources": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "cddc9f0f13bc77c2c1557c348179202f688203d1193eda8f95ea8e5527d74d89"
+    },
+    {
+      "path": "crates/hertz-studio/src/assets.rs",
+      "sha256": "8db84bf5cc3d6113aaab3c6671f09a33f962b1714c34da0498a212cf2795930b"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_impulse.rs",
+      "sha256": "48f5fe8a06de81b486ac66079d41f66f01623ba6127690fb4f4da1888a529d46"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_loudness.rs",
+      "sha256": "b8d206c211df1bfa0b9f2ba092a172fd8a2ce66abee489dfa451923e76efc857"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_output.rs",
+      "sha256": "6083d8467eca66be67278d820d42f2e4fe95d05fc291baab14117678c3e0374a"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_quality.rs",
+      "sha256": "528be0da4d61750fc2315e850e69394272d40d7df93f0b700c95df925d9f8b87"
+    },
+    {
+      "path": "crates/hertz-studio/src/bootstrap.rs",
+      "sha256": "3a4e5ae54554fbde90972feaea3f9e06db58c08b97321d7a24190e8d55d8105b"
+    },
+    {
+      "path": "crates/hertz-studio/src/lib.rs",
+      "sha256": "2c451e5047f737b7ec181efba5fe04cf558cd1158abe7cde5075be05c567f45c"
+    },
+    {
+      "path": "crates/hertz-studio/src/measured_loudness.rs",
+      "sha256": "7b0fc3f66fd1005894ab9b26abe3504b5006d8f43ab3511936891190990d107c"
+    },
+    {
+      "path": "crates/hertz-studio/src/player_dsp.rs",
+      "sha256": "d9dced1ba2438e44ff03ff5a749fa53df07dbc323dd88a830170e22c0beb6be3"
+    },
+    {
+      "path": "crates/hertz-studio/src/routes.rs",
+      "sha256": "fc1851693b01e84cabf1420c391adb575b4407b8896a0079282357a8c50d8698"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/library.rs",
+      "sha256": "9246a946e2b20bc9a5edb047347ed59dee046a0dcc520b1849b5aefaf8820de7"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/mod.rs",
+      "sha256": "37866ebd53ed98d48dd43aba2425b3ae8f8171690caf01ded0923b6950a7f073"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/playback.rs",
+      "sha256": "26cce517dce45038afb0a1107c763a508b5d0e1597af2fcc369a2f224e40262a"
+    },
+    {
+      "path": "crates/hertz-studio/src/scan.rs",
+      "sha256": "50bc774838be56734d6821500eb347c9471898599bc1e4d5a26aa8bc1476bf03"
+    },
+    {
+      "path": "crates/hertz-studio/src/scan/selected.rs",
+      "sha256": "b97d2e8e33a1ae51e44fe1cd392f276127e817f97b7f5f2247daa69a013affe3"
+    },
+    {
+      "path": "crates/hertz-studio/src/state.rs",
+      "sha256": "cf8a4758e4e14d6752c821b778e0f21ba5d644583b8117e5d3665d6ef183bf49"
+    },
+    {
+      "path": "crates/vmusic-audio/Cargo.toml",
+      "sha256": "4f87c955abe7e8b44d649c9d2fea6a75fe7d3b888d3183159aabd7c293eb30fd"
+    },
+    {
+      "path": "crates/vmusic-audio/examples/eq_output_probe.rs",
+      "sha256": "de2cc14dbc90d91e28b70e5b0bdd0124fa9aba6801a715dabf47e22c03be3b2c"
+    },
+    {
+      "path": "crates/vmusic-audio/src/actor.rs",
+      "sha256": "7d89ded37c8a0af0de5accd1d16d1985e3f28b1b6c9546e88ff6ea6159802ade"
+    },
+    {
+      "path": "crates/vmusic-audio/src/cpal_backend.rs",
+      "sha256": "cf8c736915d73a01cad23d0bdf96ba0616a878a6b5cbfe0348793e070e6108db"
+    },
+    {
+      "path": "crates/vmusic-audio/src/impulse.rs",
+      "sha256": "e636f1b8a9b1d964f3f325db473a8669eeadc25afd9a186761443cdf27ec4ceb"
+    },
+    {
+      "path": "crates/vmusic-audio/src/lib.rs",
+      "sha256": "3325fc107fa2972ab0e7c73061e87e4bb79b85d7a54633ca9d0c77e9b64f21a2"
+    },
+    {
+      "path": "crates/vmusic-audio/src/local_output/mod.rs",
+      "sha256": "dbe06976672b4f5105724b75eb1c7d0144e06a996d0cd854a2b6db9b2d026dba"
+    },
+    {
+      "path": "crates/vmusic-audio/src/local_output/quantize.rs",
+      "sha256": "bfad8be7a9eccf73882f4247d35a83d515dfe5d2348ff1200435a5b4319c20c2"
+    },
+    {
+      "path": "crates/vmusic-audio/src/local_output/wasapi.rs",
+      "sha256": "483b24369a31eb40d75de6cf2dc65277abf3a4bdbe072191ea9a47010f2fe1b2"
+    },
+    {
+      "path": "crates/vmusic-audio/src/loudness.rs",
+      "sha256": "10648a1634fb838c4ec0bbd33dc61c6d4613183b3f34bdd171d414a2b150a390"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render.rs",
+      "sha256": "b2ea8d8f0dac9aa91f49d58716c8ad5fbf064bc01e9f80a6d96e4a399c62a7a9"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/continuity_tests.rs",
+      "sha256": "2fc4cb4cf5bf84bfe9a038759ae5782665fde2de6ad6967aa4a61eda26759e0c"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp.rs",
+      "sha256": "c2b82a5c3525e8e7a6d23660d5bc1c7e0860063746a6ae816826c806830bb66d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp/parametric_tests.rs",
+      "sha256": "31bf25ea5138d9c2012787fe5accc89240ec960a54262b9b28d2a82634b8fea3"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp/preparation.rs",
+      "sha256": "992e7de07cad9844d2360e764e51e618747f0e07cb6ac7f195afe045195ffc69"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp/tests.rs",
+      "sha256": "5841df812d878cacfd8b3bcec9a81e36da66f674870a7dc1cb3d90a44ea5251a"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/impulse.rs",
+      "sha256": "42b40f9a471b4c498e95bdc0e83a09f34c05ec03bd297c2121e2df3ea202e50a"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/terminal.rs",
+      "sha256": "30176318cfa327989995151fb05836c3755d7f28963b07638280c3444ff0a3af"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/tone.rs",
+      "sha256": "e5c07d6194832ea768e20c4ae5c98525b713e9cf7bf190574e2393ad3ccab17f"
+    },
+    {
+      "path": "crates/vmusic-audio/src/true_peak.rs",
+      "sha256": "5608b4b30dc640d3a885d33559201bbc4d24d76a90a2b49eda7c2e2ccd86ea07"
+    },
+    {
+      "path": "crates/vmusic-core/Cargo.toml",
+      "sha256": "baf740b5261d5c53743e120860b6efb43c63a074e2c91ecc91658dc699cad3bd"
+    },
+    {
+      "path": "crates/vmusic-core/src/audio_quality.rs",
+      "sha256": "df9fff951fdfd592a2cab61cdf4dea53532e82b7363eb452eef1b6b11a10c159"
+    },
+    {
+      "path": "crates/vmusic-core/src/audio.rs",
+      "sha256": "72f5ad151769fa95122599dd1c65131b4fc663b5958eccc799db71c80f7d6c98"
+    },
+    {
+      "path": "crates/vmusic-core/src/impulse.rs",
+      "sha256": "238e70648a9c0937dc57873067a8f49936dbe055b5bc10fa9254eda408cd69cf"
+    },
+    {
+      "path": "crates/vmusic-core/src/lib.rs",
+      "sha256": "54fa198f83ee1925554b830cdbe999bdc22998f29d4735d88d88b522789dc982"
+    },
+    {
+      "path": "crates/vmusic-core/src/model.rs",
+      "sha256": "ac53afbcd8d49042fe88fd95763a53f9046bdf0df8b2ea6fb58092c6d457452d"
+    },
+    {
+      "path": "crates/vmusic-core/src/output.rs",
+      "sha256": "d848eac47e8af0a10d1fa89b73e8575228d9a537e4d1a9aeb5515c9d7dc3882d"
+    },
+    {
+      "path": "crates/vmusic-store/src/audio_quality.rs",
+      "sha256": "a7c96e56d979226fd378ef2149273bb6c64055d1a593416eb9e941798210e570"
+    },
+    {
+      "path": "crates/vmusic-store/src/backup.rs",
+      "sha256": "ddc07a3eff7c007fd763deed0907ddf41bba58675871612c300b3b2d45a60818"
+    },
+    {
+      "path": "crates/vmusic-store/src/lib.rs",
+      "sha256": "16ca6b7c4ad98ef4e66720e8629a65c0940ec58f60ffb6217dd0b7cde6f4433f"
+    },
+    {
+      "path": "crates/vmusic-store/src/loudness.rs",
+      "sha256": "7813eced457a1b688c2e7f0091060400710c3a4cb0064d335d21727e487628ae"
+    },
+    {
+      "path": "crates/vmusic-store/src/settings.rs",
+      "sha256": "9f00aa747fab74e145e5f672f3848f997d2ef81d3f9a2edd8a08cca9a0c80882"
+    },
+    {
+      "path": "migrations/0034_loudness.sql",
+      "sha256": "7574577e83b1c4fe254e997bd29cdeb5cb171ced2f5031b72b61a71dc16e2039"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "df511947fe3cd89e44c023c4ee81ee81033be9ccd224b60893ebad3394a233a7"
+    },
+    {
+      "path": "plugin/ui/app.js",
+      "sha256": "e0b746ca0de960e3b0a1e9f745a5b5bde658de6dbcbb100583453850b09bff36"
+    },
+    {
+      "path": "plugin/ui/audio-analysis-settings.js",
+      "sha256": "26c38e69c8d44539429500178ceb1c6986cafd39921add154f0d0c7dba19204f"
+    },
+    {
+      "path": "plugin/ui/audio-output-settings.js",
+      "sha256": "6a4b958c4c3f507ec68c914946bbc1cdd5dfc7649af51d481117161a52956d65"
+    },
+    {
+      "path": "plugin/ui/audio-quality.css",
+      "sha256": "e9f002ba6e60217d99d8b6b347a4a971a38c07691bf54757cc1d8389c71f7533"
+    },
+    {
+      "path": "plugin/ui/dsp-settings.js",
+      "sha256": "88c02313607dc2a1577d7dc3680d6963f8bb991130ac015b855f63ec59a1a4a9"
+    },
+    {
+      "path": "plugin/ui/index.html",
+      "sha256": "e308f19931013af68484f2d0d304de1922e3bd31e62aacef0604cc7042197db1"
+    },
+    {
+      "path": "scripts/check-audio-quality-actions-browser.js",
+      "sha256": "1ea6291751ffcda431f62e2cae7410d31871c28542e6877f2349c539a9ba2bc0"
+    },
+    {
+      "path": "scripts/check-dsp-settings-browser.js",
+      "sha256": "f248259a6efe5ce086234a3cc914891ddd65b31aefc3ebfd64938defae3af867"
+    }
+  ],
+  "binaries": [
+    {
+      "path": "target/release/deps/vmusic_audio-beb2e312c4c0567e.exe",
+      "sha256": "47d791f091304afad7c1105599b373a1204ec9df4c6ef2bf02a3d9a4182ca6df"
+    },
+    {
+      "path": "target/release/examples/eq_output_probe.exe",
+      "sha256": "41b1192e31e3d6e601dfb3516eda6594be018171890e512bae483ac2e9cf4c3b"
+    },
+    {
+      "path": "target/audio-quality-msrv/debug/deps/hertz_studio-cbdc895e20a8fb31.exe",
+      "sha256": "e3238ee23dc78aaeafd1ef80b5d265a6e2a14423a5bb343186c222e07167797d"
+    },
+    {
+      "path": "target/audio-quality-msrv/debug/deps/hertz_studio-2146108518957a5c.exe",
+      "sha256": "28972242d2e1d16e001ea5139da681298503b86af4961d3bcee39af9d48669eb"
+    }
+  ],
+  "release_rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "test_rustc": "1.88.0",
+  "cpu": "13th Gen Intel Core i7-13620H",
+  "os": "Microsoft Windows 11 家庭版 中文版",
+  "architecture": "x86_64-pc-windows-msvc",
+  "evidence_freshness": [
+    "audio-polyphase-msrv-final.log and final release probe cover final audio sources",
+    "Hertz973, feature checks, embedded-resource and device executable predate only the final tone polyphase optimization; unchanged service/output boundaries covered by their existing checks, final DSP math/lifecycle covered by audio247+7",
+    "silent output executable hash identifies its own pre-polyphase candidate; no final-tone acoustic claim"
+  ],
+  "final_audio_msrv_binary": {
+    "path": "target/audio-quality-msrv/debug/deps/vmusic_audio-a9639b02fce1e63d.exe",
+    "sha256": "2f70d352ea2f9a26f3499fa72baab29527b4d83b8dc3ef5874ebb2307e3b9311"
+  }
+}

@@ -22,6 +22,9 @@ pub mod scheduled_output;
 pub mod cpal_backend;
 
 #[cfg(feature = "playback")]
+mod local_output;
+
+#[cfg(feature = "playback")]
 pub mod render;
 
 #[cfg(feature = "playback")]
@@ -41,3 +44,11 @@ pub use scheduled_output::{
 pub use actor::{spawn, AudioEvent, AudioHandle, BackendKind};
 pub use null::NullBackend;
 pub use vmusic_core::PrepareResult;
+
+#[cfg(feature = "playback")]
+pub mod loudness;
+#[cfg(feature = "playback")]
+mod true_peak;
+
+#[cfg(feature = "playback")]
+pub mod impulse;

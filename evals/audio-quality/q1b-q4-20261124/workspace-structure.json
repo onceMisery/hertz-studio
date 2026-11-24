@@ -1,0 +1,33 @@
+{
+  "structural_only": true,
+  "target_root": "D:/code/github/hertz-studio",
+  "work_record": "docs/aegis/work/2026-11-23-audio-quality",
+  "bundle": {
+    "command": [
+      "C:/Users/miracle/.codex/aegis/scripts/aegis-workspace.py",
+      "bundle",
+      "--root",
+      "D:/code/github/hertz-studio",
+      "--work",
+      "2026-11-23-audio-quality"
+    ],
+    "exit_code": 0,
+    "log": "output/audio-quality/resume-workspace-bundle.log",
+    "sha256": "548579d984980f452b3e3f4fc8c5c99fde65c75287260d701fe2b324e5249913"
+  },
+  "global_check": {
+    "command": [
+      "C:/Users/miracle/.codex/aegis/scripts/aegis-workspace.py",
+      "check",
+      "--root",
+      "D:/code/github/hertz-studio"
+    ],
+    "exit_code": 1,
+    "log": "output/audio-quality/resume-workspace-check.log",
+    "sha256": "a22a50a154e438c693b73792343fd5ae0487605e56307cd9ed2b2b7ec0cad3c3",
+    "diagnostic_lines": 150,
+    "unchanged_from": "output/audio-quality/workspace-check-q4.log",
+    "new_diagnostic_lines": [],
+    "reason": "Existing old task-index entries and method-pack ADR naming/template issues. No new diagnostics; this is separate from the passed repository ADR contract check."
+  }
+}

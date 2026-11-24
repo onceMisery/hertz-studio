@@ -5,11 +5,11 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
-use vmusic_core::{CoreError, DspParams, EqApplicationState};
+use std::sync::Arc;
+use vmusic_core::{CoreError, EqApplicationState};
 
 use crate::{
-    error::{bad_request, internal, ApiError},
+    error::{internal, ApiError},
     state::{AppState, DspConfig},
 };
 
@@ -21,6 +21,10 @@ pub struct DspUpdate {
     pub crossfade_ms: Option<u64>,
 }
 
+#[cfg(test)]
+use crate::error::bad_request;
+
+#[cfg(test)]
 fn update_config(mut config: DspConfig, update: DspUpdate) -> Result<DspConfig, ApiError> {
     if let Some(eq) = update.eq_gains_db {
         if eq.iter().any(|value| !value.is_finite()) {
@@ -94,53 +98,12 @@ pub(crate) async fn read(state: &Arc<AppState>) -> Result<Value, ApiError> {
         .await
         .map_err(|error| ApiError::from(CoreError::Store(error)))?;
     let failure = state.dsp_application_error.lock().await.clone();
-    response(state, &DspConfig::from_settings(&settings), failure).await
+    let (config, _) = crate::audio_quality::from_settings(&settings)?;
+    response(state, &crate::audio_quality::legacy(&config), failure).await
 }
 
 pub(crate) async fn update(state: &Arc<AppState>, update: DspUpdate) -> Result<Value, ApiError> {
-    let commit = state.play_commit.lock().await;
-    state.require_local_playback()?;
-    let settings = vmusic_store::settings::get_all(&state.db)
-        .await
-        .map_err(|error| ApiError::from(CoreError::Store(error)))?;
-    let config = update_config(DspConfig::from_settings(&settings), update)?;
-    let values = BTreeMap::from([
-        ("dsp_eq".into(), json!(config.eq_gains_db)),
-        ("dsp_preamp".into(), json!(config.preamp_db)),
-        ("dsp_loudness_mode".into(), json!(config.loudness_mode)),
-        ("dsp_crossfade_ms".into(), json!(config.crossfade_ms)),
-    ]);
-    vmusic_store::settings::set_atomic(&state.db, &values)
-        .await
-        .map_err(|error| ApiError::from(CoreError::Store(error)))?;
-    *state.dsp.lock().await = config.clone();
-    let track_gain_db = if config.loudness_enabled() {
-        state
-            .current_loudness(&config.loudness_mode)
-            .await
-            .map_or(0.0, |(gain, _)| gain as f32)
-    } else {
-        0.0
-    };
-    let dsp_result = state
-        .audio
-        .set_dsp(DspParams {
-            eq_gains_db: config.eq_gains_db,
-            preamp_db: config.preamp_db,
-            track_gain_db,
-        })
-        .await;
-    let crossfade_result = state.audio.set_crossfade(config.crossfade_ms).await;
-    state.cancel_prepared_playback().await;
-    state.schedule_prepare_next();
-    let failure = dsp_result
-        .err()
-        .or_else(|| crossfade_result.err())
-        .map(|error| ApiError::from(CoreError::Audio(error)));
-    *state.dsp_application_error.lock().await = failure.clone();
-    let result = response(state, &config, failure).await;
-    drop(commit);
-    result
+    crate::audio_quality::legacy_update(state, update).await
 }
 
 #[cfg(test)]
@@ -196,7 +159,7 @@ mod tests {
         assert_eq!(state.dsp.lock().await.eq_gains_db[0], 3.0);
 
         let before = vmusic_store::settings::get_all(&state.db).await.unwrap();
-        sqlx::query("CREATE TRIGGER dsp_reject_preamp BEFORE INSERT ON settings WHEN NEW.key='dsp_preamp' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
+        sqlx::query("CREATE TRIGGER dsp_reject_preamp BEFORE INSERT ON settings WHEN NEW.key='audio_quality_v2' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
             .execute(&state.db).await.unwrap();
         assert!(rpc
             .call(call(

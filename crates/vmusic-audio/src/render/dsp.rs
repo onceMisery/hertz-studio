@@ -2,7 +2,9 @@
 // Copyright (c) 2026 hertz-studio contributors
 
 use super::EQ_BANDS;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use vmusic_core::audio_quality::{HeadroomInfo, QualityParams, QualityStatus};
+mod preparation;
 use std::sync::Mutex;
 use vmusic_core::AudioError;
 
@@ -158,18 +160,30 @@ pub(super) struct PreparedEq {
     gains: [f32; 6],
     bands: [BiQuad; 6],
     preamp_db: f32,
+    params: QualityParams,
+    headroom: HeadroomInfo,
+    warm_frames: usize,
 }
 
 impl PreparedEq {
     fn new(revision: u64, rate: u32, gains: [f32; 6], preamp_db: f32) -> Self {
-        Self {
-            revision,
-            rate,
-            gains,
-            bands: std::array::from_fn(|i| BiQuad::peaking(EQ_BANDS[i], gains[i], 1.2, rate)),
-            preamp_db,
+        let mut params = QualityParams::default();
+        params.eq.enabled = gains.iter().any(|g| *g != 0.0);
+        for (band, gain) in params.eq.bands.iter_mut().zip(gains) {
+            band.gain_db = gain;
         }
+        params.preamp_db = preamp_db;
+        preparation::prepare_legacy(revision, rate, params).expect("legacy fixed EQ parameters")
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ObservedQuality {
+    epoch: u64,
+    applied: Option<QualityParams>,
+    from: Option<QualityParams>,
+    target: Option<QualityParams>,
+    headroom: HeadroomInfo,
 }
 
 pub(super) struct DspControl {
@@ -177,9 +191,31 @@ pub(super) struct DspControl {
     pub(super) applied_revision: AtomicU64,
     pub(super) applied_epoch: AtomicU64,
     pub(super) reset_epoch: AtomicU64,
+    prepared_cache: Mutex<Option<PreparedEq>>,
+    observed: Mutex<ObservedQuality>,
+    pub(super) impulse: Mutex<Option<super::impulse::PreparedImpulse>>,
+    deferred_reset: AtomicBool,
+    pub(super) terminal_epoch: AtomicU64,
+    pub(super) terminal_queued: AtomicU64,
+    pub(super) terminal_audible: AtomicU64,
+    pub(super) terminal_latency: AtomicU64,
+    pub(super) terminal_position: AtomicU64,
+    pub(super) terminal_transition: AtomicBool,
+    pub(super) terminal_inflight: AtomicBool,
+    terminal_peak: AtomicU32,
+    terminal_reduction: AtomicU32,
+    progress: AtomicU32,
+    sample_peak: AtomicU32,
+    overload_samples: AtomicU64,
 }
 
 impl DspControl {
+    pub(super) fn invalidate_adoption(&self) {
+        self.applied_revision.store(0, Ordering::Release);
+        if let Ok(mut observed) = self.observed.lock() {
+            *observed = ObservedQuality::default();
+        }
+    }
     pub(super) fn status(&self, active: bool, output_id: u64) -> vmusic_core::EqStatus {
         use vmusic_core::{EqApplicationState, EqStatus};
         let parameters = self
@@ -193,6 +229,8 @@ impl DspControl {
         EqStatus {
             state: if applied == Some(parameters.revision) {
                 EqApplicationState::Applied
+            } else if self.deferred_reset.load(Ordering::Acquire) {
+                EqApplicationState::Deferred
             } else if active {
                 EqApplicationState::Applying
             } else {
@@ -225,11 +263,31 @@ impl DspControl {
     pub(super) fn new() -> Self {
         let parameters = Mutex::new(PreparedEq::new(1, 48_000, [0.0; 6], 0.0));
         super::prime(&parameters);
+        let impulse = Mutex::new(None);
+        super::prime(&impulse);
+        let observed = Mutex::new(ObservedQuality::default());
+        super::prime(&observed);
         Self {
             parameters,
             applied_revision: AtomicU64::new(0),
             applied_epoch: AtomicU64::new(0),
             reset_epoch: AtomicU64::new(1),
+            prepared_cache: Mutex::new(None),
+            observed,
+            impulse,
+            deferred_reset: AtomicBool::new(false),
+            terminal_epoch: AtomicU64::new(0),
+            terminal_queued: AtomicU64::new(0),
+            terminal_audible: AtomicU64::new(0),
+            terminal_latency: AtomicU64::new(0),
+            terminal_position: AtomicU64::new(0),
+            terminal_transition: AtomicBool::new(false),
+            terminal_inflight: AtomicBool::new(false),
+            terminal_peak: AtomicU32::new(0),
+            terminal_reduction: AtomicU32::new(0),
+            progress: AtomicU32::new(0),
+            sample_peak: AtomicU32::new(0),
+            overload_samples: AtomicU64::new(0),
         }
     }
 
@@ -243,19 +301,152 @@ impl DspControl {
         gains: [f32; 6],
         preamp_db: f32,
     ) -> Result<(), AudioError> {
+        let mut params = self
+            .parameters
+            .lock()
+            .map_err(|_| AudioError::Other("DSP parameters unavailable".into()))?
+            .params;
+        if params.gains() != gains {
+            params.eq.enabled = gains.iter().any(|g| *g != 0.0);
+            for (band, gain) in params.eq.bands.iter_mut().zip(gains) {
+                band.gain_db = gain;
+            }
+        }
+        params.preamp_db = preamp_db;
+        params.validate_processing_rate(rate)?;
+        {
+            let old = self
+                .parameters
+                .lock()
+                .map_err(|_| AudioError::Other("DSP parameters unavailable".into()))?;
+            if old.rate == rate && old.params == params {
+                return Ok(());
+            }
+        }
+        let legacy = params
+            .eq
+            .bands
+            .iter()
+            .zip(EQ_BANDS)
+            .all(|(b, f)| b.frequency_hz == f && b.q == 1.2);
+        if !legacy {
+            return self.publish_quality(rate, params);
+        }
+        let mut prepared = preparation::prepare_legacy(0, rate, params)?;
         let mut pending = self
             .parameters
             .lock()
             .map_err(|_| AudioError::Other("DSP parameters unavailable".into()))?;
-        if pending.rate == rate && pending.gains == gains && pending.preamp_db == preamp_db {
-            return Ok(());
-        }
-        let revision = pending
+        prepared.revision = pending
             .revision
             .checked_add(1)
             .ok_or_else(|| AudioError::Other("DSP revision exhausted".into()))?;
-        *pending = PreparedEq::new(revision, rate, gains, preamp_db);
+        *pending = prepared;
         Ok(())
+    }
+
+    pub(super) fn validate_quality(
+        &self,
+        rate: u32,
+        params: QualityParams,
+    ) -> Result<(), AudioError> {
+        params.validate_processing_rate(rate)?;
+        if let Some(id) = params.impulse_id {
+            let prepared = self
+                .impulse
+                .lock()
+                .map_err(|_| AudioError::Other("校正资源不可用".into()))?;
+            if !prepared
+                .as_ref()
+                .is_some_and(|k| k.id == id && k.rate == rate)
+            {
+                return Err(AudioError::Other("校正资源尚未按此输出格式准备".into()));
+            }
+        }
+        let prepared = preparation::prepare(1, rate, params)?;
+        *self
+            .prepared_cache
+            .lock()
+            .map_err(|_| AudioError::Other("DSP preparation unavailable".into()))? = Some(prepared);
+        Ok(())
+    }
+
+    pub(super) fn publish_quality(
+        &self,
+        rate: u32,
+        params: QualityParams,
+    ) -> Result<(), AudioError> {
+        params.validate_processing_rate(rate)?;
+        if let Some(id) = params.impulse_id {
+            let prepared = self
+                .impulse
+                .lock()
+                .map_err(|_| AudioError::Other("校正资源不可用".into()))?;
+            if !prepared
+                .as_ref()
+                .is_some_and(|k| k.id == id && k.rate == rate)
+            {
+                return Err(AudioError::Other("校正资源尚未按此输出格式准备".into()));
+            }
+        }
+        // Expensive response preparation is outside the parameter mailbox lock.
+        let cached = self
+            .prepared_cache
+            .lock()
+            .map_err(|_| AudioError::Other("DSP preparation unavailable".into()))?
+            .take();
+        let mut prepared = match cached {
+            Some(p) if p.rate == rate && p.params == params => p,
+            _ => preparation::prepare(0, rate, params)?,
+        };
+        let mut pending = self
+            .parameters
+            .lock()
+            .map_err(|_| AudioError::Other("DSP parameters unavailable".into()))?;
+        if pending.rate == rate && pending.params == params {
+            return Ok(());
+        }
+        prepared.revision = pending
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| AudioError::Other("DSP revision exhausted".into()))?;
+        *pending = prepared;
+        Ok(())
+    }
+
+    pub(super) fn quality_status(&self, active: bool, output: u64) -> QualityStatus {
+        let eq = self.status(active, output);
+        let p = *self.parameters.lock().unwrap_or_else(|e| e.into_inner());
+        let observed = *self.observed.lock().unwrap_or_else(|e| e.into_inner());
+        let current = observed.epoch == self.reset_epoch.load(Ordering::Acquire);
+        QualityStatus {
+            eq,
+            requested: p.params,
+            applied: if current { observed.applied } else { None },
+            headroom: observed.headroom,
+            requested_headroom: p.headroom,
+            transition_from: if current { observed.from } else { None },
+            transition_target: if current { observed.target } else { None },
+            transition_progress: f32::from_bits(self.progress.load(Ordering::Relaxed)),
+            sample_peak: f32::from_bits(self.sample_peak.load(Ordering::Relaxed)),
+            overload_samples: self.overload_samples.load(Ordering::Relaxed),
+            deferred_reason: self
+                .deferred_reset
+                .load(Ordering::Acquire)
+                .then_some("processing_latency_change_waits_for_seek_or_load"),
+            latency_frames: self.terminal_latency.load(Ordering::Relaxed),
+            true_peak: (self.terminal_latency.load(Ordering::Relaxed) > 0)
+                .then(|| f32::from_bits(self.terminal_peak.load(Ordering::Relaxed))),
+            protection_reduction_db: f32::from_bits(
+                self.terminal_reduction.load(Ordering::Relaxed),
+            ),
+        }
+    }
+
+    pub(super) fn observe(&self, peak: f32, overloads: u64) {
+        self.sample_peak.store(peak.to_bits(), Ordering::Relaxed);
+        self.overload_samples
+            .fetch_add(overloads, Ordering::Relaxed);
     }
 
     pub(super) fn reset(&self) {
@@ -283,6 +474,7 @@ enum Transition {
 pub(super) struct DspRuntime {
     rate: u32,
     channels: usize,
+    pub(super) terminal: super::terminal::Terminal,
     banks: [EqBank; 2],
     current: usize,
     applied: u64,
@@ -299,12 +491,16 @@ pub(super) struct DspRuntime {
     cache_valid: bool,
     write: usize,
     history_len: usize,
+    history_tracks_min: [f32; 2],
+    history_tracks_max: [f32; 2],
     history_frames: usize,
     fade_frames: usize,
     transition: Transition,
     preamps: [f32; 2],
     preamp_gains: [f32; 2],
     _native_history: Option<super::NativePcmReservation>,
+    configs: [QualityParams; 2],
+    headrooms: [HeadroomInfo; 2],
 }
 
 impl DspRuntime {
@@ -313,10 +509,20 @@ impl DspRuntime {
     }
 
     pub(super) fn new(rate: u32, channels: usize) -> Self {
-        let history_frames = ((rate as u64 * EQ_HISTORY_MS).div_ceil(1000) as usize).max(1);
+        let budget_ms = if channels <= 2 && matches!(rate, 44_100 | 48_000 | 96_000) {
+            preparation::PARAMETRIC_HISTORY_MS
+        } else {
+            EQ_HISTORY_MS
+        };
+        Self::with_history(rate, channels, budget_ms)
+    }
+
+    fn with_history(rate: u32, channels: usize, history_ms: u64) -> Self {
+        let history_frames = ((rate as u64 * history_ms).div_ceil(1000) as usize).max(1);
         Self {
             rate,
             channels,
+            terminal: super::terminal::Terminal::new(rate, channels, history_ms > EQ_HISTORY_MS),
             banks: [
                 EqBank::new(rate, [0.0; 6], channels),
                 EqBank::new(rate, [0.0; 6], channels),
@@ -336,12 +542,16 @@ impl DspRuntime {
             cache_valid: false,
             write: 0,
             history_len: 0,
+            history_tracks_min: [0.0; 2],
+            history_tracks_max: [0.0; 2],
             history_frames,
             fade_frames: ((rate as u64 * EQ_FADE_MS).div_ceil(1000) as usize).max(2),
             transition: Transition::Idle,
             preamps: [0.0; 2],
             preamp_gains: [1.0; 2],
             _native_history: None,
+            configs: [QualityParams::default(); 2],
+            headrooms: [HeadroomInfo::default(); 2],
         }
     }
 
@@ -351,7 +561,7 @@ impl DspRuntime {
     ) -> Result<Self, AudioError> {
         let frames = ((rate as u64 * EQ_HISTORY_MS).div_ceil(1000)).max(1);
         let reservation = budget.reserve(frames * 2, rate, frames as usize * (2 * 2 + 4) * 4)?;
-        let mut runtime = Self::new(rate, 2);
+        let mut runtime = Self::with_history(rate, 2, EQ_HISTORY_MS);
         runtime._native_history = Some(reservation);
         Ok(runtime)
     }
@@ -359,8 +569,11 @@ impl DspRuntime {
     fn configure(&mut self, bank: usize, parameters: PreparedEq) {
         self.cache_valid = false;
         self.warm_cache_valid = false;
+        self.configs[bank] = parameters.params;
+        self.headrooms[bank] = parameters.headroom;
         self.preamps[bank] = parameters.preamp_db;
-        self.preamp_gains[bank] = 10f64.powf(parameters.preamp_db as f64 / 20.0) as f32;
+        self.preamp_gains[bank] =
+            10f64.powf(parameters.headroom.effective_preamp_db as f64 / 20.0) as f32;
         let bank = &mut self.banks[bank];
         bank.rate = parameters.rate;
         bank.gains = parameters.gains;
@@ -376,6 +589,7 @@ impl DspRuntime {
 
     pub(super) fn begin_epoch(&mut self, control: &DspControl, epoch: u64) -> bool {
         if self.epoch != epoch {
+            self.terminal.reset();
             for bank in &mut self.banks {
                 for channel in &mut bank.states {
                     for band in channel {
@@ -387,6 +601,8 @@ impl DspRuntime {
                 }
             }
             self.history_len = 0;
+            self.history_tracks_min = [0.0; 2];
+            self.history_tracks_max = [0.0; 2];
             self.write = 0;
             self.transition = Transition::Idle;
             self.applied = 0;
@@ -404,19 +620,76 @@ impl DspRuntime {
         if parameters.rate != self.rate || parameters.revision == self.applied {
             return self.applied != 0;
         }
+        if self
+            .terminal
+            .requires_reset(parameters.params.limiter, parameters.params.tone)
+            && self.history_len > 0
+        {
+            control.deferred_reset.store(true, Ordering::Release);
+            return true;
+        }
+        control.deferred_reset.store(false, Ordering::Release);
+        if parameters.params.impulse_id != self.terminal.impulse_id() {
+            let Ok(kernel) = control.impulse.try_lock() else {
+                return self.applied != 0;
+            };
+            let prepared = if let Some(id) = parameters.params.impulse_id {
+                let Some(prepared) = kernel
+                    .as_ref()
+                    .filter(|k| k.id == id && k.rate == self.rate)
+                else {
+                    return self.applied != 0;
+                };
+                Some(*prepared)
+            } else {
+                None
+            };
+            if self.history_len > 0
+                && prepared.map_or(0, |k| k.delay) != self.terminal.impulse_delay()
+            {
+                control.deferred_reset.store(true, Ordering::Release);
+                return true;
+            }
+            self.terminal
+                .configure_impulse(prepared, self.history_len == 0);
+        }
+        let tone_changed = self.configs[self.current].tone != parameters.params.tone;
+        self.fade_frames = ((self.rate as u64 * if tone_changed { 250 } else { EQ_FADE_MS })
+            .div_ceil(1000) as usize)
+            .max(2);
+        self.terminal
+            .configure(parameters.params.limiter, parameters.params.tone);
         if self.history_len == 0 {
             self.configure(self.current, parameters);
             self.applied = parameters.revision;
-        } else if self.banks[self.current].gains == parameters.gains
-            && self.preamps[self.current] == parameters.preamp_db
-        {
+        } else if self.configs[self.current] == parameters.params {
             self.applied = parameters.revision;
+        } else if self.configs[self.current].eq == parameters.params.eq
+            && (0..2).all(|i| {
+                [self.preamps[self.current], parameters.preamp_db]
+                    .iter()
+                    .all(|p| {
+                        p + self.history_tracks_min[i] >= -24.0
+                            && p + self.history_tracks_max[i] <= 18.0
+                    })
+            })
+        {
+            // Gain-only changes preserve the exact filter history and need
+            // only the unity-sum sample ramp, never historical catch-up.
+            let next = 1 - self.current;
+            self.configure(next, parameters);
+            for channel in 0..self.channels {
+                self.banks[next].states[channel] = self.banks[self.current].states[channel];
+            }
+            self.target = parameters.revision;
+            self.transition = Transition::Fading { done: 0 };
         } else {
             self.configure(1 - self.current, parameters);
             self.target = parameters.revision;
+            let history = self.history_len.min(parameters.warm_frames);
             self.transition = Transition::Warming {
-                read: (self.write + self.history_frames - self.history_len) % self.history_frames,
-                remaining: self.history_len,
+                read: (self.write + self.history_frames - history) % self.history_frames,
+                remaining: history,
             };
         }
         true
@@ -458,6 +731,10 @@ impl DspRuntime {
         frame: &mut [f32],
     ) {
         debug_assert_eq!(frame.len(), self.channels);
+        for (i, track) in tracks.iter().enumerate() {
+            self.history_tracks_min[i] = self.history_tracks_min[i].min(*track);
+            self.history_tracks_max[i] = self.history_tracks_max[i].max(*track);
+        }
         if !self.cache_valid || self.cached_tracks != tracks {
             self.cached_tracks = tracks;
             self.cached_factors = [self.track_factors(0, tracks), self.track_factors(1, tracks)];
@@ -538,7 +815,49 @@ impl DspRuntime {
     }
 
     pub(super) fn finish_block(&self, control: &DspControl) {
+        let progress = match self.transition {
+            Transition::Idle => 1.0,
+            Transition::Warming { .. } => 0.0,
+            Transition::Fading { done } => done as f32 / self.fade_frames as f32,
+        };
+        control
+            .progress
+            .store(progress.to_bits(), Ordering::Relaxed);
         if control.reset_epoch.load(Ordering::Acquire) == self.epoch {
+            control
+                .terminal_queued
+                .store(self.terminal.queued(), Ordering::Relaxed);
+            control
+                .terminal_audible
+                .store(self.terminal.audible_pending, Ordering::Relaxed);
+            control
+                .terminal_position
+                .store(self.terminal.position, Ordering::Relaxed);
+            control
+                .terminal_latency
+                .store(self.terminal.latency(), Ordering::Relaxed);
+            control
+                .terminal_transition
+                .store(self.terminal.transition_pending, Ordering::Relaxed);
+            control.terminal_peak.store(
+                self.terminal.peak().unwrap_or(0.0).to_bits(),
+                Ordering::Relaxed,
+            );
+            control
+                .terminal_reduction
+                .store(self.terminal.reduction().to_bits(), Ordering::Relaxed);
+            control.terminal_epoch.store(self.epoch, Ordering::Release);
+
+            if let Ok(mut observed) = control.observed.try_lock() {
+                let transitioning = !matches!(self.transition, Transition::Idle);
+                *observed = ObservedQuality {
+                    epoch: self.epoch,
+                    applied: (self.applied != 0).then_some(self.configs[self.current]),
+                    from: transitioning.then_some(self.configs[self.current]),
+                    target: transitioning.then_some(self.configs[1 - self.current]),
+                    headroom: self.headrooms[self.current],
+                };
+            }
             control
                 .applied_revision
                 .store(self.applied, Ordering::Relaxed);
@@ -548,253 +867,6 @@ impl DspRuntime {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fixed_eq_transition_matches_long_history_and_survives_block_fragmentation() {
-        for rate in [44_100, 48_000, 96_000, 192_000] {
-            let gains = [12.0, -12.0, 12.0, -12.0, 12.0, -12.0];
-            let control = DspControl::new();
-            control.publish(rate, [0.0; 6]).unwrap();
-            let mut runtime = DspRuntime::new(rate, 2);
-            let mut reference = EqBank::new(rate, gains, 2);
-            let input = |n: usize| {
-                [
-                    0.03 * (std::f64::consts::TAU * 60.0 * n as f64 / rate as f64).sin() as f32,
-                    0.03 * (std::f64::consts::TAU * 2400.0 * n as f64 / rate as f64).sin() as f32,
-                ]
-            };
-            runtime.begin_block(&control);
-            for n in 0..rate as usize {
-                let mut frame = input(n);
-                for (ch, value) in frame.iter().enumerate() {
-                    reference.process_frame(ch, *value);
-                }
-                runtime.process(&mut frame);
-            }
-            runtime.finish_block(&control);
-            control.publish(rate, gains).unwrap();
-            runtime.begin_block(&control);
-            let mut max_error = 0.0f32;
-            let mut completed = None;
-            for n in 0..(rate / 10) as usize {
-                if n % 127 == 0 {
-                    runtime.begin_block(&control);
-                }
-                let mut frame = input(rate as usize + n);
-                let expected = [
-                    reference.process_frame(0, frame[0]),
-                    reference.process_frame(1, frame[1]),
-                ];
-                runtime.process(&mut frame);
-                if matches!(runtime.transition, Transition::Idle) {
-                    completed.get_or_insert(n);
-                    for ch in 0..2 {
-                        max_error = max_error.max((frame[ch] - expected[ch]).abs());
-                    }
-                }
-            }
-            assert!(
-                completed.is_some_and(|n| n < (rate / 10) as usize),
-                "rate {rate}: adoption exceeds 100 ms"
-            );
-            assert!(
-                max_error < 0.00001,
-                "rate {rate}: long-history residual {max_error}"
-            );
-            runtime.finish_block(&control);
-            assert_eq!(
-                control.status(true, 0).state,
-                vmusic_core::EqApplicationState::Applied
-            );
-        }
-    }
-
-    #[test]
-    fn rapid_requests_keep_only_the_latest_and_reset_clears_pending_history() {
-        let control = DspControl::new();
-        let mut runtime = DspRuntime::new(48_000, 1);
-        runtime.begin_block(&control);
-        for _ in 0..7680 {
-            runtime.process(&mut [0.01]);
-        }
-        control.publish(48_000, [12.0; 6]).unwrap();
-        runtime.begin_block(&control);
-        for gain in -12..12 {
-            control.publish(48_000, [gain as f32; 6]).unwrap();
-        }
-        control.publish(48_000, [-3.0; 6]).unwrap();
-        for _ in 0..150 {
-            runtime.begin_block(&control);
-            for _ in 0..128 {
-                runtime.process(&mut [0.01]);
-            }
-            runtime.finish_block(&control);
-        }
-        assert_eq!(runtime.banks[runtime.current].gains, [-3.0; 6]);
-        assert_eq!(
-            control.status(true, 0).state,
-            vmusic_core::EqApplicationState::Applied
-        );
-        control.reset();
-        runtime.begin_block(&control);
-        let mut silence = [0.0];
-        runtime.process(&mut silence);
-        assert_eq!(silence, [0.0]);
-    }
-
-    #[test]
-    #[ignore = "release-only synthetic DSP timing; does not open an audio device"]
-    fn quality_probe() {
-        assert!(!cfg!(debug_assertions), "run this probe with --release");
-        for rate in [44_100, 48_000, 96_000] {
-            for block in [128usize, 512] {
-                let control = DspControl::new();
-                control.publish(rate, [0.0; 6]).unwrap();
-                let mut runtime = DspRuntime::new(rate, 2);
-                let mut output = vec![[0.0f32; 2]; block];
-                let blocks = (rate as usize * 30).div_ceil(block);
-                let mut times = Vec::with_capacity(blocks);
-                for iteration in 0..blocks {
-                    if iteration % 32 == 0 {
-                        let gain = if iteration % 64 == 0 { 12.0 } else { -12.0 };
-                        control.publish(rate, [gain; 6]).unwrap();
-                    }
-                    for (offset, frame) in output.iter_mut().enumerate() {
-                        let t = (iteration * block + offset) as f64 / rate as f64;
-                        *frame = [
-                            0.01 * (std::f64::consts::TAU * 60.0 * t).sin() as f32,
-                            0.01 * (std::f64::consts::TAU * 6000.0 * t).sin() as f32,
-                        ];
-                    }
-                    let started = std::time::Instant::now();
-                    runtime.begin_block(&control);
-                    for frame in &mut output {
-                        runtime.process(std::hint::black_box(frame));
-                    }
-                    runtime.finish_block(&control);
-                    times.push(started.elapsed().as_nanos() as u64);
-                }
-                times.sort_unstable();
-                let deadline = block as f64 * 1e9 / rate as f64;
-                let over = times
-                    .iter()
-                    .filter(|value| **value as f64 > deadline)
-                    .count();
-                println!(
-                    "DSP_PROBE {}",
-                    serde_json::json!({
-                        "rate":rate,"channels":2,"blockFrames":block,"blocks":blocks,
-                        "p99Ns":times[times.len()*99/100],"maxNs":times.last(),
-                        "deadlineNs":deadline,"overDeadline":over,
-                        "historyBytes":runtime.history.len()*4,
-                        "syntheticAudioSeconds":30,"realDeviceVerified":false
-                    })
-                );
-            }
-        }
-        let c = 0.98f32;
-        let onset = c + (1.0 - c) / c;
-        let limiter_samples =
-            [0.0f32, 0.5, 0.98, 1.0, 1.001, 1.1, 2.0].map(|x| [x, soft_limit(x, c)]);
-        println!(
-            "DSP_BASELINE {}",
-            serde_json::json!({
-                "hardClipInputAmplitude":onset,
-                "correlatedCrossfadePeakDb":20.0f64*(0.88*2.0f64.sqrt()).log10(),
-                "limiterSamples":limiter_samples
-            })
-        );
-    }
-
-    #[test]
-    fn eq_pcm_matches_original_filter_chain_across_parameter_switches() {
-        for rate in [8_000, 44_100, 48_000, 192_000] {
-            for gains in [[0.0; 6], [2.0, 0.0, -3.0, 0.0, 4.0, 0.0], [0.0; 6]] {
-                let mut bank = EqBank::new(rate, gains, 2);
-                let mut reference = bank.states.clone();
-                for frame in 0..4096 {
-                    for (ch, channel_reference) in reference.iter_mut().enumerate() {
-                        let sample = match frame % 31 {
-                            0 => -0.0,
-                            1 => f32::from_bits(1),
-                            _ => (frame as f32 * (0.11 + ch as f32 * 0.003)).sin(),
-                        };
-                        let mut expected = sample as f64;
-                        for band in channel_reference {
-                            expected = band.process(expected);
-                        }
-                        assert_eq!(
-                            bank.process_frame(ch, sample).to_bits(),
-                            (expected as f32).to_bits()
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn neutral_eq_preserves_nonfinite_filter_history_semantics() {
-        for invalid in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
-            let mut bank = EqBank::new(48_000, [0.0; 6], 1);
-            let mut reference = bank.states.clone();
-            for sample in [0.5, -0.5, invalid, 0.25, 0.0] {
-                let mut expected = sample as f64;
-                for band in &mut reference[0] {
-                    expected = band.process(expected);
-                }
-                let actual = bank.process_frame(0, sample);
-                assert!(
-                    actual.to_bits() == (expected as f32).to_bits()
-                        || actual.is_nan() && expected.is_nan()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn peaking_filter_zero_gain_is_identity() {
-        let mut q = BiQuad::peaking(1000.0, 0.0, 1.2, 48_000);
-        // 增益 0 时 b0≈1、b1≈-2cos、a1≈-2cos、其余≈0 → 直通（系数误差 < 1e-9）
-        let out = q.process(0.5);
-        assert!((out - 0.5).abs() < 1e-6, "identity violated: {out}");
-    }
-
-    #[test]
-    fn peaking_filter_boosts_band_center() {
-        // +12dB @1kHz：以 1kHz 正弦（数值上直接喂常数不合适，喂极低频近似直流，
-        // 低频段增益应接近 1）。这里直接验证系数能量：中心频率处幅度比 > 1。
-        let q = BiQuad::peaking(1000.0, 12.0, 1.2, 48_000);
-        // 中心频率增益 |b0+b1 z+b2 z²|/|1+a1 z+a2 z²| 在 z=e^{-jw0} 处 ≈ 10^(12/20)
-        // 简化：直接断言 b0 > a0 归一化后的 1（有增益）
-        assert!(q.b0 > 1.0);
-    }
-
-    #[test]
-    fn limiter_is_transparent_below_ceiling_and_caps_above() {
-        for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(soft_limit(nonfinite, 0.98), 0.0);
-        }
-        assert_eq!(soft_limit(0.5, 0.98), 0.5);
-        assert_eq!(soft_limit(-0.5, 0.98), -0.5);
-        let loud = soft_limit(1.5, 0.98);
-        assert!(
-            loud > 0.98 && loud <= 1.0,
-            "soft clip must stay bounded: {loud}"
-        );
-        let neg = soft_limit(-1.5, 0.98);
-        assert!((-1.0..=-0.98).contains(&neg));
-        assert_eq!(soft_limit(2.5, 0.98), 1.0);
-    }
-
-    #[test]
-    fn eq_bank_matches_by_rate_gains_channels() {
-        let bank = EqBank::new(48_000, [0.0; 6], 2);
-        assert!(bank.matches(48_000, &[0.0; 6], 2));
-        assert!(!bank.matches(44_100, &[0.0; 6], 2));
-        assert!(!bank.matches(48_000, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2));
-        assert!(!bank.matches(48_000, &[0.0; 6], 1));
-    }
-}
+mod parametric_tests;
+#[cfg(test)]
+mod tests;

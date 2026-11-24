@@ -1,0 +1,496 @@
+[
+  {
+    "log": "output/audio-quality/resume-audio-msrv-closeout.log",
+    "sha256": "eb30e3d3836f6b08f6ab08b2b15e742b92a04aecdefd23c40b04de2049a22dca",
+    "command": {
+      "executable": "cargo",
+      "args": [
+        "+1.88.0",
+        "test",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "vmusic-audio"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Final audio sources: unit, resampling and callback allocation checks; six manual probes ignored by the ordinary suite.",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.84s",
+      "test result: ok. 249 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 13.96s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-core-store-hertz-msrv.log",
+    "sha256": "f23f00bb420ab698b40ac29253d2beeff3419a98f98bdfd3105a941aa0901524",
+    "command": {
+      "executable": "cargo.exe",
+      "args": [
+        "+1.88.0",
+        "test",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "vmusic-core",
+        "-p",
+        "vmusic-store",
+        "-p",
+        "hertz-studio",
+        "--lib"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Core54/store69/Hertz974 against final production sources; subsequent change only adjusts an isolated cfg(test) diagnostic rate.",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 54s",
+      "test result: ok. 974 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 20.49s",
+      "test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.69s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-audio-null-msrv.log",
+    "sha256": "eb5447b322cdde0eccaeb6436bbfa83a357eb7922ea810b3811e7370e2f8d326",
+    "command": {
+      "executable": "cargo.exe",
+      "args": [
+        "+1.88.0",
+        "test",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "vmusic-audio",
+        "--no-default-features"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Null backend31; no physical audio output.",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.45s",
+      "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "warnings": [
+      "warning: struct `CallbackDeadline` is never constructed",
+      "warning: methods `callback_deadline` and `callback_expired` are never used",
+      "warning: `vmusic-audio` (lib) generated 2 warnings"
+    ]
+  },
+  {
+    "log": "output/audio-quality/resume-embedded-assets-msrv.log",
+    "sha256": "62483759ddddcc96df8fa5f92d15b0d403a1d89abe05a9fd6b2ae3065f874683",
+    "command": {
+      "executable": "cargo.exe",
+      "args": [
+        "+1.88.0",
+        "test",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "hertz-studio",
+        "--bin",
+        "hertz-studio",
+        "registered_ui_assets_are_served_with_their_own_content"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Registered production UI assets; 1 test.",
+    "results": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 59.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.50s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-hertz-full-msrv.log",
+    "sha256": "690873f2dba010f02223ca785cc439bd8cb460f2f4c9f183c0b9f29d25f78294",
+    "command": {
+      "executable": "cargo.exe",
+      "args": [
+        "+1.88.0",
+        "check",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "hertz-studio",
+        "--all-targets",
+        "--features",
+        "full"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Hertz Full all targets on Rust1.88.",
+    "results": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.09s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-dbx-standard-msrv.log",
+    "sha256": "41337736704b2528e1935b91c45e2b279bc605d9e5f51980c635b1a532851145",
+    "command": {
+      "executable": "cargo.exe",
+      "args": [
+        "+1.88.0",
+        "check",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "dbx-plugin-hertz",
+        "--all-targets"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "DBX Standard all targets on Rust1.88.",
+    "results": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.60s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-dbx-full-msrv.log",
+    "sha256": "9874e4ab41abdc73cb1e032e7504cef35244732d555a3fc5a8abbd9cfe1b0bf0",
+    "command": {
+      "executable": "cargo.exe",
+      "args": [
+        "+1.88.0",
+        "check",
+        "--locked",
+        "--target-dir",
+        "target/audio-quality-msrv",
+        "-p",
+        "dbx-plugin-hertz",
+        "--all-targets",
+        "--features",
+        "full"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "DBX Full all targets on Rust1.88.",
+    "results": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.12s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-browser-dsp-chrome.log",
+    "sha256": "f79990a24c210e9d0f33e1644c51fce0ad8710de809ac2135f0c1f16b92003b3",
+    "command": {
+      "executable": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "set \"NODE_PATH=C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules\"&& set \"PLAYWRIGHT_EXECUTABLE_PATH=C:/Program Files/Google/Chrome/Application/chrome.exe\"&& node scripts/check-dsp-settings-browser.js"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Production settings controls in real Chrome fixture:10 groups including capability recovery, keyboard,390px/200%.",
+    "results": [
+      "PASS valid submit blocks duplicate POST and preserves newer edits",
+      "PASS stale GET cannot overwrite a newer save",
+      "PASS initial GET failure retries and fills saved values before reporting readiness",
+      "PASS lost POST receipt reconciles with GET without resubmitting",
+      "PASS failed adoption remains visible; hidden page stops polling and resume refreshes",
+      "PASS native constraint validation and keyboard submit",
+      "PASS parameter editing and explicit conflict rebase preserve draft",
+      "PASS unavailable effects explain qualification, focus errors and preserve draft",
+      "PASS supported output refresh clears stale errors and heavy effects can be disabled",
+      "PASS 390px, 200% scaling and clean browser execution"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-browser-actions-chrome.log",
+    "sha256": "42a5bbb07b76ea38b3a65554a15c3c7605b9c2e35d9ba8212cf15c1ca1bfdceb",
+    "command": {
+      "executable": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "set \"NODE_PATH=C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules\"&& set \"PLAYWRIGHT_EXECUTABLE_PATH=C:/Program Files/Google/Chrome/Application/chrome.exe\"&& node scripts/check-audio-quality-actions-browser.js"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Output, analysis and managed correction actions in real Chrome fixture:9 groups; not full application journey.",
+    "results": [
+      "PASS output failure preserves draft and explicit retry succeeds",
+      "PASS complete compilation album includes every artist",
+      "PASS explicit measured adoption shows preparation truthfully",
+      "PASS managed correction import fills draft without auto-applying",
+      "PASS FIR curve validation, achieved error and draft-only adoption",
+      "PASS late FIR reply preserves newer correction draft",
+      "PASS explicit cancel prevents late draft adoption",
+      "PASS unsupported correction output preserves import and generation drafts",
+      "PASS narrow 200% controls and clean browser execution"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-release-stage-closeout.log",
+    "sha256": "0bcf37381f826d53423388334706d0b9e806efbf7ccf8d5a77436288d62500a6",
+    "command": {
+      "executable": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "-p",
+        "vmusic-audio",
+        "--release",
+        "--lib",
+        "quality_stage_cost_probe",
+        "--",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Qualified48k synthetic isolated stage diagnosis; not an acoustic or real-device test.",
+    "results": [
+      "    Finished `release` profile [optimized] target(s) in 28.61s",
+      "test render::continuity_tests::quality_stage_cost_probe ... STAGE_COST tone at 48000 Hz: 153 ns/frame",
+      "STAGE_COST fir at 48000 Hz: 57 ns/frame",
+      "STAGE_COST detector at 48000 Hz: 129 ns/frame",
+      "STAGE_COST limiter at 48000 Hz: 285 ns/frame",
+      "STAGE_COST terminal at 48000 Hz: 510 ns/frame",
+      "STAGE_COST eq_history at 48000 Hz: 30 ns/frame",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 254 filtered out; finished in 0.07s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-release-device-closeout.log",
+    "sha256": "343c13e7f6f2d320993b573f830525e33b59b3c32656ef426e015b1e30f3fdc2",
+    "command": {
+      "executable": "cargo",
+      "args": [
+        "build",
+        "--locked",
+        "-p",
+        "vmusic-audio",
+        "--release",
+        "--example",
+        "eq_output_probe"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Final unchanged production output example build; execution recorded separately.",
+    "results": [
+      "    Finished `release` profile [optimized] target(s) in 0.20s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-qualified-ten-minute-final.log",
+    "sha256": "5d002fe73327cbd5c4d43228d026d47b55668a0b50d6cff3e44e4946b8acc698",
+    "command": {
+      "executable": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "set \"HERTZ_AUDIO_PROBE_PACED=1\"&& set \"HERTZ_AUDIO_PROBE_CHANGES=1\"&& set \"HERTZ_AUDIO_PROBE_SECONDS=100\"&& cargo test --locked -p vmusic-audio --release --lib complete_quality_chain_probe -- --ignored --nocapture --test-threads=1"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Six100-second supported-scope combinations with continuous changes; P99 budget and deadline misses recorded.",
+    "results": [
+      "    Finished `release` profile [optimized] target(s) in 0.19s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 254 filtered out; finished in 600.51s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-exclusive-silent-closeout.log",
+    "sha256": "fbcb6969687c519b4b8e3f402a6c0c29fd51c98ba976a60cfe75649b31a2a98d",
+    "command": {
+      "executable": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "set \"HERTZ_PROBE_EXCLUSIVE=1\"&& cargo run --locked --release -p vmusic-audio --example eq_output_probe"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Realtek48k sharedf32 and exclusives16/s24 silent lifecycle; unsupported exclusivef32 preserves shared; ends shared.",
+    "results": [
+      "    Finished `release` profile [optimized] target(s) in 0.22s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-legacy-render-baseline.log",
+    "sha256": "96f7e8dbd562129d6fb63a97b67ef648909576f40e62186b09b357d11692cf9a",
+    "command": {
+      "executable": "cargo",
+      "args": [
+        "test",
+        "--locked",
+        "-p",
+        "vmusic-audio",
+        "--release",
+        "--lib",
+        "renderer_quality_probe",
+        "--",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "covered_scope": "Same-machine legacy fixedEQ synthetic baseline; unpaced, different parameter cadence, no MMCSS.",
+    "results": [
+      "    Finished `release` profile [optimized] target(s) in 0.20s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 254 filtered out; finished in 1.73s"
+    ],
+    "warnings": []
+  },
+  {
+    "log": "output/audio-quality/resume-rustfmt-closeout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "command": {
+      "executable": "rustfmt",
+      "args": [
+        "--edition",
+        "2021",
+        "--check",
+        "--config",
+        "skip_children=true",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/assets.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/audio_impulse.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/audio_loudness.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/audio_output.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/audio_quality.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/bootstrap.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/lib.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/measured_loudness.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/player_dsp.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/routes.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/rpc/library.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/rpc/mod.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/rpc/playback.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/scan.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/scan/selected.rs",
+        "D:/code/github/hertz-studio/crates/hertz-studio/src/state.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/examples/eq_output_probe.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/actor.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/cpal_backend.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/impulse.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/lib.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/local_output/mod.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/local_output/quantize.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/local_output/wasapi.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/loudness.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/continuity_tests.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/dsp.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/dsp/parametric_tests.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/dsp/preparation.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/dsp/tests.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/impulse.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/terminal.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/render/tone.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-audio/src/true_peak.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-core/src/audio_quality.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-core/src/audio.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-core/src/impulse.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-core/src/lib.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-core/src/model.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-core/src/output.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-store/src/audio_quality.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-store/src/backup.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-store/src/lib.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-store/src/loudness.rs",
+        "D:/code/github/hertz-studio/crates/vmusic-store/src/settings.rs"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "results": []
+  },
+  {
+    "log": "output/audio-quality/resume-adr-closeout.log",
+    "sha256": "593ddfb4656d93dabc5dc3350d9ba3a0c1219fa946fa24f3d18d7e355421fef4",
+    "command": {
+      "executable": "node",
+      "args": [
+        "scripts/check-adrs.js"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "results": [
+      "ADR 契约检查：430 项全部通过"
+    ]
+  },
+  {
+    "log": "output/audio-quality/resume-diff-closeout.log",
+    "sha256": "b66164605ad85ed23b66a5284cd372cf572f5b26286a28082dbe9859c26a7805",
+    "command": {
+      "executable": "git",
+      "args": [
+        "diff",
+        "--check"
+      ],
+      "cwd": "D:/code/github/hertz-studio"
+    },
+    "exit_code": 0,
+    "results": [
+      "warning: in the working copy of 'Cargo.lock', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/bootstrap.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/lib.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/player_dsp.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/routes.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/rpc/library.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/rpc/mod.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/rpc/playback.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/scan.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/scan/selected.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/hertz-studio/src/state.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/examples/eq_output_probe.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/src/actor.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/src/cpal_backend.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/src/lib.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/src/render.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/src/render/continuity_tests.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-audio/src/render/dsp.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-core/src/audio.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-core/src/lib.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-store/src/backup.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-store/src/lib.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'crates/vmusic-store/src/settings.rs', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'docs/adr/0003-background-work-budget.md', LF will be replaced by CRLF the next time Git touches it",
+      "warning: in the working copy of 'docs/audio-quality-enhancement-design.md', LF will be replaced by CRLF the next time Git touches it"
+    ]
+  }
+]

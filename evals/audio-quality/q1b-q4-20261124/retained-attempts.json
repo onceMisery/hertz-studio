@@ -1,0 +1,121 @@
+[
+  {
+    "log": "output\\audio-quality\\complete-chain-paced.log",
+    "sha256": "aa38d124ec25c656a3137a38c63b41838745664530873faed9d596d41fd71daa",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\complete-chain-simd-paced.log",
+    "sha256": "2608b2035bb81c3e4474c5ae36cd824b90fc2ae2b69e02b0a9401c06cb8b5d74",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\complete-chain-simd-unpaced.log",
+    "sha256": "a8700c631b765b6e150b4e09578da9c61c52be0aaaa287d53e33f189cfa390ce",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\complete-chain-simd-core4.err",
+    "sha256": "bb2bd681b50f8154a90561c3198329c1c5dbfbecbd77412eb19cd7cae3355d88",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\complete-chain-avx2-paced.log",
+    "sha256": "33dc846b726e1ff0d54d2bddcd288ba8f7dd75adcc5ac3ff5c591d9094744330",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\complete-chain-ten-minute-changes.log",
+    "sha256": "0fabb3ed2ac5e0e027caa78e0595cbd145faa4c06a98389c1223474c2ed9a97b",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\complete-chain-polyphase-ten-minute.log",
+    "sha256": "1b2ddf27762a584ed987933d5bc87907c4c1088e99a9d355c8e3220fafc7f504",
+    "status": "invalid_stale_binary_terminated"
+  },
+  {
+    "log": "output\\audio-quality\\audio-polyphase-build.log",
+    "sha256": "02d6c8399f36548f10b7063ca7ea13dd981fcf478cb321886aca1cc991843ef6",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\msrv-hertz-full-current.log",
+    "sha256": "e3ee94478a856ea656f281423ef61d763c312ff131587ff9573081625e8d1b9b",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\hertz-final-scoped-cancel.log",
+    "sha256": "a749fdfeed6fd23b6fb1bff76aefd894a49ce35dd1ad921d49d5760f7c54c0dd",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\hertz-cache-repaired-final.log",
+    "sha256": "cc03c5f868f6cef7abf6547c1a686a444df9c79b9597b36b4c703dc81e4e63d8",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output\\audio-quality\\hertz-final-verified.log",
+    "sha256": "b505e3e4207322c7386ca6574eefd536fcc47a59d374d9b041a13f32866a0da4",
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-audio-msrv.log",
+    "sha256": "0d8f4f27a678b124c7089d146b3b85ab31dfe93ff08b65a6a67a8dde7bf6a3b1",
+    "exit_code": 101,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-browser-dsp.log",
+    "sha256": "17ff92c415384a595b0575d40a46b84efa4d9c3f1ff703569af37e7778f5a23c",
+    "exit_code": 1,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-browser-actions.log",
+    "sha256": "738464cc1a3216aee519d4f3d46fb91c21f3ca2d3d14bfab17059e868d7eea4b",
+    "exit_code": 1,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-audio-msrv-verified.log",
+    "sha256": "f1d2d6f26c3f0ad04ae575ea00c7d48c138174169a3af48d5ba269ca33bb62bd",
+    "exit_code": 101,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-browser-dsp-verified.log",
+    "sha256": "da0f23ced470654bf701296c50da48432fbf1219c3afad915d49b0e027a24a9c",
+    "exit_code": 1,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-browser-actions-verified.log",
+    "sha256": "b3dd9e316407d81328cfb109dc606057e55a413392ab03de398e2381139dffce",
+    "exit_code": 1,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-audio-msrv-admission.log",
+    "sha256": "717e2f8264db031003d182d8ddf96a2107165d9a5ab5673bf7c387ce8a5298fc",
+    "exit_code": 101,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/resume-qualified-ten-minute.log",
+    "sha256": "aba976851b2070d9d327f6ae9d29fa1f4e3d4d097d76589f08aed3f6e004c17e",
+    "exit_code": 4294967295,
+    "status": "partial_stopped_to_repair_manual_stage_probe"
+  },
+  {
+    "log": "output/audio-quality/resume-stage-qualification-regression.log",
+    "sha256": "cbf3e7a90c880832d387155e912955e1d763c031af7814ee6fd157ef840b0e2d",
+    "exit_code": 101,
+    "status": "retained_failure_or_diagnosis"
+  },
+  {
+    "log": "output/audio-quality/complete-chain-polyphase-verified-ten-minute.log",
+    "sha256": "8e0842fa3639dc60e64b68faa4a9598e034303b7074e4103619b9cc42f7f27b5",
+    "status": "failed_full96000_p99_budget_before_scope_narrowing"
+  }
+]

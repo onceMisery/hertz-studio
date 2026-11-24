@@ -10150,8 +10150,10 @@ async function startApp() {
   }
 
   // 音效设置沿用同一服务端入口，由专用控制器管理草稿和采用反馈。
+  const outputSettings = window.HertzAudioOutputSettings.init({ transport, toast });
   const dspSettings = window.HertzDspSettings.init({ transport, toast });
-  window.__loadDspSettings = () => dspSettings && dspSettings.load();
+  window.HertzAudioAnalysisSettings.init({ transport, toast, refresh: () => dspSettings && dspSettings.load() });
+  window.__loadDspSettings = () => { if (dspSettings) dspSettings.load(); if (outputSettings) outputSettings.load(); };
 
   // 数据备份：导出下载 JSON；导入读文件后按幂等语义恢复。
   if (window.UiPreferences && window.UiPreferenceSettings) {

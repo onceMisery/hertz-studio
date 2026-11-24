@@ -242,6 +242,7 @@ pub async fn replay(state: &Arc<AppState>, body: &Value) -> RpcResult {
         if resume > 1000 {
             // seek 失败不致命：从头播也好过半途整个请求报错。
             state.audio.seek(resume).await.ok();
+            state.transport_committed().await;
         }
         state.post_commit_background();
     }
@@ -259,11 +260,7 @@ pub async fn devices(state: &Arc<AppState>) -> RpcResult {
 
 pub async fn select_device(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: SelectDeviceRequest = body_as(body)?;
-    state
-        .audio
-        .select_device(request.id)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
+    crate::audio_output::select_legacy(state, request.id).await?;
     Ok(Reply::ok(json!({ "ok": true })))
 }
 

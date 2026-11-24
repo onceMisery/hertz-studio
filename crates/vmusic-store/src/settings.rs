@@ -110,3 +110,30 @@ pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<Value>, StoreErr
         None => Ok(None),
     }
 }
+
+/// Replace one canonical settings object and retire its predecessor keys in one transaction.
+pub async fn replace_atomic(
+    pool: &SqlitePool,
+    key: &str,
+    value: &Value,
+    retired: &[&str],
+) -> Result<(), StoreError> {
+    let encoded =
+        serde_json::to_string(value).map_err(|e| StoreError::Serialization(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query("INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+        .bind(key).bind(encoded).bind(now_ms()).execute(&mut *tx).await.map_err(|e|StoreError::Database(e.to_string()))?;
+    for old in retired {
+        sqlx::query("DELETE FROM settings WHERE key=?1")
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))
+}

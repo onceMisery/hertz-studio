@@ -132,6 +132,9 @@ pub trait AudioBackend {
 
     /// Open a source and prepare playback in a paused state.
     fn load(&mut self, uri: &str) -> Result<MediaInfo, AudioError>;
+    fn load_with_gain(&mut self, uri: &str, _gain: f32) -> Result<MediaInfo, AudioError> {
+        self.load(uri)
+    }
 
     /// 直接打开一个媒体源（边下边播用）。默认不支持，真实后端按需实现。
     fn load_source(
@@ -142,6 +145,27 @@ pub trait AudioBackend {
         Err(AudioError::UnsupportedFormat(
             "该后端不支持流式媒体源".into(),
         ))
+    }
+
+    fn load_source_with_gain(
+        &mut self,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        _gain: f32,
+    ) -> Result<MediaInfo, AudioError> {
+        self.load_source(source, ext)
+    }
+
+    fn prepare_next_source(
+        &mut self,
+        _next: NextTrack,
+        _source: Box<dyn AudioSource>,
+        _ext: Option<String>,
+        _gain: f32,
+    ) -> Result<PrepareResult, AudioError> {
+        Ok(PrepareResult::Bypassed {
+            reason: "verified-source transitions unavailable".into(),
+        })
     }
 
     fn play(&mut self) -> Result<(), AudioError>;
@@ -160,6 +184,47 @@ pub trait AudioBackend {
         None
     }
 
+    fn validate_quality(
+        &self,
+        params: crate::audio_quality::QualityParams,
+    ) -> Result<(), AudioError> {
+        params.validate()
+    }
+
+    fn set_quality(
+        &mut self,
+        _params: crate::audio_quality::QualityParams,
+    ) -> Result<(), AudioError> {
+        Err(AudioError::Other("当前后端没有音频处理链".into()))
+    }
+
+    fn quality_status(&self) -> Option<crate::audio_quality::QualityStatus> {
+        None
+    }
+
+    fn prepare_impulse(
+        &mut self,
+        _kernel: crate::impulse::ImpulseKernel,
+    ) -> Result<(), AudioError> {
+        Err(AudioError::Other("当前后端不支持校正核".into()))
+    }
+
+    fn output_status(&self) -> Option<crate::output::OutputStatus> {
+        None
+    }
+
+    /// A failed persisted-output restoration must not permit a different device on Play.
+    fn invalidate_output(&mut self, _reason: String) {
+        let _ = self.pause();
+    }
+
+    fn configure_output(
+        &mut self,
+        _preferences: crate::output::OutputPreferences,
+    ) -> Result<(), AudioError> {
+        Err(AudioError::Other("当前后端不支持配置音频输出".into()))
+    }
+
     /// 可调交叉淡化时长（毫秒）。默认忽略。
     fn set_crossfade(&mut self, _ms: u64) -> Result<(), AudioError> {
         Ok(())
@@ -173,6 +238,12 @@ pub trait AudioBackend {
     }
 
     fn clear_next(&mut self) {}
+    /// Metadata changes retire only media which has emitted no audio. False
+    /// keeps an audible overlap/completed promotion under its existing owner.
+    fn clear_unstarted_next(&mut self) -> bool {
+        self.clear_next();
+        true
+    }
 
     fn take_next_event(&mut self) -> Option<NextEvent> {
         None

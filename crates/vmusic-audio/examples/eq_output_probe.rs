@@ -109,12 +109,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     backend.pause()?;
     wait(&mut backend, |b| !b.eq_status().unwrap().active)?;
+    let output = backend.output_status();
+    let mut quality = vmusic_core::audio_quality::QualityParams::default();
+    quality.configuration_revision = 1;
+    quality.eq.enabled = true;
+    quality.eq.bands[0].frequency_hz = 80.0;
+    quality.eq.bands[0].q = 3.0;
+    quality.eq.bands[0].gain_db = 3.0;
+    quality.headroom_mode = vmusic_core::audio_quality::HeadroomMode::Auto;
+    quality.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    quality.tone.crossfeed = true;
+    quality.tone.saturation = true;
+    backend.set_quality(quality)?;
+    backend.seek(1000)?;
+    backend.play()?;
+    wait(&mut backend, |b| {
+        b.quality_status()
+            .is_some_and(|s| s.applied == Some(quality))
+    })?;
+    backend.set_volume(0.0)?;
+    backend.pause()?;
+    wait(&mut backend, |b| !b.eq_status().unwrap().active)?;
+    let processing = backend.quality_status();
+    let mut exclusive = Vec::new();
+    if std::env::var_os("HERTZ_PROBE_EXCLUSIVE").is_some() {
+        use vmusic_core::output::{OutputMode, OutputPreferences, OutputSampleFormat};
+        for format in [
+            OutputSampleFormat::F32,
+            OutputSampleFormat::S16,
+            OutputSampleFormat::S24,
+        ] {
+            backend.stop()?;
+            wait(&mut backend, |b| !b.eq_status().unwrap().active)?;
+            match backend.configure_output(OutputPreferences {mode:OutputMode::Exclusive,sample_format:format,..Default::default()}) {
+                Ok(()) => {
+                    backend.load_source(Box::new(silence()),Some("wav".into()))?;
+                    backend.play()?;
+                    wait(&mut backend, |b| b.position_ms()>100)?;
+                    exclusive.push(serde_json::json!({"requested_format":format,"opened":true,"output":backend.output_status()}));
+                    backend.stop()?;
+                    wait(&mut backend, |b| !b.eq_status().unwrap().active)?;
+                }
+                Err(error) => exclusive.push(serde_json::json!({"requested_format":format,"opened":false,"error":error.to_string(),"output":backend.output_status()})),
+            }
+        }
+        backend.configure_output(OutputPreferences::default())?;
+    }
     println!(
         "{}",
         serde_json::json!({"silentActualOutputLifecycle":true,"audibleQualityVerified":false,
-        "sampleRate":first.processing_rate,"firstGeneration":first.render_generation,
+        "output":output,"quality":processing,"exclusive_silent_attempts":exclusive,"sampleRate":first.processing_rate,"firstGeneration":first.render_generation,
         "finalGeneration":after_switch.render_generation,
-        "checks":["initial deferred","first PCM acknowledgement","EQ transition","pause deferred","resume","seek reset","default device reselect"]})
+        "checks":["initial deferred","first PCM acknowledgement","EQ transition","pause deferred","resume","seek reset","default device reselect","parametric EQ and headroom","true peak/saturation delay adoption after seek","hard mute"]})
     );
     Ok(())
 }

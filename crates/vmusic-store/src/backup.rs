@@ -463,6 +463,13 @@ pub struct RestoreReport {
 
 /// 恢复：校验版本与必需字段，单个事务写入，任何失败整体回滚。
 pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreReport, StoreError> {
+    let imported_quality = if file.settings.keys().any(|k| {
+        k == crate::audio_quality::KEY || crate::audio_quality::LEGACY_KEYS.contains(&k.as_str())
+    }) {
+        Some(crate::audio_quality::from_settings(&file.settings)?.0)
+    } else {
+        None
+    };
     crate::stage_presets::validate_backup(&file.settings)
         .map_err(|e| StoreError::Serialization(e.to_string()))?;
     if !matches!(file.version, BACKUP_VERSION | LYRICS_BACKUP_VERSION) {
@@ -691,7 +698,56 @@ pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreRepo
         }
     }
 
+    if let Some(mut config) = imported_quality.clone() {
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key=?1")
+                .bind(crate::audio_quality::KEY)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+        let previous = match existing {
+            Some(raw) => {
+                let previous: vmusic_core::audio_quality::QualityConfig =
+                    serde_json::from_str(&raw)
+                        .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                previous
+                    .validate()
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                previous
+                    .revision
+                    .parse::<u64>()
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?
+            }
+            None => 0,
+        };
+        config.revision = previous
+            .max(
+                config
+                    .revision
+                    .parse::<u64>()
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?,
+            )
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Serialization("音质修订已耗尽".into()))?
+            .to_string();
+        sqlx::query("INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+            .bind(crate::audio_quality::KEY).bind(serde_json::to_string(&config).map_err(|e|StoreError::Serialization(e.to_string()))?).bind(now_ms()).execute(&mut *tx).await.map_err(|e|StoreError::Database(e.to_string()))?;
+        for key in crate::audio_quality::LEGACY_KEYS {
+            sqlx::query("DELETE FROM settings WHERE key=?1")
+                .bind(key)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+        }
+        report.settings_applied += 1;
+    }
     for (key, value) in &file.settings {
+        if imported_quality.is_some()
+            && (key == crate::audio_quality::KEY
+                || crate::audio_quality::LEGACY_KEYS.contains(&key.as_str()))
+        {
+            continue;
+        }
         if crate::stage_presets::managed(key) {
             continue;
         }
@@ -1225,6 +1281,37 @@ mod tests {
     /// 一度漏了这一列，于是任何带 settings 的备份恢复都会撞约束、整单回滚——而
     /// 真实备份几乎总是带 settings（音量、播放模式、主题…），等于「备份导入」
     /// 这个功能一直是坏的。上面那个幂等测试没写任何 settings，所以从没覆盖到。
+    #[tokio::test]
+    async fn old_quality_backup_replaces_v2_without_duplicate_keys() {
+        let source = pool().await;
+        crate::settings::set(&source, "dsp_eq", &serde_json::json!([5, 0, 0, 0, 0, 0]))
+            .await
+            .unwrap();
+        let snapshot = export(&source).await.unwrap();
+        let file = sample(&snapshot);
+        let target = pool().await;
+        let mut config = crate::audio_quality::from_settings(&Default::default())
+            .unwrap()
+            .0;
+        config.revision = "8".into();
+        crate::settings::set(
+            &target,
+            crate::audio_quality::KEY,
+            &serde_json::to_value(config).unwrap(),
+        )
+        .await
+        .unwrap();
+        restore(&target, &file).await.unwrap();
+        let settings = crate::settings::get_all(&target).await.unwrap();
+        let (restored, origin) = crate::audio_quality::from_settings(&settings).unwrap();
+        assert_eq!(origin, "v2");
+        assert_eq!(restored.revision, "9");
+        assert_eq!(restored.eq.bands[0].gain_db, 5.0);
+        for key in crate::audio_quality::LEGACY_KEYS {
+            assert!(!settings.contains_key(key));
+        }
+    }
+
     #[tokio::test]
     async fn restore_applies_settings_from_the_backup() {
         let db = pool().await;

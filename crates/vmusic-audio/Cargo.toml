@@ -12,7 +12,7 @@ description = "Audio backends and the command actor that serialises playback"
 default = ["playback"]
 # Turning this off leaves only the null backend, which needs no sound card and
 # is what CI and the headless integration tests run against.
-playback = ["cpal", "symphonia", "rustfft", "num-complex", "rubato", "dep:windows"]
+playback = ["cpal", "symphonia", "rustfft", "num-complex", "rubato", "dep:windows", "dep:ebur128"]
 
 [dependencies]
 vmusic-core = { workspace = true }
@@ -22,6 +22,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 arc-swap = "1"
+ebur128 = { version = "=0.1.10", optional = true }
 
 cpal = { workspace = true, optional = true }
 symphonia = { workspace = true, optional = true }

@@ -102,6 +102,8 @@ pub async fn batch_edit_tracks(state: &Arc<AppState>, body: &Value) -> RpcResult
         artist: request.artist,
         album: request.album,
     };
+    let _commit = state.play_commit.lock().await;
+    crate::measured_loudness::invalidate_pending_locked(state).await;
     let changed = vmusic_store::track_edits::apply_batch(&state.db, &request.track_ids, &input)
         .await
         .map_err(store_err)?;
@@ -117,6 +119,8 @@ pub async fn get_track_edit(state: &Arc<AppState>, id: &str) -> RpcResult {
 
 /// 重置编辑：删掉覆盖行，回到文件标签。
 pub async fn clear_track_edit(state: &Arc<AppState>, id: &str) -> RpcResult {
+    let _commit = state.play_commit.lock().await;
+    crate::measured_loudness::invalidate_pending_locked(state).await;
     vmusic_store::track_edits::remove(&state.db, id)
         .await
         .map_err(store_err)?;
@@ -144,9 +148,12 @@ pub async fn batch_delete_tracks(state: &Arc<AppState>, body: &Value) -> RpcResu
     {
         return Err(bad_request(format!("invalid cover id: {bad}")));
     }
+    let commit = state.play_commit.lock().await;
+    crate::measured_loudness::invalidate_pending_locked(state).await;
     let deleted = vmusic_store::delete_tracks(&state.db, &request.track_ids)
         .await
         .map_err(store_err)?;
+    drop(commit);
     let dir = state.cover_dir();
     let ids = request.track_ids;
     tokio::task::spawn_blocking(move || {

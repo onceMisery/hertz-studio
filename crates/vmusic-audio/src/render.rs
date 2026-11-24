@@ -46,6 +46,9 @@ use vmusic_core::{
 };
 
 mod dsp;
+mod impulse;
+mod terminal;
+mod tone;
 use dsp::{soft_limit, DspControl, DspRuntime};
 mod output_gate;
 use output_gate::OutputGate;
@@ -347,6 +350,7 @@ struct PendingLoad {
     info: MediaInfo,
     /// 换装完成后是否进入播放态（暂停/停止意图可能在淡出期间到达）。
     play_after: bool,
+    track_gain_db: Option<f32>,
 }
 
 struct SpectrumWorkspace {
@@ -403,6 +407,9 @@ pub struct RenderCore {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RenderReport {
     pub source_frames: usize,
+    /// Prefix before the exact transport hard-zero boundary; terminal dither stops here.
+    pub audible_frames: usize,
+    pub leading_silence_frames: usize,
     pub transition_frame: Option<usize>,
     /// First boundary at which the requested EQ transition has completed.
     pub eq_applied_frame: Option<usize>,
@@ -433,6 +440,7 @@ pub(crate) struct RenderOutput {
     shared: Arc<Shared>,
     dsp: DspRuntime,
     id: u64,
+    leading_silence: usize,
 }
 
 impl RenderOutput {
@@ -440,15 +448,26 @@ impl RenderOutput {
         self.id
     }
 
-    pub(crate) fn render(&mut self, data: &mut [f32], channels: u16) {
+    pub(crate) fn leading_silence_samples(&self) -> usize {
+        self.leading_silence
+    }
+
+    pub(crate) fn render(&mut self, data: &mut [f32], channels: u16) -> usize {
+        self.leading_silence = 0;
         let Some(claim) = self.shared.output_gate.enter(self.id) else {
             data.fill(0.0);
-            return;
+            return 0;
         };
-        write_samples(data, &self.shared, channels as usize, &mut self.dsp);
+        let report = write_samples(data, &self.shared, channels as usize, &mut self.dsp);
+        self.leading_silence = report.leading_silence_frames * channels as usize;
         if !claim.is_current() {
             data.fill(0.0);
+            return 0;
         }
+        if f32::from_bits(self.shared.volume.load(Ordering::Relaxed)) == 0.0 {
+            return 0;
+        }
+        report.audible_frames * channels as usize
     }
 }
 
@@ -795,6 +814,12 @@ impl RenderCore {
     /// observable until the deck is rewound or replaced. Track transitions reset
     /// this clock to the incoming deck's position.
     pub fn position_frames(&self) -> u64 {
+        if self.shared.dsp.terminal_epoch.load(Ordering::Acquire)
+            == self.shared.dsp.reset_epoch.load(Ordering::Acquire)
+            && self.shared.dsp.terminal_latency.load(Ordering::Relaxed) > 0
+        {
+            return self.shared.dsp.terminal_position.load(Ordering::Relaxed);
+        }
         self.shared
             .current_deck()
             .frames_played
@@ -821,18 +846,27 @@ impl RenderCore {
             dsp: dsp
                 .unwrap_or_else(|| DspRuntime::new(format.sample_rate, format.channels as usize)),
             id,
+            leading_silence: 0,
         })
     }
 
     pub(crate) fn activate_output(&self, id: u64) -> Result<u64, AudioError> {
         let previous = self.shared.output_gate.activate(id)?;
-        self.shared.dsp.applied_revision.store(0, Ordering::Release);
+        self.shared.dsp.invalidate_adoption();
         Ok(previous)
+    }
+
+    pub(crate) fn clear_output_error(&mut self) {
+        self.transport_error = None;
     }
 
     pub(crate) fn output_failed(&mut self, message: String) {
         self.shared.playing.store(false, Ordering::Release);
-        self.shared.dsp.applied_revision.store(0, Ordering::Release);
+        if let Some(pending) = &mut self.pending_load {
+            pending.play_after = false;
+        }
+        self.pending_pause = false;
+        self.shared.dsp.invalidate_adoption();
         self.transport_error = Some(AudioError::BackendInit(message));
     }
 
@@ -843,8 +877,57 @@ impl RenderCore {
         output
     }
 
+    fn validate_quality_context(
+        &self,
+        params: vmusic_core::audio_quality::QualityParams,
+        format: RenderFormat,
+    ) -> Result<(), AudioError> {
+        params.validate_processing_rate(format.sample_rate)?;
+        if params.tone.crossfeed && format.channels != 2 {
+            return Err(AudioError::Other("交叉馈送仅适用于双声道输出".into()));
+        }
+        if self.native_budget.is_some()
+            && params.tone != vmusic_core::audio_quality::ToneParams::default()
+        {
+            return Err(AudioError::Other("一起听暂不支持私人耳机与音色处理".into()));
+        }
+        if !params.legacy_processing() && format.channels > 2 {
+            return Err(AudioError::Other(
+                "参数 EQ 当前只支持单/双声道 44.1/48/96 kHz 的处理格式".into(),
+            ));
+        }
+        if self.native_budget.is_some()
+            && (params
+                .eq
+                .bands
+                .iter()
+                .zip(EQ_BANDS)
+                .any(|(b, f)| b.frequency_hz != f || b.q != 1.2)
+                || params.headroom_mode != vmusic_core::audio_quality::HeadroomMode::Off)
+        {
+            return Err(AudioError::Other("当前房间仅支持既有六段共同 EQ".into()));
+        }
+        if params.limiter == vmusic_core::audio_quality::LimiterMode::TruePeak
+            && self.native_budget.is_some()
+        {
+            return Err(AudioError::Other(
+                "真峰值保护当前仅支持本机 44.1/48/96 kHz 单/双声道".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_format_change(&self, format: RenderFormat) -> Result<(), AudioError> {
         format.validate()?;
+        if self.shared.dsp.terminal_epoch.load(Ordering::Acquire)
+            == self.shared.dsp.reset_epoch.load(Ordering::Acquire)
+            && (self.shared.dsp.terminal_queued.load(Ordering::Acquire) > 0
+                || self.shared.dsp.terminal_inflight.load(Ordering::Acquire))
+        {
+            return Err(AudioError::DeviceUnavailable(
+                "音效缓冲仍有未呈现的媒体帧，请停止播放后切换输出；当前输出保持".into(),
+            ));
+        }
         if self.native_budget.is_some() {
             native::validate_output_format(format)?;
             if format != self.format() {
@@ -852,6 +935,12 @@ impl RenderCore {
                     "native_format_requires_new_renderer".into(),
                 ));
             }
+        }
+        if let Some(status) = self.quality_status() {
+            self.validate_quality_context(status.requested, format)?;
+            self.shared
+                .dsp
+                .validate_quality(format.sample_rate, status.requested)?;
         }
         let has_prepared_audio =
             self.decoder.is_some() || self.next_decoder.is_some() || self.pending_load.is_some();
@@ -1080,7 +1169,14 @@ impl RenderCore {
             opened,
             info,
             play_after,
+            track_gain_db,
         } = pending;
+        if let Some(gain) = track_gain_db {
+            self.shared
+                .current_deck()
+                .gain_db
+                .store(gain.to_bits(), Ordering::Relaxed);
+        }
         let _ = info;
         // 线程创建失败绝不能 panic（这里在 actor 线程上）：置解码错误位，
         // 让上层经 DecodeError 收口而不是整个 actor 挂掉。
@@ -1144,6 +1240,7 @@ impl RenderCore {
                 opened,
                 info: info.clone(),
                 play_after,
+                track_gain_db: None,
             });
             return Ok(info);
         }
@@ -1178,7 +1275,28 @@ impl RenderCore {
 
     /// actor 线程每 20ms 调一次：推进淡出后的延迟动作与自然尾部淡出。
     pub fn maintain(&mut self) {
-        let fading = self.shared.fade_active();
+        let source_empty = self
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .is_ok_and(|samples| samples.is_empty());
+        let non_eof_stall = source_empty && !self.shared.current_deck().eof.load(Ordering::Acquire);
+        if non_eof_stall
+            && !self.shared.fade_active()
+            && (self.pending_stop || self.pending_load.is_some())
+        {
+            // These are discontinuities: retire obsolete delay without waiting
+            // for a stalled decoder to provide more future lookahead.
+            self.shared.dsp.reset();
+        }
+        let terminal_audible = self.shared.dsp.terminal_epoch.load(Ordering::Acquire)
+            == self.shared.dsp.reset_epoch.load(Ordering::Acquire)
+            && self.shared.dsp.terminal_audible.load(Ordering::Relaxed) > 0;
+        let fading = self.shared.fade_active()
+            || (((terminal_audible && !(non_eof_stall && self.pending_pause))
+                || self.shared.dsp.terminal_inflight.load(Ordering::Acquire))
+                && (self.pending_pause || self.pending_stop || self.pending_load.is_some()));
 
         if self.pending_pause && !fading {
             self.shared.playing.store(false, Ordering::Relaxed);
@@ -1245,6 +1363,13 @@ fn overlap_gains(frame: u64, frames: u64) -> (f32, f32) {
 
 /// Concatenate or mix before EQ and the final output limiter. A promotion is
 /// recorded after the last outgoing frame, never on the actor's timer.
+#[derive(Default)]
+struct RenderFacts {
+    start: u64,
+    transition_position: u64,
+    exhausted: bool,
+}
+
 fn render_decks(
     data: &mut [f32],
     shared: &Shared,
@@ -1252,6 +1377,7 @@ fn render_decks(
     stop_at_transition: bool,
     dsp: &mut DspRuntime,
     eq_applied_frame: &mut Option<usize>,
+    facts: &mut RenderFacts,
 ) -> (usize, bool, Option<usize>) {
     let Ok(mut prepared) = shared.next.try_lock() else {
         return (0, true, None);
@@ -1269,6 +1395,23 @@ fn render_decks(
     let Ok(mut current) = shared.deck.try_lock() else {
         return (0, true, None);
     };
+    facts.start = current.frames_played.load(Ordering::Relaxed);
+    if dsp.terminal.latency() > 0 {
+        dsp.terminal.set_origin(facts.start);
+        shared
+            .dsp
+            .terminal_position
+            .store(dsp.terminal.position, Ordering::Relaxed);
+        shared
+            .dsp
+            .terminal_latency
+            .store(dsp.terminal.latency(), Ordering::Relaxed);
+        shared.dsp.terminal_epoch.store(
+            shared.dsp.reset_epoch.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
+
     let mut copied = 0;
     let mut transition_frame = None;
     while copied + channels <= data.len() {
@@ -1301,6 +1444,7 @@ fn render_decks(
                 .frames_played
                 .fetch_add((count / channels) as u64, Ordering::Relaxed);
             copied += count;
+            facts.exhausted = eof && outgoing.is_empty();
             break;
         };
         let Ok(mut incoming) = next.deck.samples.try_lock() else {
@@ -1397,6 +1541,15 @@ fn render_decks(
             transition_frame = Some(copied / channels);
             let next = prepared.take().unwrap();
             let retired = std::mem::replace(&mut *current, next.deck);
+            facts.transition_position = current.frames_played.load(Ordering::Relaxed);
+            if dsp.terminal.latency() > 0 {
+                dsp.terminal.transition_pending = true;
+                shared
+                    .dsp
+                    .terminal_transition
+                    .store(true, Ordering::Release);
+            }
+
             **notification.as_mut().unwrap() = Some(RenderEvent::Transitioned {
                 request: next.request,
                 info: next.info,
@@ -1509,6 +1662,19 @@ fn write_samples_mode(
     }
     let mut eq_applied_frame = (dsp.applied_revision() != previous_eq).then_some(0);
     let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
+    struct TerminalFlight<'a>(&'a AtomicBool);
+    impl Drop for TerminalFlight<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _flight = if dsp.terminal.active() {
+        shared.dsp.terminal_inflight.store(true, Ordering::Release);
+        Some(TerminalFlight(&shared.dsp.terminal_inflight))
+    } else {
+        None
+    };
+    let mut facts = RenderFacts::default();
     let (copied, contended, transition_frame) = render_decks(
         data,
         shared,
@@ -1516,7 +1682,10 @@ fn write_samples_mode(
         stop_at_transition,
         dsp,
         &mut eq_applied_frame,
+        &mut facts,
     );
+    #[cfg(test)]
+    continuity_tests::after_source_consumption();
     let data = if stop_at_transition && transition_frame.is_some() {
         let (used, tail) = data.split_at_mut(copied);
         tail.fill(0.0);
@@ -1543,23 +1712,88 @@ fn write_samples_mode(
     let fade_to = f32::from_bits(shared.fade_to.load(Ordering::Relaxed));
     let mut gain = f32::from_bits(shared.fade_gain.load(Ordering::Relaxed));
     let frames = copied / channels.max(1);
-    for f in 0..frames {
-        if fade_total > 0 {
-            fade_done += 1;
-            gain = Shared::ramp_value(fade_from, fade_to, fade_total, fade_done);
-            if fade_done >= fade_total {
-                fade_total = 0;
-                gain = fade_to;
+    let mut sample_peak = 0.0f32;
+    let mut overloads = 0u64;
+    let mut audible_frames = 0usize;
+    let mut first_real = None;
+    let mut terminal_work = false;
+    let terminal_active = dsp.terminal.active();
+    dsp.terminal.set_origin(facts.start);
+    for f in 0..data.len() / channels {
+        if f < frames {
+            if fade_total > 0 {
+                fade_done += 1;
+                gain = Shared::ramp_value(fade_from, fade_to, fade_total, fade_done);
+                if fade_done >= fade_total {
+                    fade_total = 0;
+                    gain = fade_to;
+                }
             }
-        }
-        for c in 0..channels {
-            let idx = f * channels + c;
-            let mut sample = data[idx];
-            sample = sample * volume * gain;
-            data[idx] = soft_limit(sample, 0.98);
+            let audible = gain != 0.0 && volume != 0.0;
+            let mut input = [0.0; 32];
+            input[..channels].copy_from_slice(&data[f * channels..(f + 1) * channels]);
+            for sample in &input[..channels] {
+                sample_peak = sample_peak.max((*sample * gain * volume).abs());
+                overloads += u64::from((*sample * gain * volume).abs() > 1.0);
+            }
+            if terminal_active {
+                let position = match transition_frame {
+                    Some(t) if f + 1 >= t => facts.transition_position + (f + 1 - t) as u64,
+                    _ => facts.start + f as u64 + 1,
+                };
+                let boundary =
+                    transition_frame.is_some_and(|t| if t == 0 { f == 0 } else { f + 1 == t });
+                let tag = dsp.terminal.push(
+                    &input[..channels],
+                    &mut data[f * channels..(f + 1) * channels],
+                    terminal::FrameTag {
+                        position,
+                        transition: boundary,
+                        audible,
+                        volume,
+                        fade: gain,
+                    },
+                );
+                terminal_work = true;
+                if let Some(tag) = tag {
+                    first_real.get_or_insert(f);
+                    if tag.audible {
+                        audible_frames = f + 1;
+                    }
+                }
+            } else {
+                first_real.get_or_insert(f);
+                if audible {
+                    audible_frames = f + 1;
+                }
+                for ch in 0..channels {
+                    data[f * channels + ch] = soft_limit(input[ch] * volume * gain, 0.98);
+                }
+            }
+        } else if terminal_active && facts.exhausted && !contended {
+            terminal_work = true;
+            if let Some(tag) = dsp
+                .terminal
+                .finish_frame(&mut data[f * channels..(f + 1) * channels])
+            {
+                first_real.get_or_insert(f);
+                if tag.audible {
+                    audible_frames = f + 1;
+                }
+            }
+        } else {
+            data[f * channels..(f + 1) * channels].fill(0.0);
         }
     }
-    if frames > 0 {
+    if terminal_active && facts.exhausted && dsp.terminal.queued() == 0 {
+        dsp.terminal.finish_meter();
+        terminal_work = true;
+    }
+    let complete_samples = (data.len() / channels) * channels;
+    data[complete_samples..].fill(0.0);
+    let leading_silence_frames = first_real.unwrap_or(data.len() / channels);
+    if frames > 0 || terminal_work {
+        shared.dsp.observe(sample_peak, overloads);
         dsp.finish_block(&shared.dsp);
     }
     // 缓冲已干而斜坡没走完：尾部淡出按「剩余帧数」武装，但自然 EOF 后缓冲
@@ -1576,10 +1810,6 @@ fn write_samples_mode(
     shared.fade_done.store(fade_done, Ordering::Relaxed);
     shared.fade_frames.store(fade_total, Ordering::Relaxed);
 
-    // 缓冲欠载：没填满的部分补 0，不能把上一轮回调的残留样本播出去。
-    for sample in data.iter_mut().skip(copied) {
-        *sample = 0.0;
-    }
     #[cfg(test)]
     tests::before_sleep_deadline_check(data);
     // Also cover a deadline reached while this block was being rendered (or a
@@ -1587,6 +1817,10 @@ fn write_samples_mode(
     // outside the renderer's control, but this block must leave as silence.
     // Retain the entry deadline: pause acknowledgement may let the coordinator
     // clear/rearm the shared gate before this suspended callback returns.
+    if f32::from_bits(shared.volume.load(Ordering::Acquire)) == 0.0 {
+        data.fill(0.0);
+        audible_frames = 0;
+    }
     if shared.dsp.reset_epoch.load(Ordering::Acquire) != dsp_epoch
         || sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured))
     {
@@ -1595,6 +1829,8 @@ fn write_samples_mode(
     }
     RenderReport {
         source_frames: copied / channels,
+        audible_frames,
+        leading_silence_frames,
         transition_frame,
         eq_applied_frame,
         contended,
@@ -1649,6 +1885,60 @@ impl AudioBackend for RenderCore {
         self.open_and_spawn(mss, ext.as_deref())
     }
 
+    fn load_with_gain(&mut self, uri: &str, gain: f32) -> Result<MediaInfo, AudioError> {
+        if !gain.is_finite() || !(-24.0..=12.0).contains(&gain) {
+            return Err(AudioError::Other("曲目增益无效".into()));
+        }
+        let info = self.load(uri)?;
+        if let Some(pending) = &mut self.pending_load {
+            pending.track_gain_db = Some(gain);
+        } else {
+            self.shared
+                .current_deck()
+                .gain_db
+                .store(gain.to_bits(), Ordering::Relaxed);
+        }
+        Ok(info)
+    }
+    fn load_source_with_gain(
+        &mut self,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        gain: f32,
+    ) -> Result<MediaInfo, AudioError> {
+        if !gain.is_finite() || !(-24.0..=12.0).contains(&gain) {
+            return Err(AudioError::Other("曲目增益无效".into()));
+        }
+        let info = self.load_source(source, ext)?;
+        if let Some(pending) = &mut self.pending_load {
+            pending.track_gain_db = Some(gain);
+        } else {
+            self.shared
+                .current_deck()
+                .gain_db
+                .store(gain.to_bits(), Ordering::Relaxed);
+        }
+        Ok(info)
+    }
+    fn prepare_next_source(
+        &mut self,
+        next: NextTrack,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        gain: f32,
+    ) -> Result<PrepareResult, AudioError> {
+        if !gain.is_finite() || !(-24.0..=12.0).contains(&gain) {
+            return Err(AudioError::Other("曲目增益无效".into()));
+        }
+        self.clear_next();
+        let mss = MediaSourceStream::new(
+            Box::new(DynMediaSource { inner: source }),
+            Default::default(),
+        );
+        let (opened, info) = open_media(mss, ext.as_deref())?;
+        self.prepare_opened_with_gain(opened, info, next, gain, false)
+    }
+
     fn play(&mut self) -> Result<(), AudioError> {
         if let Some(error) = &self.stop_error {
             return Err(AudioError::DecodeFailed(format!(
@@ -1658,14 +1948,20 @@ impl AudioBackend for RenderCore {
         if self.pending_stop {
             self.do_stop_reset()?;
         }
-        if self.shared.current_deck().eof.load(Ordering::Acquire)
+        let source_exhausted = self.shared.current_deck().eof.load(Ordering::Acquire)
             && self
                 .shared
                 .current_deck()
                 .samples
                 .lock()
-                .is_ok_and(|samples| samples.is_empty())
-        {
+                .is_ok_and(|samples| samples.is_empty());
+        // Read after source consumption: the callback publishes its flight before
+        // taking the queue, and queued metadata before releasing the flight.
+        let delayed = self.shared.dsp.terminal_inflight.load(Ordering::Acquire)
+            || (self.shared.dsp.terminal_epoch.load(Ordering::Acquire)
+                == self.shared.dsp.reset_epoch.load(Ordering::Acquire)
+                && self.shared.dsp.terminal_queued.load(Ordering::Acquire) > 0);
+        if source_exhausted && !delayed {
             self.seek(0)?;
         }
         self.pending_pause = false;
@@ -1788,10 +2084,15 @@ impl AudioBackend for RenderCore {
             params.eq_gains_db.map(|gain| gain.clamp(-12.0, 12.0)),
             params.preamp_db.clamp(-24.0, 12.0),
         )?;
-        self.shared.current_deck().gain_db.store(
-            params.track_gain_db.clamp(-24.0, 12.0).to_bits(),
-            Ordering::Relaxed,
-        );
+        let track_gain = params.track_gain_db.clamp(-24.0, 12.0);
+        if let Some(pending) = &mut self.pending_load {
+            pending.track_gain_db = Some(track_gain);
+        } else {
+            self.shared
+                .current_deck()
+                .gain_db
+                .store(track_gain.to_bits(), Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -1800,6 +2101,56 @@ impl AudioBackend for RenderCore {
             .crossfade_ms
             .store(ms.min(8000), Ordering::Relaxed);
         Ok(())
+    }
+
+    fn validate_quality(
+        &self,
+        params: vmusic_core::audio_quality::QualityParams,
+    ) -> Result<(), AudioError> {
+        self.validate_quality_context(params, self.format())?;
+        self.shared.dsp.validate_quality(self.output_rate, params)
+    }
+
+    fn set_quality(
+        &mut self,
+        params: vmusic_core::audio_quality::QualityParams,
+    ) -> Result<(), AudioError> {
+        self.validate_quality_context(params, self.format())?;
+        self.shared.dsp.publish_quality(self.output_rate, params)?;
+        self.shared
+            .crossfade_ms
+            .store(params.crossfade_ms, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn prepare_impulse(
+        &mut self,
+        kernel: vmusic_core::impulse::ImpulseKernel,
+    ) -> Result<(), AudioError> {
+        if self.native_budget.is_some() {
+            return Err(AudioError::Other("房间不支持私人校正核".into()));
+        }
+        vmusic_core::audio_quality::validate_correction_rate(self.output_rate)?;
+        let prepared = impulse::PreparedImpulse::prepare(kernel)?;
+        if prepared.rate != self.output_rate {
+            return Err(AudioError::Other(
+                "校正核处理率与当前输出不同，请重新准备".into(),
+            ));
+        }
+        *self
+            .shared
+            .dsp
+            .impulse
+            .lock()
+            .map_err(|_| AudioError::Other("校正准备状态不可用".into()))? = Some(prepared);
+        Ok(())
+    }
+
+    fn quality_status(&self) -> Option<vmusic_core::audio_quality::QualityStatus> {
+        Some(self.shared.dsp.quality_status(
+            self.shared.playing.load(Ordering::Relaxed),
+            self.shared.output_gate.current(),
+        ))
     }
 
     fn eq_status(&self) -> Option<vmusic_core::EqStatus> {
@@ -1830,7 +2181,40 @@ impl AudioBackend for RenderCore {
         }
     }
 
+    fn clear_unstarted_next(&mut self) -> bool {
+        let Ok(mut next) = self.shared.next.lock() else {
+            return false;
+        };
+        let Ok(event) = self.shared.next_event.lock() else {
+            return false;
+        };
+        if next.as_ref().is_some_and(|p| p.mixed_frames > 0)
+            || matches!(&*event, Some(RenderEvent::Transitioned { .. }))
+            || self.shared.dsp.terminal_transition.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let retired = next.take();
+        drop(event);
+        drop(next);
+        drop(retired);
+        if let Some((handle, ctl)) = self.next_decoder.take() {
+            ctl.stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+        true
+    }
+
     fn take_next_event(&mut self) -> Option<NextEvent> {
+        if self.shared.dsp.terminal_inflight.load(Ordering::Acquire) {
+            return None;
+        }
+        if self.shared.dsp.terminal_epoch.load(Ordering::Acquire)
+            == self.shared.dsp.reset_epoch.load(Ordering::Acquire)
+            && self.shared.dsp.terminal_transition.load(Ordering::Relaxed)
+        {
+            return None;
+        }
         let event = self.shared.next_event.lock().unwrap().take()?;
         Some(match event {
             RenderEvent::Transitioned {
@@ -1896,7 +2280,14 @@ impl AudioBackend for RenderCore {
         {
             return false;
         }
-        self.shared.current_deck().eof.load(Ordering::Acquire)
+        if self.shared.dsp.terminal_inflight.load(Ordering::Acquire) {
+            return false;
+        }
+        let terminal_drained = self.shared.dsp.terminal_epoch.load(Ordering::Acquire)
+            != self.shared.dsp.reset_epoch.load(Ordering::Acquire)
+            || self.shared.dsp.terminal_queued.load(Ordering::Relaxed) == 0;
+        terminal_drained
+            && self.shared.current_deck().eof.load(Ordering::Acquire)
             && self
                 .shared
                 .current_deck()
@@ -2553,9 +2944,9 @@ mod tests {
     const RECORDED_ALLOCS: usize = 4;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    struct CallbackMemory {
-        allocs: usize,
-        frees: usize,
+    pub(super) struct CallbackMemory {
+        pub(super) allocs: usize,
+        pub(super) frees: usize,
         alloc_sizes: [usize; RECORDED_ALLOCS],
     }
 
@@ -2623,7 +3014,7 @@ mod tests {
         }
     }
 
-    fn measure_memory<T>(call: impl FnOnce() -> T) -> (T, CallbackMemory) {
+    pub(super) fn measure_memory<T>(call: impl FnOnce() -> T) -> (T, CallbackMemory) {
         CALLBACK_ALLOCATIONS.with(|counts| counts.set(Some(CallbackMemory::ZERO)));
         let result = call();
         let counts = CALLBACK_ALLOCATIONS.with(|counts| counts.take().unwrap());
@@ -5189,6 +5580,7 @@ mod tests {
                 opened,
                 info,
                 play_after: false,
+                track_gain_db: None,
             });
             assert!(matches!(
                 prepare_compressed(&mut backend, "b.mp3", 0),

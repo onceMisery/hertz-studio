@@ -8,8 +8,11 @@
 //! it stays cheap to unit-test and impossible to tangle.
 
 pub mod audio;
+pub mod audio_quality;
 pub mod error;
+pub mod impulse;
 pub mod model;
+pub mod output;
 pub mod room;
 
 pub use audio::{

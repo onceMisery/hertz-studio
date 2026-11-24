@@ -1,0 +1,38 @@
+{
+  "review_scope": "working-tree rate qualification and recovery follow-up",
+  "base_commit": "11dc60503a084dd899b7ebe5ae39e324433d2fc2",
+  "independent_review": {
+    "status": "unavailable_after_three_attempts",
+    "agent": "/root/review_rate_qualification",
+    "result": null,
+    "reason": "All three turns were interrupted by model-service capacity errors; no findings or approval were returned."
+  },
+  "coordinator_review": {
+    "status": "completed_with_regression_evidence",
+    "paths": [
+      "crates/vmusic-core/src/audio_quality.rs",
+      "crates/vmusic-audio/src/render.rs",
+      "crates/vmusic-audio/src/render/dsp.rs",
+      "crates/vmusic-audio/src/render/impulse.rs",
+      "crates/hertz-studio/src/audio_impulse.rs",
+      "crates/hertz-studio/src/audio_quality.rs",
+      "plugin/ui/dsp-settings.js"
+    ],
+    "checked": [
+      "Rate validation precedes requested-parameter publication and output format/stream replacement.",
+      "Prepared correction identity and processing rate are checked before publication.",
+      "Rejected requests preserve parameters and output; explicit removal allows96000.",
+      "Failed candidate output restores the old stream or remains unavailable if restoration fails.",
+      "UI custom validity clears on edits and on supported capability refresh; unavailable controls stay editable.",
+      "Disabled/legacy EQ mathematical preparation retains8k test capability and fixed192k behavior."
+    ],
+    "finding_fixed": "The ignored quality_stage_cost_probe still used96000 and failed on the new IR admission check. Changed it to the qualified48000 and executed it successfully.",
+    "evidence": [
+      "output/audio-quality/resume-stage-qualification-regression.log",
+      "output/audio-quality/resume-release-stage-closeout.log",
+      "output/audio-quality/resume-audio-msrv-closeout.log",
+      "output/audio-quality/resume-browser-dsp-chrome.log"
+    ]
+  },
+  "limit": "Coordinator inspection and executed tests do not constitute an independent follow-up review or hardware qualification."
+}
