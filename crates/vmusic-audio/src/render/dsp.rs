@@ -452,6 +452,7 @@ impl DspControl {
     pub(super) fn reset(&self) {
         // An exhausted generation stays terminal; no old acknowledgement can
         // become current again through wrapping.
+        #[allow(deprecated)] // MSRV 1.88 has no try_update; see vmusic-lan MemoryBudget::reserve
         let _ = self
             .reset_epoch
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {

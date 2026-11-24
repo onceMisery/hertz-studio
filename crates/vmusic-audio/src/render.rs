@@ -448,6 +448,8 @@ impl RenderOutput {
         self.id
     }
 
+    // The only non-test caller is the Windows exclusive output path.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub(crate) fn leading_silence_samples(&self) -> usize {
         self.leading_silence
     }
