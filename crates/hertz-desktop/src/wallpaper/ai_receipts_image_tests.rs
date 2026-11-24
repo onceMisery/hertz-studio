@@ -2,6 +2,22 @@
 use super::*;
 use crate::wallpaper::library::{tempfileish, InstallWork, LOCAL_SOURCE};
 
+async fn open_settled(path: &std::path::Path) -> Library {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match Library::open(path).await {
+            Ok(library) => return library,
+            Err(error)
+                if error.to_string().contains("readonly database")
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("fixture database must reopen: {error}"),
+        }
+    }
+}
+
 async fn seed(library: &Library) -> (String, String) {
     let work = uuid::Uuid::new_v4().to_string();
     let id = format!("work-ai-{work}");
@@ -23,7 +39,7 @@ async fn frozen_image_save_survives_restart_and_install_failure_rolls_back_origi
         .unwrap();
     library.pool().close().await;
     drop(library);
-    let library = Library::open(root.path()).await.unwrap();
+    let library = open_settled(root.path()).await;
     let receipts = AiReceipts::new(&library);
     assert_eq!(
         receipts
