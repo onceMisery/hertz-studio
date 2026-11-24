@@ -1587,7 +1587,7 @@ fn render_dsp_frame(
     frame: usize,
     applied: &mut Option<usize>,
 ) {
-    if shared.tap_enabled && frame % TAP_STRIDE == 0 {
+    if shared.tap_enabled && frame.is_multiple_of(TAP_STRIDE) {
         if let Ok(mut tap) = shared.tap.try_lock() {
             let factors = dsp.current_track_factors(tracks);
             let sum: f32 = old
@@ -4510,7 +4510,9 @@ mod tests {
     #[test]
     #[ignore = "release-only full-renderer synthetic timing; no audio device"]
     fn renderer_quality_probe() {
-        assert!(!cfg!(debug_assertions));
+        if cfg!(debug_assertions) {
+            panic!("run this probe with --release");
+        }
         for rate in [44_100, 48_000, 96_000] {
             for frames in [128usize, 512] {
                 let mut renderer = RenderCore::new(RenderFormat {

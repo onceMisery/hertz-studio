@@ -139,10 +139,9 @@ impl Tone {
                 0.0
             }) - self.crossfeed_amount);
         if self.channels == 2 {
-            let amount = self.crossfeed_amount;
-            for ch in 0..2 {
-                input[ch] += amount * (self.low[1 - ch] - self.low[ch]);
-            }
+            let delta = self.crossfeed_amount * (self.low[1] - self.low[0]);
+            input[0] += delta;
+            input[1] -= delta;
         }
         let target = if self.params.loudness_compensation {
             (1.0 - volume.clamp(0.0, 1.0) as f64).powi(2)

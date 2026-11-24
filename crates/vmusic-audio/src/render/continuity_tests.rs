@@ -14,8 +14,10 @@ pub(super) fn after_source_consumption() {
 #[test]
 fn eof_resume_waits_for_inflight_terminal_publication() {
     let mut renderer = playing_renderer();
-    let mut q = vmusic_core::audio_quality::QualityParams::default();
-    q.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    let q = vmusic_core::audio_quality::QualityParams {
+        limiter: vmusic_core::audio_quality::LimiterMode::TruePeak,
+        ..Default::default()
+    };
     renderer.set_quality(q).unwrap();
     renderer
         .shared
@@ -69,7 +71,9 @@ fn eof_resume_waits_for_inflight_terminal_publication() {
 #[test]
 #[ignore = "release-only isolated stage timing diagnosis"]
 fn quality_stage_cost_probe() {
-    assert!(!cfg!(debug_assertions));
+    if cfg!(debug_assertions) {
+        panic!("run this probe with --release");
+    }
     // Stage diagnosis must use the same qualified scope as the complete-chain probe.
     let rate = 48_000;
     let n = rate as usize;
@@ -255,8 +259,10 @@ fn true_peak_tail_and_position_follow_real_submitted_frames() {
         channels: 1,
     })
     .unwrap();
-    let mut params = vmusic_core::audio_quality::QualityParams::default();
-    params.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    let params = vmusic_core::audio_quality::QualityParams {
+        limiter: vmusic_core::audio_quality::LimiterMode::TruePeak,
+        ..Default::default()
+    };
     renderer.set_quality(params).unwrap();
     renderer
         .shared
@@ -325,8 +331,10 @@ fn hard_mute_covers_populated_delay_and_eof_meter_flushes() {
         channels: 1,
     })
     .unwrap();
-    let mut q = vmusic_core::audio_quality::QualityParams::default();
-    q.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    let q = vmusic_core::audio_quality::QualityParams {
+        limiter: vmusic_core::audio_quality::LimiterMode::TruePeak,
+        ..Default::default()
+    };
     renderer.set_quality(q).unwrap();
     renderer.shared.playing.store(true, Ordering::Release);
     renderer
@@ -373,8 +381,10 @@ fn complete_local_chain_first_callback_and_tail_allocate_nothing() {
             attenuation_db: 0.0,
         })
         .unwrap();
-    let mut q = vmusic_core::audio_quality::QualityParams::default();
-    q.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    let mut q = vmusic_core::audio_quality::QualityParams {
+        limiter: vmusic_core::audio_quality::LimiterMode::TruePeak,
+        ..Default::default()
+    };
     q.tone.crossfeed = true;
     q.tone.loudness_compensation = true;
     q.tone.saturation = true;
@@ -416,8 +426,10 @@ fn output_change_preserves_delayed_media_and_failure_cancels_pending_resume() {
         channels: 1,
     })
     .unwrap();
-    let mut q = vmusic_core::audio_quality::QualityParams::default();
-    q.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    let q = vmusic_core::audio_quality::QualityParams {
+        limiter: vmusic_core::audio_quality::LimiterMode::TruePeak,
+        ..Default::default()
+    };
     renderer.set_quality(q).unwrap();
     renderer
         .shared
@@ -502,8 +514,10 @@ fn legacy_format_is_not_withdrawn_and_output_switch_invalidates_adoption() {
         channels: 2,
     })
     .unwrap();
-    let mut q = vmusic_core::audio_quality::QualityParams::default();
-    q.preamp_db = -3.0;
+    let mut q = vmusic_core::audio_quality::QualityParams {
+        preamp_db: -3.0,
+        ..Default::default()
+    };
     renderer.validate_quality(q).unwrap();
     renderer.set_quality(q).unwrap();
     q.eq.enabled = true;
@@ -528,9 +542,11 @@ fn correction_rate_admission_preserves_requested_quality_on_rejection() {
             channels: 2,
         })
         .unwrap();
-        let mut base = QualityParams::default();
-        base.limiter = LimiterMode::TruePeak;
-        base.headroom_mode = HeadroomMode::Auto;
+        let mut base = QualityParams {
+            limiter: LimiterMode::TruePeak,
+            headroom_mode: HeadroomMode::Auto,
+            ..Default::default()
+        };
         base.eq.enabled = true;
         base.eq.bands[0].gain_db = 3.0;
         base.tone.crossfeed = true;
@@ -583,8 +599,10 @@ fn output_rate_change_requires_explicit_removal_of_heavy_effects() {
             channels: 2,
         };
         let mut renderer = RenderCore::new(format).unwrap();
-        let mut q = QualityParams::default();
-        q.limiter = LimiterMode::TruePeak;
+        let mut q = QualityParams {
+            limiter: LimiterMode::TruePeak,
+            ..Default::default()
+        };
         if correction {
             let kernel = vmusic_core::impulse::ImpulseKernel {
                 resource_id: "b".repeat(64),
@@ -623,8 +641,10 @@ fn pause_at_short_eof_preserves_delayed_tail_and_non_eof_stall_allows_replacemen
         channels: 1,
     })
     .unwrap();
-    let mut q = vmusic_core::audio_quality::QualityParams::default();
-    q.limiter = vmusic_core::audio_quality::LimiterMode::TruePeak;
+    let q = vmusic_core::audio_quality::QualityParams {
+        limiter: vmusic_core::audio_quality::LimiterMode::TruePeak,
+        ..Default::default()
+    };
     renderer.set_quality(q).unwrap();
     renderer
         .shared
@@ -692,7 +712,9 @@ fn pause_at_short_eof_preserves_delayed_tail_and_non_eof_stall_allows_replacemen
 #[test]
 #[ignore = "release-only local complete-chain timing qualification"]
 fn complete_quality_chain_probe() {
-    assert!(!cfg!(debug_assertions));
+    if cfg!(debug_assertions) {
+        panic!("run this probe with --release");
+    }
     let paced = std::env::var_os("HERTZ_AUDIO_PROBE_PACED").is_some();
     let changes = std::env::var_os("HERTZ_AUDIO_PROBE_CHANGES").is_some();
     let seconds: usize = std::env::var("HERTZ_AUDIO_PROBE_SECONDS")
@@ -789,7 +811,7 @@ fn complete_quality_chain_probe() {
             let started = std::time::Instant::now();
             for index in 0..samples / (frames * 2) {
                 if changes && index > 0 && index % (rate as usize / frames / 2).max(1) == 0 {
-                    let alternate = (index / (rate as usize / frames / 2).max(1)) % 2 == 0;
+                    let alternate = (index / (rate as usize / frames / 2).max(1)).is_multiple_of(2);
                     q.eq.bands[0].frequency_hz = if alternate { 60.0 } else { 90.0 };
                     q.eq.bands[0].gain_db = if alternate { 12.0 } else { -12.0 };
                     q.tone.drive = if alternate { 1.0 } else { 0.15 };

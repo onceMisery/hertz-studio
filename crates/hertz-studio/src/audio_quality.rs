@@ -202,11 +202,11 @@ async fn response(
     });
     let state_name = if failure.is_some() {
         "failed"
-    } else if room || quality.is_none() {
-        "deferred"
-    } else if quality
-        .as_ref()
-        .is_some_and(|q| q.eq.state == vmusic_core::EqApplicationState::Deferred)
+    } else if room
+        || quality.is_none()
+        || quality
+            .as_ref()
+            .is_some_and(|q| q.eq.state == vmusic_core::EqApplicationState::Deferred)
     {
         "deferred"
     } else if adopted {
@@ -444,6 +444,22 @@ pub async fn legacy_update(
 mod tests {
     use super::*;
 
+    // SQLite WAL handles can outlive `close()` on Windows; the real requirement is
+    // a removable fixture directory, so retry instead of asserting the first attempt.
+    async fn remove_dir_settled(root: std::path::PathBuf) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match std::fs::remove_dir_all(&root) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("fixture directory must be removable: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn correction_capabilities_follow_software_rate_qualification() {
         for rate in [44_100, 48_000] {
@@ -590,6 +606,6 @@ mod tests {
         thread.join().unwrap();
         state.db.close().await;
         drop(state);
-        std::fs::remove_dir_all(root).unwrap();
+        remove_dir_settled(root).await;
     }
 }

@@ -379,7 +379,7 @@ pub fn prepare_wav_cancellable(
     if source.iter().flatten().any(|v| !v.is_finite()) {
         return Err(invalid("IR 含非有限样本"));
     }
-    if frames % 2 == 0
+    if frames.is_multiple_of(2)
         || source.iter().any(|c| {
             c.iter()
                 .zip(c.iter().rev())

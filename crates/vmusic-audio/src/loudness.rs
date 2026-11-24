@@ -138,7 +138,7 @@ impl Meter {
         })
     }
     fn push(&mut self, mut pcm: &[f32], control: &Control) -> Result<(), AnalyzeError> {
-        if pcm.len() % self.channels as usize != 0 {
+        if !pcm.len().is_multiple_of(self.channels as usize) {
             return Err(AnalyzeError::Decode);
         }
         let hop = u64::from(self.rate / 10);
@@ -160,7 +160,7 @@ impl Meter {
                 .add_frames_f32(part)
                 .map_err(|_| AnalyzeError::Decode)?;
             self.frames += frames;
-            if self.frames >= 4 * hop && self.frames % hop == 0 {
+            if self.frames >= 4 * hop && self.frames.is_multiple_of(hop) {
                 if self.energies.len() >= MAX_TRACK_BLOCKS {
                     return Err(AnalyzeError::Limit);
                 }

@@ -39,8 +39,10 @@ pub fn from_settings(
         .get("dsp_eq")
         .and_then(|v| serde_json::from_value::<[f32; 6]>(v.clone()).ok())
         .unwrap_or([0.0; 6]);
-    let mut eq = Equalizer::default();
-    eq.enabled = gains.iter().any(|g| *g != 0.0);
+    let mut eq = Equalizer {
+        enabled: gains.iter().any(|g| *g != 0.0),
+        ..Default::default()
+    };
     for (b, g) in eq.bands.iter_mut().zip(gains) {
         b.gain_db = g.clamp(-12.0, 12.0);
     }

@@ -96,7 +96,9 @@ fn rapid_requests_keep_only_the_latest_and_reset_clears_pending_history() {
 #[test]
 #[ignore = "release-only synthetic DSP timing; does not open an audio device"]
 fn quality_probe() {
-    assert!(!cfg!(debug_assertions), "run this probe with --release");
+    if cfg!(debug_assertions) {
+        panic!("run this probe with --release");
+    }
     for rate in [44_100, 48_000, 96_000] {
         for block in [128usize, 512] {
             let control = DspControl::new();

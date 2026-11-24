@@ -305,7 +305,7 @@ fn schedule_candidate_inner(
         || !target_lufs.is_finite()
         || !(-24.0..=-12.0).contains(&target_lufs)
         || revision.len() > 64
-        || validate_ids(&[track_id.clone()]).is_err()
+        || validate_ids(std::slice::from_ref(&track_id)).is_err()
     {
         return false;
     }

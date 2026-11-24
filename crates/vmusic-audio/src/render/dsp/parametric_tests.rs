@@ -4,8 +4,10 @@ use vmusic_core::audio_quality::{HeadroomMode, QualityParams};
 
 #[test]
 fn parametric_admission_and_headroom() {
-    let mut params = QualityParams::default();
-    params.headroom_mode = HeadroomMode::Auto;
+    let mut params = QualityParams {
+        headroom_mode: HeadroomMode::Auto,
+        ..Default::default()
+    };
     let neutral = preparation::prepare(1, 48_000, params).unwrap();
     assert!((neutral.headroom.attenuation_db + 1.0).abs() < 1e-5);
     params.eq.enabled = true;
@@ -76,8 +78,10 @@ fn arbitrary_low_frequency_cascade_matches_long_history_after_adoption() {
 
 #[test]
 fn headroom_is_continuous_near_zero_and_does_not_enter_track_clamp() {
-    let mut params = QualityParams::default();
-    params.headroom_mode = HeadroomMode::Auto;
+    let mut params = QualityParams {
+        headroom_mode: HeadroomMode::Auto,
+        ..Default::default()
+    };
     let mut previous: Option<f32> = None;
     for preamp in [-0.01, 0.0, 0.01] {
         params.preamp_db = preamp;
@@ -95,8 +99,10 @@ fn headroom_is_continuous_near_zero_and_does_not_enter_track_clamp() {
 #[test]
 fn gain_only_uses_ramp_and_reports_old_actual_during_a_b_c() {
     let rate = 48_000;
-    let mut a = QualityParams::default();
-    a.configuration_revision = 1;
+    let mut a = QualityParams {
+        configuration_revision: 1,
+        ..Default::default()
+    };
     a.eq.enabled = true;
     a.eq.bands[0].frequency_hz = 80.0;
     a.eq.bands[0].q = 3.0;

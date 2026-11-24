@@ -170,10 +170,10 @@ impl OutputPlan {
                     ));
                 }
                 control.silent.store(true, Ordering::Release);
-                LocalStream::Test(TestStream {
+                LocalStream::Test(Box::new(TestStream {
                     plan: plan.clone(),
                     _terminal: terminal,
-                })
+                }))
             }
         };
         Ok(OpenedOutput {
@@ -189,7 +189,7 @@ enum LocalStream {
     #[cfg(windows)]
     Exclusive(wasapi::NativeStream),
     #[cfg(test)]
-    Test(TestStream),
+    Test(Box<TestStream>),
 }
 
 pub(crate) struct OpenedOutput {

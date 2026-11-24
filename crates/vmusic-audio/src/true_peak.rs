@@ -94,7 +94,7 @@ fn dot(taps: &[f64; TAPS], history: &[f64]) -> f64 {
                 );
             }
             let sum = _mm_add_pd(_mm_add_pd(a, b), _mm_add_pd(c, d));
-            return _mm_cvtsd_f64(_mm_add_sd(sum, _mm_unpackhi_pd(sum, sum)));
+            _mm_cvtsd_f64(_mm_add_sd(sum, _mm_unpackhi_pd(sum, sum)))
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -166,9 +166,9 @@ impl Detector {
     }
 
     pub(crate) fn push(&mut self, frame: &[f32]) -> f32 {
-        for ch in 0..self.channels {
-            let sample = if frame[ch].is_finite() {
-                frame[ch] as f64
+        for (ch, value) in frame.iter().take(self.channels).enumerate() {
+            let sample = if value.is_finite() {
+                *value as f64
             } else {
                 0.0
             };
@@ -272,12 +272,8 @@ impl Limiter {
     }
     fn step(&mut self, input: &[f32], out: &mut [f32]) -> bool {
         let slot = self.frame as usize % self.delay.len();
-        for ch in 0..self.channels {
-            self.delay[slot][ch] = if input[ch].is_finite() {
-                input[ch]
-            } else {
-                0.0
-            };
+        for (dst, src) in self.delay[slot].iter_mut().zip(input).take(self.channels) {
+            *dst = if src.is_finite() { *src } else { 0.0 };
         }
         let measured = self.detector.push(input);
         let output_frame = self.frame.saturating_sub(self.latency as u64);

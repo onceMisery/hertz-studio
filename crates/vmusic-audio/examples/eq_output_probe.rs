@@ -110,8 +110,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend.pause()?;
     wait(&mut backend, |b| !b.eq_status().unwrap().active)?;
     let output = backend.output_status();
-    let mut quality = vmusic_core::audio_quality::QualityParams::default();
-    quality.configuration_revision = 1;
+    let mut quality = vmusic_core::audio_quality::QualityParams {
+        configuration_revision: 1,
+        ..Default::default()
+    };
     quality.eq.enabled = true;
     quality.eq.bands[0].frequency_hz = 80.0;
     quality.eq.bands[0].q = 3.0;

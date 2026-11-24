@@ -284,7 +284,7 @@ impl QualityConfig {
     }
     pub fn validate(&self) -> Result<(), crate::AudioError> {
         let invalid = |s: &str| crate::AudioError::Other(s.into());
-        if !matches!(self.schema_version, 2 | 3 | 4)
+        if !matches!(self.schema_version, 2..=4)
             || (self.schema_version == 2 && self.limiter != LimiterMode::Soft)
         {
             return Err(invalid("不支持的音质配置版本，原数据已保留"));
