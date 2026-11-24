@@ -4,6 +4,7 @@ use super::tone::Tone;
 use crate::true_peak::Limiter;
 use std::collections::VecDeque;
 use vmusic_core::audio_quality::{LimiterMode, ToneParams};
+const ALIGNMENT_CAPACITY: usize = vmusic_core::audio_preview::MAX_ALIGNMENT_FRAMES + 1;
 
 #[derive(Clone, Copy)]
 pub(super) struct FrameTag {
@@ -28,6 +29,11 @@ pub(super) struct Terminal {
     origin_set: bool,
     channels: usize,
     rate: u32,
+    preview_gain: f32,
+    alignment_frames: usize,
+    alignment: [[f32; ALIGNMENT_CAPACITY]; 2],
+    alignment_cursor: usize,
+    analysis_unprotected: bool,
 }
 impl Terminal {
     pub fn new(rate: u32, channels: usize, local: bool) -> Self {
@@ -49,6 +55,11 @@ impl Terminal {
             origin_set: false,
             channels,
             rate,
+            preview_gain: 1.0,
+            alignment_frames: 0,
+            alignment: [[0.0; ALIGNMENT_CAPACITY]; 2],
+            alignment_cursor: 0,
+            analysis_unprotected: false,
         }
     }
     pub fn reset(&mut self) {
@@ -64,6 +75,8 @@ impl Terminal {
         self.audible_pending = 0;
         self.position = 0;
         self.origin_set = false;
+        self.alignment = [[0.0; ALIGNMENT_CAPACITY]; 2];
+        self.alignment_cursor = 0;
     }
     pub fn set_origin(&mut self, position: u64) {
         if !self.origin_set {
@@ -96,15 +109,29 @@ impl Terminal {
     pub fn requires_reset(&self, mode: LimiterMode, tone: ToneParams) -> bool {
         mode != self.mode || tone.saturation != self.tone_params.saturation
     }
+    pub fn configure_preview(&mut self, gain_db: f32, alignment: usize) {
+        self.preview_gain = 10.0f32.powf(gain_db / 20.0);
+        self.alignment_frames = alignment;
+    }
+    pub fn preview_needs_reset(&self, alignment: usize) -> bool {
+        self.alignment_frames != alignment
+    }
+    pub fn unprotected_analysis(&mut self) {
+        self.analysis_unprotected = true;
+    }
     pub fn impulse_delay(&self) -> usize {
         self.impulse.delay()
     }
     pub fn active(&self) -> bool {
-        self.mode != LimiterMode::Soft || self.tone.active() || self.impulse.id().is_some()
+        self.mode != LimiterMode::Soft
+            || self.tone.active()
+            || self.impulse.id().is_some()
+            || self.preview_gain != 1.0
+            || self.alignment_frames > 0
     }
     pub fn latency(&self) -> u64 {
-        (self.tone.latency() + self.impulse.delay()) as u64
-            + if self.mode == LimiterMode::Soft {
+        (self.tone.latency() + self.impulse.delay() + self.alignment_frames) as u64
+            + if self.mode == LimiterMode::Soft || self.analysis_unprotected {
                 0
             } else {
                 self.limiter
@@ -148,7 +175,12 @@ impl Terminal {
     fn final_stage(&mut self, input: &[f32], out: &mut [f32], tag: FrameTag) -> Option<FrameTag> {
         let mut scaled = [0.0; 32];
         for ch in 0..self.channels {
-            scaled[ch] = input[ch] * tag.volume * tag.fade;
+            scaled[ch] = input[ch] * self.preview_gain * tag.volume * tag.fade;
+        }
+        if self.analysis_unprotected {
+            out[..self.channels].copy_from_slice(&scaled[..self.channels]);
+            self.presented(tag);
+            return Some(tag);
         }
         if self.mode == LimiterMode::Soft {
             for ch in 0..self.channels {
@@ -176,7 +208,17 @@ impl Terminal {
         processed[..self.channels].copy_from_slice(input);
         self.impulse.process(&mut processed[..self.channels]);
         self.tone.process(&mut processed[..self.channels], volume);
-        let ready = self.tone_frames >= (self.tone.latency() + self.impulse.delay()) as u64;
+        if self.alignment_frames > 0 {
+            let read = (self.alignment_cursor + ALIGNMENT_CAPACITY - self.alignment_frames)
+                % ALIGNMENT_CAPACITY;
+            for (ch, sample) in processed[..self.channels].iter_mut().enumerate() {
+                self.alignment[ch][self.alignment_cursor] = *sample;
+                *sample = self.alignment[ch][read];
+            }
+            self.alignment_cursor = (self.alignment_cursor + 1) % ALIGNMENT_CAPACITY;
+        }
+        let ready = self.tone_frames
+            >= (self.tone.latency() + self.impulse.delay() + self.alignment_frames) as u64;
         self.tone_frames += 1;
         if ready {
             if let Some(tag) = self.tone_tags.pop_front() {

@@ -1219,6 +1219,17 @@
       <form class="set-group" id="dsp-settings" aria-labelledby="dsp-title" action="/v1/player/audio-quality" method="post">
         <h2 class="set-title" id="dsp-title">音效与均衡器</h2>
         <p class="hint" id="dsp-output-status" aria-live="polite">正在读取实际输出…</p>
+        <fieldset id="audio-quality-preview" class="quality-preview" data-quality-preview aria-describedby="audio-preview-help">
+          <legend>当前声音 · 临时试听</legend>
+          <p class="hint" id="audio-preview-help">试听均衡、前级、余量和音色草稿，不保存设置。响度来源、保护策略、音量与歌曲交叠沿用保存值。每次从同一参考片段开头重播：前 2 秒预热，随后最多 10 秒用于比较。结束后恢复进入前的位置，并保留当前播放或暂停意图。</p>
+          <label class="quality-preview-option" for="audio-preview-match"><input id="audio-preview-match" type="checkbox" checked> 准备同响度比较</label>
+          <div class="set-row"><label for="audio-preview-path">仅试听的本机 WAV 路径（可选）</label><input id="audio-preview-path" type="text" maxlength="4096" spellcheck="false" aria-describedby="audio-preview-path-help"><p class="hint" id="audio-preview-path-help">留空使用草稿中的校正资源。这个路径仅用于试听；正式校正继续通过下方导入。</p></div>
+          <label class="quality-preview-option" for="audio-preview-phase"><input id="audio-preview-phase" type="checkbox" aria-describedby="audio-preview-phase-help"> 我了解这个 WAV 仅临时试听，未知相位不保证音画同步</label>
+          <p class="hint" id="audio-preview-phase-help">未知相位核不推断内在群延迟，只对齐可确定的算法缓冲；不写入正式校正资源。</p>
+          <div class="set-actions quality-preview-actions"><button type="button" id="audio-preview-start" class="btn">试听当前草稿</button><button type="button" id="audio-preview-end" class="btn" disabled>结束试听</button></div>
+          <fieldset id="audio-preview-sides" class="quality-preview-sides" disabled><legend>重播参考片段</legend><label for="audio-preview-enhanced"><input id="audio-preview-enhanced" type="radio" name="quality_preview_side" value="enhanced" checked> 增强草稿</label><label for="audio-preview-bypass"><input id="audio-preview-bypass" type="radio" name="quality_preview_side" value="bypass"> 旁路</label></fieldset>
+          <p class="hint" id="audio-preview-status" role="status" aria-live="polite" aria-atomic="true">保存前可试听当前草稿。未完成匹配时会明确显示普通旁路。</p>
+        </fieldset>
         <div class="set-row"><span>均衡器</span><label><input id="dsp-eq-enabled" name="eq_enabled" type="checkbox"> 启用六段参数 EQ</label></div>
         <details class="quality-advanced"><summary>编辑六段频率、Q 与增益</summary>
           <p class="hint">关闭时保留曲线。低频与高 Q 的组合受历史预算限制；保存前会检查，未通过时继续当前声音。</p>
@@ -3192,6 +3203,7 @@
 <link rel="stylesheet" href="audio-quality.css">
 <script defer src="audio-analysis-settings.js"></script>
 <script defer src="audio-output-settings.js"></script>
+<script defer src="audio-preview-settings.js"></script>
 <script defer src="dsp-settings.js"></script>
 <script defer src="app.js"></script>
 </body>

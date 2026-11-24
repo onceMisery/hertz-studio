@@ -32,6 +32,14 @@ impl Applied {
         self.source_generation == snapshot.source_generation
             && snapshot.track_id.as_deref() == Some(&self.track_id)
     }
+    pub(crate) fn matches_bytes(&self, snapshot: &PlayerSnapshot, sha256: &str) -> bool {
+        self.matches(snapshot)
+            && self
+                .selection
+                .as_ref()
+                .and_then(|s| s.source_sha256.as_deref())
+                == Some(sha256)
+    }
     pub(crate) fn from_selection(
         snapshot: &PlayerSnapshot,
         selection: GainSelection,
@@ -161,6 +169,7 @@ pub(crate) fn invalidate_on_library_changes(state: &Arc<AppState>) {
                     let Some(state) = weak.upgrade() else {
                         break;
                     };
+                    let _ = crate::audio_preview::cancel_for_change(&state).await;
                     let _commit = state.play_commit.lock().await;
                     invalidate_pending_locked(&state).await;
                 }
@@ -238,6 +247,7 @@ mod tests {
             ..Default::default()
         };
         let selection = GainSelection {
+            source_sha256: None,
             state: "ready".into(),
             gain_db: 3.0,
             requested_gain_db: Some(3.0),
@@ -336,6 +346,7 @@ mod tests {
         state.audio.shutdown();
         actor.join().unwrap();
         state.db.close().await;
+        drop(state);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

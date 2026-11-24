@@ -1157,13 +1157,18 @@ mod tests {
 
     #[tokio::test]
     async fn registered_ui_assets_are_served_with_their_own_content() {
-        let dsp = assets::UI_ASSETS
-            .iter()
-            .find(|entry| entry.path == "/dsp-settings.js")
-            .expect("the application DSP controller must be embedded");
-        assert!(std::str::from_utf8(dsp.body.identity())
-            .unwrap()
-            .contains("HertzDspSettings"));
+        for (path, controller) in [
+            ("/dsp-settings.js", "HertzDspSettings"),
+            ("/audio-preview-settings.js", "HertzAudioPreviewSettings"),
+        ] {
+            let asset = assets::UI_ASSETS
+                .iter()
+                .find(|entry| entry.path == path)
+                .expect("the application audio controller must be embedded");
+            assert!(std::str::from_utf8(asset.body.identity())
+                .unwrap()
+                .contains(controller));
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

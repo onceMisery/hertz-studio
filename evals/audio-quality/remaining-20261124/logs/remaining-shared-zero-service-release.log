@@ -1,0 +1,7 @@
+
+running 1 test
+test audio_preview::tests::shared_zero_pcm_http_preview_dbx_selection_and_byte_rebinding ... SHARED_PREVIEW_PROBE {"audible_qualification":false,"before_source_generation":1,"dbx_select":true,"http_cancel":true,"http_prepare":true,"output":{"accepted":{"device_id":null,"dither":"auto","mode":"shared","sample_format":"auto"},"active":true,"actual":{"backend":"cpal/Wasapi","channels":2,"container_bits":32,"device_id":"扬声器 (Realtek(R) Audio)","dither_active":false,"dither_reason":"not_applicable_float_output","endpoint_id":null,"mode":"shared","sample_format":"f32","sample_rate":48000,"valid_bits":32},"capabilities":{"device_qualified":false,"exclusive_available":true,"exclusive_reason":null,"qualification_reason":"physical_device_qualification_pending"},"last_error":null,"requested":{"device_id":null,"dither":"auto","mode":"shared","sample_format":"auto"}},"preview_source_generation":2,"source_sha256":"a5f5ebf2259813ed335fbdba26f55d3a1448df480f20bc0d8b12bec9131f1977","synthetic_gain_context":true,"zero_pcm":true}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 987 filtered out; finished in 1.20s
+

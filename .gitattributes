@@ -64,3 +64,7 @@ plugin/ui/creative-contract.js text eol=lf
 # Design generation is compared byte-for-byte; Windows checkouts must retain LF.
 plugin/ui/design/design-base.css text eol=lf
 plugin/ui/design/design-themes.js text eol=lf
+
+# Verbatim audio probe output may include mixed Windows/WSL bytes and final blank lines.
+# Keep the captured bytes and their SHA-256 unchanged in this evidence package.
+evals/audio-quality/remaining-20261124/logs/*.log -text whitespace=-blank-at-eof

@@ -335,6 +335,18 @@ impl Rpc {
             (Op::Post, ["v1", "player", "audio-quality"]) => Ok(Reply::ok(
                 crate::audio_quality::update(state, body_as(body)?).await?,
             )),
+            (Op::Post, ["v1", "player", "audio-quality", "preview"]) => Ok(Reply::ok(
+                crate::audio_preview::request(state, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "player", "audio-quality", "preview", "select"]) => Ok(Reply::ok(
+                crate::audio_preview::select(state, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "player", "audio-quality", "preview", "cancel"]) => Ok(Reply::ok(
+                crate::audio_preview::cancel(state, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "player", "audio-quality", "preview", "refresh"]) => Ok(Reply::ok(
+                crate::audio_preview::refresh(state, body_as(body)?).await?,
+            )),
             (Op::Get, ["v1", "player", "dsp"]) => playback::get_dsp(state).await,
             (Op::Post, ["v1", "player", "dsp"]) => playback::set_dsp(state, body).await,
 

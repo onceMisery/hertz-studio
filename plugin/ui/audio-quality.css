@@ -8,3 +8,14 @@
 #dsp-output-status, #dsp-headroom-status { overflow-wrap: anywhere; }
 #fir-points { inline-size: 100%; min-inline-size: 0; max-inline-size: 100%; box-sizing: border-box; font: inherit; resize: vertical; }
 @media (pointer: coarse) { .quality-band input, .quality-advanced > summary { min-block-size: 3rem; } }
+
+.quality-preview { min-inline-size: 0; margin-block: 1rem; padding: 1rem; border: 1px solid var(--border, currentColor); border-radius: .4rem; }
+.quality-preview legend { padding-inline: .25rem; }
+.quality-preview .set-row { min-inline-size: 0; }
+.quality-preview input[type="text"] { inline-size: 100%; min-inline-size: 0; max-inline-size: 100%; box-sizing: border-box; font: inherit; min-block-size: 2.75rem; }
+.quality-preview-option, .quality-preview-sides label { display: flex; align-items: center; gap: .5rem; min-block-size: 2.75rem; }
+.quality-preview-option input, .quality-preview-sides input { flex: 0 0 auto; }
+.quality-preview-sides { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; min-inline-size: 0; margin-block: .75rem; }
+.quality-preview-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.quality-preview-actions button { min-block-size: 2.75rem; white-space: normal; }
+#audio-preview-help, #audio-preview-status, #audio-preview-path-help, #audio-preview-phase-help { overflow-wrap: anywhere; }

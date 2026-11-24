@@ -1,0 +1,10 @@
+PASS valid submit blocks duplicate POST and preserves newer edits
+PASS stale GET cannot overwrite a newer save
+PASS initial GET failure retries and fills saved values before reporting readiness
+PASS lost POST receipt reconciles with GET without resubmitting
+PASS failed adoption remains visible; hidden page stops polling and resume refreshes
+PASS native constraint validation and keyboard submit
+PASS parameter editing and explicit conflict rebase preserve draft
+PASS unavailable effects explain qualification, focus errors and preserve draft
+PASS supported output refresh clears stale errors and heavy effects can be disabled
+PASS 390px, 200% scaling and clean browser execution

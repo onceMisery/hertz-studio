@@ -231,6 +231,8 @@ pub struct HeadroomInfo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QualityStatus {
+    pub preview: Option<crate::audio_preview::PreviewStatus>,
+    pub track_gain_db: f32,
     pub eq: crate::EqStatus,
     pub requested: QualityParams,
     pub applied: Option<QualityParams>,

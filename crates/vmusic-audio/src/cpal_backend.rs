@@ -227,6 +227,7 @@ impl AudioBackend for CpalBackend {
     }
 
     fn configure_output(&mut self, preferences: OutputPreferences) -> Result<(), AudioError> {
+        self.renderer.invalidate_preview(true)?;
         // Probe identity and format while the existing output still owns PCM.
         // The actor serializes configuration revisions and their adoption.
         let candidate = OutputPlan::prepare(&preferences, Some(self.renderer.format()));
@@ -234,6 +235,7 @@ impl AudioBackend for CpalBackend {
     }
 
     fn invalidate_output(&mut self, reason: String) {
+        let _ = self.renderer.invalidate_preview(true);
         self.fail_output(reason);
     }
 
@@ -361,6 +363,38 @@ impl AudioBackend for CpalBackend {
         kernel: vmusic_core::impulse::ImpulseKernel,
     ) -> Result<(), AudioError> {
         self.renderer.prepare_impulse(kernel)
+    }
+
+    fn prepare_quality_preview(
+        &mut self,
+        plan: vmusic_core::audio_preview::PreviewPlan,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        self.renderer.prepare_quality_preview(plan, source, ext)
+    }
+    fn start_quality_preview(
+        &mut self,
+        id: &str,
+        side: vmusic_core::audio_preview::PreviewSide,
+    ) -> Result<MediaInfo, AudioError> {
+        self.renderer.start_quality_preview(id, side)
+    }
+    fn select_quality_preview(
+        &mut self,
+        id: &str,
+        side: vmusic_core::audio_preview::PreviewSide,
+    ) -> Result<(), AudioError> {
+        self.renderer.select_quality_preview(id, side)
+    }
+    fn cancel_quality_preview(&mut self, id: Option<&str>) -> Result<bool, AudioError> {
+        self.renderer.cancel_quality_preview(id)
+    }
+    fn refresh_quality_preview(&mut self, id: &str) -> bool {
+        self.renderer.refresh_quality_preview(id)
+    }
+    fn take_quality_preview_restore(&mut self) -> Option<String> {
+        self.renderer.take_quality_preview_restore()
     }
 
     fn quality_status(&self) -> Option<QualityStatus> {

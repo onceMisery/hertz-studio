@@ -1,0 +1,3517 @@
+{
+  "base_commit": "f036e9ba29e35160e6283bc595f05e7e5e59ae89",
+  "workspace": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+  "detached_head": true,
+  "captured_at": "2026-11-24T11:04:01.106Z",
+  "sources": [
+    {
+      "path": "crates/hertz-studio/src/audio_preview.rs",
+      "sha256": "16865cfed2b224bca32eb7631cf1c3f1348a6ba8c9be0a21e7388f3d09a71b75"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_preview/tests.rs",
+      "sha256": "343ce5dde04a962b27abc147becc4f99b22e19aba5187eceb04b008c6cc52dab"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_source_snapshot.rs",
+      "sha256": "8c56db299a3082ca9a231d3359d71c76a95fd5148333f08b203e1e523cf3b118"
+    },
+    {
+      "path": "crates/vmusic-audio/src/actor/preview_tests.rs",
+      "sha256": "ed7267fce146cc484c9dff5dfe24276dfeda6b04eb3c8ad5c16e99828c476ed8"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/comparison.rs",
+      "sha256": "2edd34c67a1aaa59a46559f1506a012cdc4d9921f4d0482900fe3081d6f84558"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/comparison/tests.rs",
+      "sha256": "116c33c947d811ae0c85e37d5bcf4305389442a912ed4a541357cc3ec7205d52"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/preview.rs",
+      "sha256": "77f348134fb596193416f5adcc9301ccced9645aae886c35859c547c8cfd18dc"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/preview/tests.rs",
+      "sha256": "27997c24bda16a3c09b44c78a1c4be8af1ac4dd43033e5a0e6b51174c6cab095"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/resource_tests.rs",
+      "sha256": "6516654efb15d28bc17621edcf70eb4b911d3b352e030287066d8a3219ed966a"
+    },
+    {
+      "path": "crates/vmusic-core/src/audio_preview.rs",
+      "sha256": "18642d7228d1ed423d855701ec26307a17252455819cff404e751bda37f4cec2"
+    },
+    {
+      "path": "crates/vmusic-core/src/audio_preview/tests.rs",
+      "sha256": "facd47dea0396a6b3bf075f6375f4a3d8b838b5fe57632519228b529e265b0d3"
+    },
+    {
+      "path": "plugin/ui/audio-preview-settings.js",
+      "sha256": "90f701ac798fe56a7930532fa4d46c26ed91b7e061898bb058adfd0a261536da"
+    },
+    {
+      "path": "scripts/check-audio-preview-browser.js",
+      "sha256": "ba931760bfd534e3ffba41f0414c322d7df5719bbe090e8ef3d4e3c2dd17504e"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "f2e1f0e4c32b95f9f64580637bc506e0449f3ec5872eb4a16b8bb0a46cacbd48"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "d6b2828f493292fa5e82235753e0f9fc99b4f1a16705f4742cf7f6550e24d8ec"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/Cargo.toml",
+      "sha256": "90075444d4d9f818ce1c5a977f7d03ffaba7dafb98233e8e5c07cb788bb80b80"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/blocking.rs",
+      "sha256": "b22aeac80ba5f5806fac012a67b7d717be6b67c55a33acfc88e43b11ecdc1179"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/frame.rs",
+      "sha256": "0417fbdf35236cabdd9ce4f919e5ead702b997a17429e4c7e8a7ca703539eb62"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/lib.rs",
+      "sha256": "49a0f32f349f89d2c1fcdd595acbcae7f4234cf2221cfe1e02b49623d6d33275"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/management.rs",
+      "sha256": "ae6e8564620f2390ee4581a519558974d824ee874a2dcf86d378d034d1c72c75"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/monotonic.rs",
+      "sha256": "c463bc9dc66bedaff46b3182f3d1a8c7be1d4577518f6f1169006eaea6a34b92"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/profile.rs",
+      "sha256": "d90c22f66b1c5ea97fca7f8488df28395d31d325a4b7d18160ac3e6ee7a815cf"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/protocol.rs",
+      "sha256": "f9e985a5950677ac35a9648736f10d1ae61dd7d675f6bbf8d1b72deb08509502"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/src/windows.rs",
+      "sha256": "810d43b0ed47d91774f4780e52b77034e921b429dbef4c1b3018fefb8c4b82b4"
+    },
+    {
+      "path": "crates/hertz-desktop-ipc/tests/primitives.rs",
+      "sha256": "0c4217dc29e523e56b6b85dd0eefe5233937e5d7d8af8c536f74ee95547d42b3"
+    },
+    {
+      "path": "crates/hertz-desktop/Cargo.toml",
+      "sha256": "69213c64b98e010ffa998a5b0792f48783cab091bafb585c5a8197a5994bb639"
+    },
+    {
+      "path": "crates/hertz-desktop/build.rs",
+      "sha256": "0f1e1444171be16461d5bbc8af38e0382021b4cfcc57fc96929f8a8f6aa94173"
+    },
+    {
+      "path": "crates/hertz-desktop/src/app.rs",
+      "sha256": "24c9b36c80af38cc8f3b2be48f86b643909268888924f8046746096164e26e8a"
+    },
+    {
+      "path": "crates/hertz-desktop/src/bridge.rs",
+      "sha256": "0a15604a2349c1860753fc06df87713211b86f12e17561d2b30801b6a4e601e6"
+    },
+    {
+      "path": "crates/hertz-desktop/src/calibration.rs",
+      "sha256": "73c017b8bf313dc6d5eec653f6c326c972d3c57b0731b95f65d529313a23351f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/component.rs",
+      "sha256": "ab36668abf6888d97014af52821cc328e52efc024e35190d05056d672905a104"
+    },
+    {
+      "path": "crates/hertz-desktop/src/config.rs",
+      "sha256": "7bf1837e394f45f302097e0b7741885fc903041079e8bd15ef27b17d92b2f1a1"
+    },
+    {
+      "path": "crates/hertz-desktop/src/config_journal.rs",
+      "sha256": "62abd9ff7455aefc3be3994203830d64fa77a2d21016d5e4549fb6c8f998e0b8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/feature_exit.rs",
+      "sha256": "31ebd2c887736d77653637412b014c3630bb7bd1cb141373e69896a4ba86cc69"
+    },
+    {
+      "path": "crates/hertz-desktop/src/feed.rs",
+      "sha256": "4025514ee18d9f960e40426969a50e55e9dc7819b75b1d538f80950ef8b51df6"
+    },
+    {
+      "path": "crates/hertz-desktop/src/host.rs",
+      "sha256": "b90f2ddd43a3b3435d9a3a79a940827f35dc9c1e0f15c9225db01853052c5331"
+    },
+    {
+      "path": "crates/hertz-desktop/src/hotkey.rs",
+      "sha256": "88c6197911b55f0692638bc511725bfb2533311f9e98b7069f0a8cc34620f93a"
+    },
+    {
+      "path": "crates/hertz-desktop/src/lib.rs",
+      "sha256": "97e409240964bbac242d0752f4516650e0e83e45589f89c7bca5e85ebe885b2f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/lyrics_settings.rs",
+      "sha256": "387f8740087da1df06467bdc4ee8d6ed213c3cedca873fdf808cc681efaa872b"
+    },
+    {
+      "path": "crates/hertz-desktop/src/main.rs",
+      "sha256": "1ddc16d22227615ebfdbcd4756662fadaf62c64ebf818038e41d41ec41123669"
+    },
+    {
+      "path": "crates/hertz-desktop/src/management.rs",
+      "sha256": "2f1141fef40131997d756c914feb8c572da1ad58647d09e37138d70a03670c33"
+    },
+    {
+      "path": "crates/hertz-desktop/src/mini.rs",
+      "sha256": "a5361110d347bc6cf62bbd39384c57f24d6fc2ff779eeccfdee806313b390ada"
+    },
+    {
+      "path": "crates/hertz-desktop/src/mini_feed.rs",
+      "sha256": "ffdd742289431153815e99284eec8e9995d8f49e936d1294080d1f70e75924a5"
+    },
+    {
+      "path": "crates/hertz-desktop/src/mini_native.rs",
+      "sha256": "baba8526de171df0478e274bf38b19ab079423025bcff9257f5cff828d204145"
+    },
+    {
+      "path": "crates/hertz-desktop/src/native.rs",
+      "sha256": "a27b9419e65f4b5a3f0d720b46f0f05c9086ff2bf914027b939b3e3185e608af"
+    },
+    {
+      "path": "crates/hertz-desktop/src/native_events.rs",
+      "sha256": "197d723cfd0e2bc096ffd0eaae52afa1e39e2df64427cfdfc43d6be0d2d091e0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/pipe.rs",
+      "sha256": "e21975cc2bb82308e1974c964ab20f1d1677e8a243a1c4b3b15e28c011ec3847"
+    },
+    {
+      "path": "crates/hertz-desktop/src/root_owner.rs",
+      "sha256": "2b6a620aea9176e9b66b74e7c7160d0f28b436ffc41d3ebe8ae65afa58fe476d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/settings_embedding.rs",
+      "sha256": "4cbf5f8cdb1a98741001f93b37a5b94c415ce0f719262095dc9da04d48b62168"
+    },
+    {
+      "path": "crates/hertz-desktop/src/settings_presentation.rs",
+      "sha256": "b87785a54ab9a31375623ddef49f7fd75e0986c59f87cea159fd6ed4d32b0686"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/access.rs",
+      "sha256": "fa78aafe7e0fedac63c958bb5fac030678cf64dd5ec90e4980a540685f97fc33"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai.rs",
+      "sha256": "632447cf7ae4bb5ddc86e1a6e4307bb610b68348372cbbb0b24e33e208fe1edf"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_asset_sets.rs",
+      "sha256": "4604c42688a6746cf49f52b54d07a512922fc75b15f1e0fec64eae7d4801464c"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_asset_sets_lifecycle_tests.rs",
+      "sha256": "48fb56c4252037b4577b37176a3a4e10c39ea242c49459854f0e039c442e9ec2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_receipt_budget.rs",
+      "sha256": "98f5bbe15c9e01ce09688f4fa7ccba0c5094beec4c65998c94ab7617594ea622"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_receipts.rs",
+      "sha256": "a798cebed9ed5d08c26ee5cd51f49b3e01db9bf15b5d65e2928f56c38295832a"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_receipts_composition.rs",
+      "sha256": "cc6e5e2fce3847b6920536ff1b7ee10eb34ffa018ec54fd314be20ce00ce3681"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_receipts_image.rs",
+      "sha256": "863b9474813274ee8bbbf96a8a9adc27cfff6c36a68c39cbf4541073410605f1"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_receipts_image_tests.rs",
+      "sha256": "fa1d1637c7e8300d6c9850594c399e4197a4896fa8ae5746ace8ac34b242d678"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_requests.rs",
+      "sha256": "831e6a1e72122007724f407461d1d0dcacb9f653a6e4c52d3045b9495c8424ce"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_requests_tests.rs",
+      "sha256": "fdd44fa5c657018c22459b6a3de4134be335f142226b5f242f40285fa2a87789"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/ai_tests.rs",
+      "sha256": "127fdf419eb985ced91227d2949e82f7f56ac54c2b958a88a80e18f159c01695"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/api.rs",
+      "sha256": "8c983281419e9315e61417955c4f6887fd8626ed5640f4397dbd8bcf35ac0845"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/assets.rs",
+      "sha256": "227708857422dab49260831f857e3f37f5970023b9348280d929ba02be1a5cf4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/assets_model_source.rs",
+      "sha256": "4d8eee1541d2c2b01c8426e3d03d1bb65bddedbf9f34fe7d1fb1f04808e53496"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/assets_model_source_tests.rs",
+      "sha256": "5f05eb66b443fbf876738bc3059e44bed560b486655ed9eab99445a58b6d885d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/assets_source_pin_tests.rs",
+      "sha256": "3312b79b7383aee042c989724b0ea2139bd014da1bf3b01bdc49697cfd12f3ca"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/audio.rs",
+      "sha256": "b7105db951a401a50c405a5d0107e32c0742556d85df7dbe654828be2b6c6878"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/audio_capture.rs",
+      "sha256": "7767adb2a999dde76cbe325655a1c037547b5da0c10f97bb0cf3a4f20c30abe7"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/audio_devices.rs",
+      "sha256": "19b9b42022a2e3e30da1b5f5d608ff4967f39d8760132aa7fdabcc60fa2e2080"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/audio_service.rs",
+      "sha256": "c6eaae259d9cdb71f66470d5e0b76b617d315ff157ba8fe4c0b88e1dd61a79f9"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/audio_service_tests.rs",
+      "sha256": "48441b47a4efc60c53e9e13ff7331ec981b73566eb7bbe7bbab085f44bdd09a3"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/audio_tests.rs",
+      "sha256": "092822bb3170850aef84d93d970ecadc187c62ec3e14ed0edca05652e8493cb4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget.rs",
+      "sha256": "44118c5c150fdf364cc5ce89122e50debda13711d944ce1fcfc84972c05d9b68"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_allocations.rs",
+      "sha256": "49cdd2837f9eaec27b565e083fd00326ee4e3cf98f8047295de3708c249973fd"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_allocations_tests.rs",
+      "sha256": "b510c5d4a706076540be5eeb1c7e6419c06189d5b6e09759cc75627cda618fb8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_bootstrap.rs",
+      "sha256": "9b57a9fc5208037ae7367c0d248fa07ce187eaa2e7b507cf0d020d805579df23"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_bootstrap_tests.rs",
+      "sha256": "7d61f2de5dfcdb895e50df28e116730212d10a65f5abcb5672a8a4ae95f00ff3"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_catalog_tests.rs",
+      "sha256": "5605bef78dd3e3019533858553676a0605ed6908769722192c1b8f8deffc20ed"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_checks.rs",
+      "sha256": "e2c13e57c92f93e7caab5bfbe85150ccc2e11dd14346c49bea0de48003eeb023"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_composition_catalog_tests.rs",
+      "sha256": "0391287d3891bad087a679c7b6dd6efd71ac59d0e523a8fb325cb3643fc6ff85"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_control_tests.rs",
+      "sha256": "4c71392dc9947fc9c75b05a5876797b0775743ab9f671a014952e0d02c3de202"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_diagnostic.rs",
+      "sha256": "dbf29ee9884210765797f8b4331dbb603141a58cb7f6418a8024112f33f1c685"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_projection.rs",
+      "sha256": "4b40ef1f3c488c0fad463d0815acbcd1b901fcedbcbbd537a9b3ed18f3f8c6e0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_test_support.rs",
+      "sha256": "ac3157a34723b6dad09e3a587bb6aace4ddd721590ba3af46bd1a10752a8d60b"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/budget_tests.rs",
+      "sha256": "383c3e686ea05486a2b68605269947f6fdd5edceeb2db580914137d541819131"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/builtin_plan.rs",
+      "sha256": "731a7a24c7bfe54797efc7eb5d66e23828d1b209799637f369ddc4745d38439e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/builtin_plan_tests.rs",
+      "sha256": "7a03491d3112e4b92c3a58995af8296bed4febfb90f4d5ef47d3d2c7ff35e1f0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/apply_tests.rs",
+      "sha256": "1e4a084ec87f42712ac88d80addd5b054a9348930a30cba1c49cbf6dbeb1e2c6"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/auth.rs",
+      "sha256": "7af9435cedf6fb9d26c90218c819c5e5aa008cb4ce2d277de79bcb06281cbe67"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/auth_callback.rs",
+      "sha256": "dd38a44099aad7daba6702b80c69b532cef8dbb60295a042d3ca15f9e13ec58d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/auth_callback_tests.rs",
+      "sha256": "3d6994281d18a81fdb0348d66d226718f2584caae93a2a7e80aa88ca3d83d6c9"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/auth_jwt.rs",
+      "sha256": "f9b28b3efeed3090e69f2f66b2cd7678be7ef8632e7746a43dcc6c1311965e70"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/auth_jwt_tests.rs",
+      "sha256": "f6873b51268deff9d732463dbb0c24fb8588a30aa764da40cd465e5845b16c97"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/auth_requests.rs",
+      "sha256": "dcaeffe38f7dbd75146bce85b38e3d67a36e09654a6c8af632d099dec307a463"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author.rs",
+      "sha256": "cc22d20cd381bd45dff06172f8250a3c906363de34654f0a880a266466307168"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author_model.rs",
+      "sha256": "0695b1fa3c4cc7d8d2c75646bb622746abfabb55230264229f24775adef85edb"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author_queries.rs",
+      "sha256": "86406fb77e8c214133a3657d65f0541b9c35d382ff1024d0dc2c2ff37b038f53"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author_reports.rs",
+      "sha256": "914a78453cd2e217f8d9c1f1613fc8345f254fec40d88335c7972350474d5a25"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author_tests.rs",
+      "sha256": "94623438f228d21ede9f7dc2c7eb93e1ada5493f0538de91c6ac2cf3631c2e65"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author_transport.rs",
+      "sha256": "beb00ed4d174d4ab08af6b0befc707d4c89c014a1623197b7ddceafef923b832"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/author_transport_tests.rs",
+      "sha256": "7ff40363c4dbc3d4183d281cfa9f4ef492f63f44e6d057b1cfd4edaacef4d4af"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/credentials.rs",
+      "sha256": "adf90f6c2476e7d12c539c88635de79354e6ee1f0a51cea192ec2f4f85a305e0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/database.rs",
+      "sha256": "94abe7c3277ddb2f4989a888413306c278b3ede673c7a3cabda73bbaa3dc9cad"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/gate.rs",
+      "sha256": "af42a9d07b8c1652641ba182ca914b9796a6cec76bccc4981ab48644cb7a8c7f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/mod.rs",
+      "sha256": "18bdb0142cf54d4a235afa860089eb19bbb122143be4e6e729be5bd76316f05d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/model.rs",
+      "sha256": "8bfe21a910c3cbe5045216a6d4452802580624a61a0fe46dda163550573e6abe"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/network.rs",
+      "sha256": "31971909a631873a5e7d47042843a3a70fc8e53f34d52db5b54b02b8caa70be6"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/network_policy.rs",
+      "sha256": "5d5a0322e652512d4efa0ef9b93cb8ca17bc572220f79c2e3273c21c580322c4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/receipt_tests.rs",
+      "sha256": "35e7cb06fa56726d6c82f4a6f2dd3842e9fa9ab49bb76ee1e0cc6aaf34bde1ee"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/receipts.rs",
+      "sha256": "8815f87d40510d6b3cd7414be8920ed17d1f079fa24827c6d324e105de3bbb68"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/store.rs",
+      "sha256": "a38a33e355206db825619dd80ed2faae43f5200333e4c33f2273947bfbf5cfa2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/store_tests.rs",
+      "sha256": "cf4a9cfcefacf6abc4a154a40e937b43b4e5e6890e499b6ce80512118a2cbe2b"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/subscription_tests.rs",
+      "sha256": "2b889a11fd5ad87fc4474e969434a39fee256c085bcef30ab29d11020455c770"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/subscriptions.rs",
+      "sha256": "ed0a7d1255d917cc7186e3463e9462adaffe03bdd9706b9e304ed690c498ebf3"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/community/test_support.rs",
+      "sha256": "715a8ff82730ec62fd2588ed33fffb5adc8f4da99178770cd32daaf37f206b0c"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/composition_inspection.rs",
+      "sha256": "d2c5f75b132477ba36162472c576842f59aac95666acae74e9ef1a2fbc423348"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/composition_plan.rs",
+      "sha256": "a55353c83f69cef269644a1556e7a37be0dfbafe49170cd2b6bec6cfbcd4cb49"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/composition_plan_tests.rs",
+      "sha256": "38c4c4bc3aff2157baeb3017abfd59e4ed46380dfe1bceddf83d9439208642c4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/config.rs",
+      "sha256": "162917bb8201909edc0b578be80591c7911c2448ed2cfd299c67d9fa744898b2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/content_quota.rs",
+      "sha256": "36965a610f3d145e8720d51342c0ab8fa9f177d0c126fc25577de3897c09f21d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/content_quota_tests.rs",
+      "sha256": "1ed911f9d3bdb142a6944f869ca632da57940e08e00ea543a7d7cded9814db35"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/decode_probe.rs",
+      "sha256": "28434f34a850d82ef7eee13030944a3830b023eeb050c52b8c76248f62eaab1e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/decode_probe_close.rs",
+      "sha256": "cdfacf93739f90e9c4e553d76881015e9427b3191a6345fcdf8f91fb05e6b6c0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/decode_probe_harness.rs",
+      "sha256": "340e2439d2caf4816562af2bb0c17c9c9b19da8b058d4fd70bf75b1dc061509d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/decode_probe_tests.rs",
+      "sha256": "0892b37f912c5ae14204123352d438aa6448f7fb847da1c271db2589c766cd37"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/derived_cache.rs",
+      "sha256": "d081ca58d949c58707adb109698950e0c3fb1b722dab04460ff031f59f99b182"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/derived_cache_tests.rs",
+      "sha256": "881efd9addf23e779f8bcab5d2cbe40aa05f882f699a153780ed43e54db44de4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/display.rs",
+      "sha256": "451bddc9027caa7da1b8ac8c17511595c249f6f149351efc16b1f6b5f7b29717"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/export_jobs.rs",
+      "sha256": "6b826afd274a771412ecb3a2e1d836a883d7c35f4618da018c5927702c2d9391"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/external_requests.rs",
+      "sha256": "96eac99e10ffb74cf177b5be730cfb50f997ba3f5c2dcb730523aa1fab9c16a8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/file_tokens.rs",
+      "sha256": "79018f438465ffe145527427d4b03461a850202fccdbb9340d3e4e4c673ea291"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/follow.rs",
+      "sha256": "132322e6065f1d90260878a58f73c48626d524213d7f896c8a9fda368f7186d8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/font_prepare.rs",
+      "sha256": "96d5c3eaaa378d9a6f2aa514731d3a6417f49dadaf4f96098d41dc0dba86c5aa"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/font_prepare_tests.rs",
+      "sha256": "572b5ee9d708f1d3f5ccbac4decd298c37a63a99503d1624360ded76c26d2c18"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/frame_window.rs",
+      "sha256": "e2a2aa02a273c095942c4a8522677f89e39aade8c92623f4cee69e3a015be3d1"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/generation.rs",
+      "sha256": "d779795fa4f5e6c99f6cce3747cba03f92faef23cf8058d24af96d6a18e3919e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/generation_http.rs",
+      "sha256": "dbe181c8807e0ee37a7fbdb68cb532d30d8376c0329bc7da19988891dddf7b3c"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/generation_pause.rs",
+      "sha256": "00e8d596dba52e52fa61987a36a0274509420598fcd6f92b1b9a9540d0deab6d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/generation_pause_tests.rs",
+      "sha256": "7f065319098a09a18f974680747fda6e283398b11ca21a222c8c7fed9a8dbded"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/generation_receive.rs",
+      "sha256": "11457537e6290dc212e862514fc04a1cf1d18ff0a1c711d2efd63c69e2764b32"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/generation_tests.rs",
+      "sha256": "a7c330013d990824389b896883a9a57512ae7eca8cd31c1f6cfde5ec1f2d53fe"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/gl_plan.rs",
+      "sha256": "e6527cc3e664b26d52bc039915273392a295409000b2b0d1d2546c599eeb2a13"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/gl_plan_tests.rs",
+      "sha256": "4694a923314e6b4d5771c66bc8d90685664e416dc9d8757b05801212a6e0b93f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/group_playback.rs",
+      "sha256": "765aa26168e01890919a5cbbf12db32f852b78d2bfe6bf0edd0557962d0fcf2f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/handoff.rs",
+      "sha256": "d715d8560c130f95d6a73160ddb01317ba4c26046e5f16c75ed6952fd2a21a17"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/handoff_tests.rs",
+      "sha256": "8cd1781d4da668e0dda49097047ff320a0dbf53f91991799c30383453db7fc42"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/image_prepare.rs",
+      "sha256": "5e6a58fc71740ee32a32b8a6f3beebf4e64b54640e6b550023a77b365fc7a38c"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/image_prepare_tests.rs",
+      "sha256": "b36e935c4902f023c7bc48ab18a7990964f5990e0f435d36d5f5ee9905e90772"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/istream.rs",
+      "sha256": "35bb4f963fa05fe5400df535603a027bfc85e9d2f600059c6ab22575d1dd9954"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/istream_read_probe.rs",
+      "sha256": "70046a9ec3e620fedd1d81e3a723daba978d5c042744473afbfc3aa769a5b031"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/istream_tests.rs",
+      "sha256": "221a456ab6bf849ebb619b00cbb72d8c15fccec47cd1f7ba6153695141cf1512"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs.rs",
+      "sha256": "e8fa4e23449fbc9ee742fd166da571eb231832cca07a304fd8187963cb8d0332"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs_ai_compositions.rs",
+      "sha256": "33d0ba04a9dec2dc2be5abe7c1b2014b97a4c8bf3e66ca6245a5c5b57c3328b9"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs_ai_images.rs",
+      "sha256": "7877d611c4f5f3a0a2ddc53dbc81c0f44770b8005c90de3ec4d4a05ff02cb35f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs_community.rs",
+      "sha256": "d68e72fdc3e0b5d2b47e2239f7752e3260e9ee44387c84145c5766d0e0048c46"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs_model_input_tests.rs",
+      "sha256": "5140c4341c9ef0c938a96089193243d800ec4be4de14cc35a50c5394df2c470f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs_model_source_tests.rs",
+      "sha256": "2a7e5275ace05f98c85435aa9a904a3bbdaef1f005acace35b1c683ea7183a2a"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/jobs_tests.rs",
+      "sha256": "5a16495e461ba2d29f9254903492f4d85fda215b5c53a7a900cc88daf58ceafc"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/library.rs",
+      "sha256": "8c9a07f152c982f2b1fcef856ac0155e11dee53276404805e97a81cf77b4e956"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/media.rs",
+      "sha256": "09935ecfb432d74b4adf583aab565702dbec2353c9a807f739adfab3dfaa5588"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/media_stream.rs",
+      "sha256": "15565333087930659d6d52e0c2d8b2135088ca1e326462626f8eb6763476c510"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/media_stream_tests.rs",
+      "sha256": "af419687ed06fb00bb99f9ae2c2bd51832bbc4a74256fda6890c60e9cd9b1f9e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/mod.rs",
+      "sha256": "4bcfd5004ba8cf6b8219e5b26db7d813438b6270985fe81afbef5a7d3fbf5ad2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/model_native_facts.rs",
+      "sha256": "c364cffe9ec24ab14411b1646a19b51d33ebc0508f9d335551ea30f68669c00d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/model_prepare.rs",
+      "sha256": "1b627fb4cc0167c523de93dafaf0e4e77593e7a4da649e3bd532acf504e2b436"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/model_prepare_tests.rs",
+      "sha256": "7ed1ce44537fa78813b38c770df0873f006c390e449767c6ce5684578005a985"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/model_texture_closure.rs",
+      "sha256": "01be6203f009b1112cc0aa1cefd0514d0c865e75d1cb880e42cbf1e65baeca66"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/model_texture_closure_tests.rs",
+      "sha256": "88928f4278c1f3fca985a47d6a93308e1f906ef3add451c0a652e3e6612a77e6"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/native_release_tests.rs",
+      "sha256": "347c5b0b20e6680a8f1abdb99d7c4e8512f3677e65300055e66738114d816eee"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/output_tokens.rs",
+      "sha256": "5fc23b74657a51a05af1b1355de327caef5484406d22448417fe67c314ef4e13"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/page_events.rs",
+      "sha256": "58e92e01fd72c48bcdc52da1e7e964de6a014679dbea001cc2ccaa8ac43a38e9"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/playlist.rs",
+      "sha256": "632208163e6700a54cab4d5ce5ee83ccd6bf3117f16846383fd814765bd675af"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/playlist_edit.rs",
+      "sha256": "9b9cc48e56ea389cbe875fc0716436dde13f118d58ec278725c8c3c918f3e797"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/playlist_edit_tests.rs",
+      "sha256": "7eb80ad0865da0a53f9f5ffaf74856ff56cae743f13e259a8031f67c2e1d54d7"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/policy.rs",
+      "sha256": "04b003b7c228dd896b7da55d50cc0902875cd74b4a56e571ee50d04f15ff7392"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/probe_environment.rs",
+      "sha256": "f1217bd52c7ecc686719653647620f58a7b0406c290ff50cbdaf0e721aeb93bf"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/public_properties.rs",
+      "sha256": "9ccd6e8a735139de10a9ed7cd6f444223be2ff87b9b2219b96733db86c5b4e8e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/public_properties_media_tests.rs",
+      "sha256": "a69d6ac3084dbfff29cc81d05c348bf8ee85f927304b4f9e885dde0fe11bf389"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/qualification.rs",
+      "sha256": "f32610931a7f96a45eac2046979eecf3dd0b71d42c300633f437a9da0ee33ac1"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/qualification_tests.rs",
+      "sha256": "cec33021f02587f7a413dfb7339af99a761973c7d6856335ce5af9b98a3c361a"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/raw_import.rs",
+      "sha256": "e3728eb497301ab770ae6cfaf5ade93bfadf51f3ae71ad410304bfc218663a0d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/references.rs",
+      "sha256": "c58a341f51dcd63ad62a286ab3b1d88ef069bc1a1e4f60931da9c6f09e2fbe69"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/selection_plan.rs",
+      "sha256": "959fa7a57d88f9563ec2f67f9f0942cab3b6396d41252016eb11ae09838c491f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/service.rs",
+      "sha256": "92e9611060c4700a597d19bc90f9f7c01b7a27afb60d87bfd12d28a819a0af8f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/service_ai.rs",
+      "sha256": "9f9f61c4683402ba9c653c93c08b2834a9f72f050d1bf24ad70c4e955f918e1a"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/service_playlist.rs",
+      "sha256": "3cd7b31948f2455998c1df7e87cd17f6b910aeaba5a4c97fcf7b040d95c441bc"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/session.rs",
+      "sha256": "7f503f585ba02ea04a363d4085ff16d8db0a541eccb9151142ff5d3e4bc26a06"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/session_tests.rs",
+      "sha256": "da60f31c3e85643594d05820f720b801e9fe3651f1694fce22cb14d8096b1df2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/settings_drafts.rs",
+      "sha256": "fa40e61560a53944fa7a1df360b98301b7939cf2d68e114108aec7e946fc8be4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/svg_prepare.rs",
+      "sha256": "f07a64bb54dfefefc59542e584ac3d4fbf4b26abdd09383c1f1acc6a2847782e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/svg_prepare/cache.rs",
+      "sha256": "37f91fc1ad160b25e1c6049aacbf2e9d27bf742af4c9c98a8dbc67544c840dce"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/svg_prepare/fonts.rs",
+      "sha256": "cb0ee123ff4ebee76151d2e49655d09f79c3432cab44c1f6bf281ad7bd8a8bc0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/svg_prepare/render.rs",
+      "sha256": "04d607ebce2a2257878afbcfb2b395317514f4b3cdab3fffced8a44da584b20e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/svg_prepare/validate.rs",
+      "sha256": "3a0a9e81d727d2e642e09b09cc4abf711d7141f002f9b54b6808da7a49200813"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/svg_prepare_tests.rs",
+      "sha256": "3849358e36ac4911e820d4d6a90c7314db18d8a0df63cec5d364ba1b17ef47a8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/target_planner.rs",
+      "sha256": "f68fcf5a4a5ca0fdc793f3f5919d3cf6c0229608aa01d0b548159ab58634a7ce"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/target_planner_tests.rs",
+      "sha256": "86b8f1994cd561a2ba694913d0948222baa950ae6702d5525d4558b6393bf11f"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/text_raster.rs",
+      "sha256": "6fc81cdef83f5e859052c492f514a1b84360ef8a3931c07f1b402a9241cb5fb2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/text_raster_tests.rs",
+      "sha256": "77999cc0d759192a4fd32e82f065b7ae6c49632d516c35124352050215981224"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/video_poster.rs",
+      "sha256": "3755713c35439960bf4a42dca05808dcdede74480d7c88dc34008108daa2e8c4"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/video_poster_tests.rs",
+      "sha256": "78e830e0745e820fe69dc6490b9a554969cf3dba255412a20041560a185ad6d8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/webresource.rs",
+      "sha256": "28b2bac65273a5f40cf37a621b5d974e657e41277c69d59d98bbd57030c3270b"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts.rs",
+      "sha256": "fbb26b751f350517bd1772ead0f1811802b8d8f28e5c68fd0af9c7d4937ecd93"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_composition.rs",
+      "sha256": "f4d1e92f0f72c34fa321c37fc1b44b0bb011b80b1eaccee25a67598835b37e52"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_composition_package.rs",
+      "sha256": "be083cddb3461075c3d3f5efdfc1bd2febf3518ac2cc2770d10a9616774a44c3"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_fork.rs",
+      "sha256": "dd5cdc38cd50d8b7677bf2a7a7b692ceae1151f756aefdba9a29bf63f56f288d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_fork_tests.rs",
+      "sha256": "7df75b46d75f2a6bc9dbf1f3aa03fd4d96fe742a6edd11fbbf0cb6396c22ea7d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_model_tests.rs",
+      "sha256": "f84f514f933776dd6ad0a0b3fcc4c92d09681ff4513557d9b29ec8d04de71c54"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_models.rs",
+      "sha256": "f1bc9afd61ebfeaa47c99c1487455793cd614fab21a4bc25e6c8ad8236fa7814"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_structure.rs",
+      "sha256": "6870095e595a5b4f32ce06d1bac19fe542b9741d09a25bd9694cec8407590394"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/work_drafts_structure_tests.rs",
+      "sha256": "5106c36aefa7df04eabc080259c0933c33b0700cf45f12ee0f233504c4831858"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/worker.rs",
+      "sha256": "2f90c1d59665c08ee980890bcc8bc6b1463ee32d2d369a3530fabc7da8ecfed2"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/worker_protocol.rs",
+      "sha256": "599308e2e69431ac4d38b6ac391bcaf1117d41d7a4a53616dee622289584f02d"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/worker_renderer_probe.rs",
+      "sha256": "e839c968542ce6cace54de510e162bdb813e1ddfcff257c23b963be6b99b88f6"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/worker_sandbox.rs",
+      "sha256": "13babcf9a0d8b49b6a0d55679e2301a0a0f6a1b6b8ac6da8e728efbd2986f7ba"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper/worker_webview.rs",
+      "sha256": "00dc39518ef96810810107a3995d115e28fe1f991a843cd44b15646e706e1883"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_ai.rs",
+      "sha256": "cc850fbaf3a2ed491b5b51258576bbb2da2725d7349590531c0cfa3b6dc6daa8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_apply.rs",
+      "sha256": "06a2068a80129b0255e5454b3f79cb6a390c29f269c1a29fbeb3813f0ec49bf8"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_audio.rs",
+      "sha256": "6dbc9f0d8c640e0edc02f0774849e053914cb7b63bf9b8c1364ec81484f36043"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_close_probe.rs",
+      "sha256": "3bb4fb424d33bce533c871941af3c38408d95803b2f43264e2a0576b9baccdd1"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_community.rs",
+      "sha256": "2a2f753d1b65dfc9bbbcfdae8e386fc3e560b7016af8be4c1b7a36e0a1953596"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_community_author.rs",
+      "sha256": "dfbe63e214a566e8b7bbe9a32795158c86b517d9e004de97bfc9dc75978aad33"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_community_author_tests.rs",
+      "sha256": "590c016ae922e9b7b1331160ec4eaa5f6044e9e27b46a88d25a6aadc94cecc4b"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_community_background.rs",
+      "sha256": "be565278464ba71b66aa3ea1bb2200d2ef3c471100e4dd59ee3f8928a15a818b"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_community_security.rs",
+      "sha256": "4b881834de269f53edea0e567fae8bfd08899835a8990d8c5035d8ddbecc0c44"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_community_updates.rs",
+      "sha256": "5919d32001701bf73d0b04d94088ea899c799a9aa224e263a4e9bd31198a5909"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_desktop.rs",
+      "sha256": "64dbbb2dbef8c35db292ff00ac75533d3623e7814b99dad7a8ec597210fcf9a0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_external_requests.rs",
+      "sha256": "ba6eefd1bf776f610b46f87e23aa63b6fcb2d76f83d5195bb08dd701f42f0020"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_feed.rs",
+      "sha256": "e5e6eeab2830c6e78179e9ff1e25228c1a26c3ab98d017b9846f0c2f933e9a12"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_handoff.rs",
+      "sha256": "0bc8747dc72f515614214fc6cd16da85394eda6340062cc98dccdfd25f4e2cd0"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_mirror.rs",
+      "sha256": "3dc5e626225ba45237806b559f797b50a213294ecd3422c6c2abd29a3f5b7b4e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_playlist.rs",
+      "sha256": "ed74d98042ba14b73c60c61091ebf568c30e5eda748f98a9380a010e7ce6e986"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_pointer.rs",
+      "sha256": "c8b1c769addfe0217b7ffecf4f264bc9fab594b6a91e621e88569c0e2aa40a12"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_preview.rs",
+      "sha256": "c1db41a6b0d708978703e5b3562fce79c53a05a2a77a65ae20c66440efc6ec6e"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_runtime.rs",
+      "sha256": "6995f5825f7fb50287b600b54c98be18559f44b733ac71930665a8acc0a23bbc"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_upgrade.rs",
+      "sha256": "7e268acf26fb4debe2ad413af2d93c46d96c54698bc0eddeb0f8e546bb8b071c"
+    },
+    {
+      "path": "crates/hertz-desktop/src/wallpaper_upgrade/tests.rs",
+      "sha256": "0f1618b598606bc0e695b27da22a67f34973a7880e29a3754ee05fb98822222e"
+    },
+    {
+      "path": "crates/hertz-sqlite-lifecycle/Cargo.toml",
+      "sha256": "9c5007f690c57a20d39c1d8f34f9aabd097e6802e15f1ce79779feff28aa76b0"
+    },
+    {
+      "path": "crates/hertz-sqlite-lifecycle/src/lib.rs",
+      "sha256": "6b63ef9b2316a79b9e10ee55fa78b19c0a6b6eedfa5603092866f05ec837ad06"
+    },
+    {
+      "path": "crates/hertz-sqlite-lifecycle/src/tests.rs",
+      "sha256": "fbaed59a463d326bf9dfe0436a1576fc085e71c2c17f17b745414c3c72682642"
+    },
+    {
+      "path": "crates/hertz-studio/Cargo.toml",
+      "sha256": "b33c0e3b036c1bbd9d2a1541945e40292aa850a85f03cef03eaf03282ded2fbe"
+    },
+    {
+      "path": "crates/hertz-studio/build.rs",
+      "sha256": "aa216a57a5cc0713c58da009a3d0716604a22cc9aead34b0c068841c6392a529"
+    },
+    {
+      "path": "crates/hertz-studio/examples/system_media_probe.rs",
+      "sha256": "1188a0052c959e67c5622065490aa9dcbcf0710e55b081d82e517474b9ee4500"
+    },
+    {
+      "path": "crates/hertz-studio/examples/wallpaper_mcp_client.rs",
+      "sha256": "05ecb145079eaeb87378a7d4cb6dd1bb8b2b81e8c5cc37a975ab3fc6ff6ab58d"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/capability.rs",
+      "sha256": "9230e5a9219caa4bdcfb1e3eaffcec226199e9b3b5395dbed39d64ade83b719e"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/composition_provider.rs",
+      "sha256": "7a79647a81131d7551e6f776df2c0c43db950277f94279ed53a85d161e3bbc7b"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/contract.rs",
+      "sha256": "8dde03c75563876e4febfb2bcae8658efe5d36e87018d38d7b1bf780c206a244"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/credential.rs",
+      "sha256": "a289297db83fe0bd3f53274ffdf8892deb3611c915dc107f2d86994734926dac"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/emotion.rs",
+      "sha256": "7cab0f64b4cbe5dbd1aa25277d34daa9c6312b5cabd29736df4e38c4013ce040"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/evaluation.rs",
+      "sha256": "1da266090f869080ab00939b386866c031e0f1f53a345852817b50b122aa37b0"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/facade.rs",
+      "sha256": "92b395492b846214628a526ccfba783904a36f737551069ce846201ed81f28f7"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/generation_provider.rs",
+      "sha256": "34647e6588b73fbb2bb50534f3458e3e814ddf8cda040c4a98167ff14f4ac9b9"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/image_prepare.rs",
+      "sha256": "6bca6b23c06c50377f0b98999315c10290c4fd00566859ef183f010baa29a2a4"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/image_provider.rs",
+      "sha256": "49238be2aba4d4684add5749279d8aaca4792377bcfbc6f3b62e18f6e44fefef"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/image_wire.rs",
+      "sha256": "df7c259da311989273762c4a321cfe4612700d789282105dcbff80bb6d69819f"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/jobs.rs",
+      "sha256": "a21738e144efe351e9a44b5195e985cc939b2bcd6d610a9ab3fd025022abbdcf"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/jobs/composition_tests.rs",
+      "sha256": "fe8d6c538e21c75131ccc8f889c79be214350170f087a706dd90719fd35fc491"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/jobs/tests.rs",
+      "sha256": "a1a54d692495089084e7df18e51370283be65f51d75aa5b9615617bf53137bc6"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/jobs/tests/metered.rs",
+      "sha256": "432e2249a0a5e4199df52d9e4a51522a560bf8a35f2bc7a576271ae3d8e3bac3"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/ledger.rs",
+      "sha256": "c2bd74dbd9c1d0a5f30fc70cef35f7bb86b74569576918515e6a9b34215b6d59"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/lock.rs",
+      "sha256": "63c6d467b418fd1710125e1ce51e43724c3fd3f7c57caef009a871d3b1111eba"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/mcp/adapter.rs",
+      "sha256": "5d6a6ee3f25b0cef851709d62b24656defe82eea9f903509c5a54bcc78d8fe3e"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/mcp/discovery.rs",
+      "sha256": "d1e55ad9c046d82a15e4a8f3cff09d45484d9791dfb0ab5796ea3e173d477d0f"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/mcp/mod.rs",
+      "sha256": "3bc1dd44812b13af1eb61969b7edc7a8cfa3130e06002ccaae2a3d10f867f414"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/mcp/server.rs",
+      "sha256": "0da82f90f75a5f145b07e1a339ad5c84dfe2585dd11f4bc26c7d5aeb66d0cc74"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/mcp/transport.rs",
+      "sha256": "6ad56daea300736aa54bfca92b709bd53f300cdf6da1156b6c675165d6468668"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/mod.rs",
+      "sha256": "ace952956e66fbc0805fc8dce37005c80fc84e7923aa5243badecc50cd626869"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/pricing.rs",
+      "sha256": "19f17f7ea9b99d024c062637e5ce2d1ae3e3dd7abf816ef93b634d6a763123eb"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/pricing/tests.rs",
+      "sha256": "b5bba5f257e9b1bcd1e9a76bc31b350ea9f632a6efdc4eab9ddd7898da000642"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/provider.rs",
+      "sha256": "36cfc41466e50f7fc8e2776f5d199db6ce05a50f874498591f52b6e2bc2af0ec"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/provider/openai_wallpaper.rs",
+      "sha256": "46242015b349be1e6f41b61892a25d1cc8bdcaadac13e5fc22f5be7b1d94e337"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/provider/openai_wallpaper/tests.rs",
+      "sha256": "3af0c3bd304883fcb1b7f6281321996f8f6beb75761a844e902f3ec89cf98d98"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/stepfun.rs",
+      "sha256": "50b66fc6bf2db654fc9b90a1e982fa6bab403997262f2d49e66dbe15f472409d"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/strict_json.rs",
+      "sha256": "776e04d62b35137feac5d1a4073a1172622fdb760d97146931cf6d507d57de48"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/usage.rs",
+      "sha256": "32ce26ed6ff155937e5eaf75ae8f5b50f348537a886a32478e3b1e3cf62286cf"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_artifacts.rs",
+      "sha256": "6fb1fc1e0aec2b0fa6a2140e11b35b6f6fde985e1e54d247bd4adb0cfa8b42c5"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_asset_sets.rs",
+      "sha256": "43df9c1dc7d5c98ed771bedbf92038f85b02b11002be5e420cb71e8bf8c4ba10"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_jobs.rs",
+      "sha256": "73154c42daac7ce5ebfed8362f2ff445bcf48e06b8a6eb90edf0f5393ddbb11d"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_pairing.rs",
+      "sha256": "cc84208ea86604894d5ec6530722f243041c88dc51fe62771fdf633e85a9e1d2"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_pairing_tests.rs",
+      "sha256": "a64e3c07cba933052788db5202316bdac51f3ad7f4e7e2714c87b046434b7026"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_provider.rs",
+      "sha256": "06a6c11a0eaba62764a6049ed8eaf5137bc2238f1d2dbcc4a2815c7af00a48b6"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_provider/tests.rs",
+      "sha256": "49114e3dcfff82e2e93f853c5597b65f907641121c74027be066e5cdd7727a39"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_provider/tests/integration.rs",
+      "sha256": "9364938756e569953edff47fd7a0b9197682b3145b57a8260d3c18efa52cbc02"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_request_schema.rs",
+      "sha256": "bb39be28fe7759ddb907dca9bd92b4ea89caa73eec6940413588564c5c38c449"
+    },
+    {
+      "path": "crates/hertz-studio/src/ai/wallpaper_requests.rs",
+      "sha256": "036571f5a6f1f1556dfcadf2feb07cb259f09d61065dc814dbb7221e460dfdea"
+    },
+    {
+      "path": "crates/hertz-studio/src/assets.rs",
+      "sha256": "8b4abeecf11f34546bc2ca45266286ee76732b9fd321a0fa9272e9b212dfdc2c"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_impulse.rs",
+      "sha256": "988ea0d58e6af74943ab98454750a5d180046084b7bdfd1458a40356b1c49b8c"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_loudness.rs",
+      "sha256": "5c8cdde4e529e68af9d934a0b55faa0cbf7f5fc5edbf436b28cad588f5863aad"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_output.rs",
+      "sha256": "a9c71920a4bee70e76fa6dd75f486e00428d02600fb7aff75b950de1e4773d6d"
+    },
+    {
+      "path": "crates/hertz-studio/src/audio_quality.rs",
+      "sha256": "6c45fa30acf20e0af66b85623c37737f6f187c07970b5c2743ba109aafe55300"
+    },
+    {
+      "path": "crates/hertz-studio/src/bootstrap.rs",
+      "sha256": "44b6dbc19dd52bef89e864691bb4700899cba3c3da2a9c5a7a30271c5e76cc21"
+    },
+    {
+      "path": "crates/hertz-studio/src/build_info.rs",
+      "sha256": "6b82fa710b4c9be70c8ce77795c14a9e4fc913abdc720ec86c6c3660d359e978"
+    },
+    {
+      "path": "crates/hertz-studio/src/collection.rs",
+      "sha256": "87a99a97e8e8a053e7199b6b7d464292c32805aab2f163313ee22a31a4e42827"
+    },
+    {
+      "path": "crates/hertz-studio/src/complete.rs",
+      "sha256": "7fc1cfd0af9b771fb50147a15bbb5d1442d74321f7e8b638e348404a3bd8cd1a"
+    },
+    {
+      "path": "crates/hertz-studio/src/config.rs",
+      "sha256": "5787075b8973189e05af4dfff01c69ee4f29d2539ece6bcc1202c714e3975851"
+    },
+    {
+      "path": "crates/hertz-studio/src/daily.rs",
+      "sha256": "23c65fa566db2094bed7c15d4a347c02c432ea8012f718411de49fe6eaaaada6"
+    },
+    {
+      "path": "crates/hertz-studio/src/data_owner.rs",
+      "sha256": "e9d8e7f63a8a20dfcf49bf8e7a0bdaa1fa2364d8a07a80325a8019a85b8307c2"
+    },
+    {
+      "path": "crates/hertz-studio/src/database_maintenance.rs",
+      "sha256": "4c50d830b78b8f9799dc39289ac79baba8e5be14a54f1a87d84b85e499de0ae5"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop/mod.rs",
+      "sha256": "1de91071d3658e5e2c55bb62fb5f1ce5abf3a3678d710019c435b25af5e7ae89"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop/standalone.rs",
+      "sha256": "61ba6b5975a3fee94f2fe74320e27c530f152dd9aee5564c71fbaf9042e0cbac"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop/tests.rs",
+      "sha256": "bd62cce12de2f3a2141f77309034cb700ae5d32867808218cfb5033a7ca7cf9f"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop_authorization.rs",
+      "sha256": "638fe80d66edce39cca7ee97066093806868975fa13d4683e9eebf959740f65f"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop_control.rs",
+      "sha256": "4002dd62158d495eee71a91c873a5f1deb863fe3efc93890d2812161ce114f81"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop_host.rs",
+      "sha256": "43a495034166cc06994bb7f3a8b8261d97e5dcfb389a80cf76d595747d916ac7"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop_lyrics.rs",
+      "sha256": "87394c5724d8b80b6eb2191736d3a10d292a8659f8bf1eaa3171555b8b764f6d"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop_mini.rs",
+      "sha256": "e193db9aaea917caeab3e7088f224059846f149530b5ea900fb0f7f0096471a2"
+    },
+    {
+      "path": "crates/hertz-studio/src/desktop_tray.rs",
+      "sha256": "200ec5d9510526054f8dc6d85893bee824269b0da60d1b68a05d961637b3a6eb"
+    },
+    {
+      "path": "crates/hertz-studio/src/diag.rs",
+      "sha256": "ff17d6a818fe66569a00e340aeb8040e4b6824451dd16a69577e6c3c537922a4"
+    },
+    {
+      "path": "crates/hertz-studio/src/edition.rs",
+      "sha256": "e7fd9962e3622224bace1259c7f5d034bfafe2230d4d2c42bbf7e59dde5a6d3c"
+    },
+    {
+      "path": "crates/hertz-studio/src/error.rs",
+      "sha256": "a890fb49e5df641583a6ba99998329dbd5504ee6c0e64633aa7c7243ee7976e4"
+    },
+    {
+      "path": "crates/hertz-studio/src/feed_xml.rs",
+      "sha256": "4d519d1ffd98e86d0fd5b34701c3e7a1fac749b19a6398a01bdfe6ae44a883f1"
+    },
+    {
+      "path": "crates/hertz-studio/src/history.rs",
+      "sha256": "f38e279ff82a73d655625e485a4716cb68c1735adeaa0661c274a365595cf77f"
+    },
+    {
+      "path": "crates/hertz-studio/src/idempotency.rs",
+      "sha256": "dc9de277f2291bc93017ecfb1497c5e4a5dfcdaf9c42780b6c232ee7495f8327"
+    },
+    {
+      "path": "crates/hertz-studio/src/install_owner.rs",
+      "sha256": "8ac6a346c21231a3d6dc301dabdd302910db0f2c080546d0e9fb3687f546710b"
+    },
+    {
+      "path": "crates/hertz-studio/src/lib.rs",
+      "sha256": "21e25867b27b72338fb33e72ebd8c0e3be67e64911621736235d65f2b54be702"
+    },
+    {
+      "path": "crates/hertz-studio/src/lyrics.rs",
+      "sha256": "aa8eaa7ca5ba7a5b5db266d8a24fa12488900bca040bcd62827086320596c15b"
+    },
+    {
+      "path": "crates/hertz-studio/src/lyrics/candidates.rs",
+      "sha256": "cc6b3aa31375e87327a2ac8aeb6e31805c5167b0545ffd6c8af08fbd854f4a93"
+    },
+    {
+      "path": "crates/hertz-studio/src/lyrics_calibration.rs",
+      "sha256": "e7c636a607c93708d1bf4fab212363cff093ff22b5040c3870fcea74aa0c2c0f"
+    },
+    {
+      "path": "crates/hertz-studio/src/main.rs",
+      "sha256": "9cf8fa261180a4090acde27f4056eac9f7b61d60ea0013fab372eb313ed8702d"
+    },
+    {
+      "path": "crates/hertz-studio/src/measured_loudness.rs",
+      "sha256": "d66d478f4d9e5e480bfe8d26446509f24fc4a8f2f0c89e93617859d74c74c49d"
+    },
+    {
+      "path": "crates/hertz-studio/src/native_http.rs",
+      "sha256": "be55d7df2015d8084e6fdf530313da5b6d504f9441c6a56f91b46c8c085bab72"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/aggregate.rs",
+      "sha256": "db33fe013c0d9f6ee3edde1190028c2a841f379862b363986374e5e3b5d9eca7"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/cache.rs",
+      "sha256": "510f19aa58ed277733eeabb804cada2ab96533034838484a43376974bd506398"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/ccmixter.rs",
+      "sha256": "d3fc70648b738093c628b7625d308ee2c076955eb72fa7a66b04691eacb91ab9"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/cred.rs",
+      "sha256": "2ee04270645ac05d40e295df1c02a7cbcdd4c9243a0b47b959032ef7517290bf"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/http.rs",
+      "sha256": "ba9c5e3ca6a29aa2116da976d2c716cff331d6ae19a00efbdb48fb2f4b61b634"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/jamendo.rs",
+      "sha256": "c79b5a1ab139f840f15779db93ce1331c0f81836d780a3f8faf76595b5fcb618"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/kugou.rs",
+      "sha256": "1d98201e5aa8b5a76a4bb2417b546fb25656bebba6ee6ac6157bc9f22d2c4683"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/kuwo.rs",
+      "sha256": "5b51588ba64279820b90cad9deb03f20cfd7a0df61950ea358a73905b32a6c47"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/ladder.rs",
+      "sha256": "a349ccdaf50082418adaccfea56fbaa8cc82cfcad05fd02efe119cbcead6980b"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/migu.rs",
+      "sha256": "33170168e88a8ede55c0538f015571e2af9aa867353346af81d205cc821a5b1b"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/migu/tests.rs",
+      "sha256": "455b86be3fc98f3c4fdc18c1b39f511a77723cbf14b89c654b84aa138f296c33"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/mod.rs",
+      "sha256": "a99d05edae02127998f948d86b88cbeb142dcfe9d4c48c71aabcc35b5d3fea89"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/netease.rs",
+      "sha256": "1a0872fbd9b51c01e959f2691ebd921e093b72f8a08e2953e7e5e1f3a14eb917"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/playlist_common.rs",
+      "sha256": "05587b41c5e235c29ec3c17dee9f68f1dc7849c5c9014d273cfaeacd49e6671f"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/progressive.rs",
+      "sha256": "9ba17cd4d0e5697ccb74e90ef5766ca1bfa3128552ffce6ef319290a4caaf2f6"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/provider.rs",
+      "sha256": "d21c745755f3be9853fc86e862543ec061c0e60642dcaae5dac81a06bf642be4"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/qishui.rs",
+      "sha256": "0b9c9c994464fb10f5dee2773cc3745ac2111c71b9a8d847244d0587e7657c39"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/qq.rs",
+      "sha256": "f1ff09059149a0e2b6a5962bc2d89dbf809a309ae0d6261fc97a079ca14e0bd4"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/qr.rs",
+      "sha256": "02bb6618e728c98d0fd32995489668f3d065e4f7c18132c9400778003bcfb6b4"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/quality.rs",
+      "sha256": "9552520d38e57050ff958092f838d6d6a4587037a1fb710497279bd41cceaa1b"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/quote.rs",
+      "sha256": "7163d431a1aa5917d3295a3020c08e88953e0b8181419e945e809e7766ac957a"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/search_gate.rs",
+      "sha256": "85c598cc28f2def2fdbc950cd5049a311ac00273707fdb8f9968e09b51b3ef73"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/search_pressure.rs",
+      "sha256": "a24f6f08e6ec7d38ed0a269d7c253e5bbbcb899a5bcdc3dd87a02066ca407f39"
+    },
+    {
+      "path": "crates/hertz-studio/src/online/sign.rs",
+      "sha256": "73fd2337333a7fbb70db6914265d9987a40412086762ff7974db7eaf7e0b98e1"
+    },
+    {
+      "path": "crates/hertz-studio/src/online_play.rs",
+      "sha256": "1fb0278d89a763958330800ac2a90c9615cfd854e97f78a4c470c3a824bb80a1"
+    },
+    {
+      "path": "crates/hertz-studio/src/persist.rs",
+      "sha256": "f13636be41343f496d2d246ea3f129803d57b9d3d6fc1ca702358166868b4a62"
+    },
+    {
+      "path": "crates/hertz-studio/src/player_dsp.rs",
+      "sha256": "fea6318ea0a24901180ac0fc61964a120d70fa4e65bc5b234132f17e70f69bff"
+    },
+    {
+      "path": "crates/hertz-studio/src/podcasts.rs",
+      "sha256": "1fcd3ce8f7bb8a7b34fe6117dd5957f43573ff8872cad3419654612dadc80ec2"
+    },
+    {
+      "path": "crates/hertz-studio/src/podcasts/network.rs",
+      "sha256": "01de6782d36284547e45e377a5b5588a98a8587e1dd6161d14f1f0659dc56206"
+    },
+    {
+      "path": "crates/hertz-studio/src/podcasts/parse.rs",
+      "sha256": "10848c5edc1b9d5f9b541feb59f185a5ba7ad65055ffa5f9eacfb0d644a2e899"
+    },
+    {
+      "path": "crates/hertz-studio/src/podcasts/store.rs",
+      "sha256": "778ddd7836949b64272b938863676a1ca213c7d665154dbd4d343f57ce6cc89c"
+    },
+    {
+      "path": "crates/hertz-studio/src/podcasts/tests.rs",
+      "sha256": "614cddd0424f75360ebb42e56d2c3cabb2999547c4f99fb2b598547debe41e7a"
+    },
+    {
+      "path": "crates/hertz-studio/src/public_net.rs",
+      "sha256": "5d49d4009d972f7fe0d36bf2e622d7850b20b46d16591c6feda8bb04a7f49785"
+    },
+    {
+      "path": "crates/hertz-studio/src/radio.rs",
+      "sha256": "2170648b5e98bcecb19f5d0a873c774974d23071197c2331d595e354b257fabe"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader.rs",
+      "sha256": "ddfe6d26b1d9c0bd6a0cfe52e37cb8e621b74481550fb3badf0a53b31f41961e"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader/network.rs",
+      "sha256": "c07f292e3b8e2efd8e8698c8c3f6fcb9b9bde3a8928b65c0d946935fbb299bfa"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader/parse.rs",
+      "sha256": "14573bf28729a84357c63885e02a61b25d15f763c7b0bece49510864acd7818b"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader/sanitize.rs",
+      "sha256": "e273124f12b9a92d1595355fc65a6f454c8bbe543f3ce16275adb577a94fa3e7"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader/sanitize/tests.rs",
+      "sha256": "e1a9cf83009de62befbb326c2283fad0d2bad4b56e43759f359fa11aed4fb84b"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader/store.rs",
+      "sha256": "dd6935ff5591a5ce8cd85aff0fd49a8c5a93a8a1520f54b3829c4ac7cf118d21"
+    },
+    {
+      "path": "crates/hertz-studio/src/reader/tests.rs",
+      "sha256": "e0b89c6caf2935d827947ebc9712d4d2ddbcbf2fca2ecbead01b93bf99f24ca6"
+    },
+    {
+      "path": "crates/hertz-studio/src/remote.rs",
+      "sha256": "b0897fa879a0f262b1fbc55210c6eeccdd08296768808de59070d2505f465263"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/api.rs",
+      "sha256": "27d9a4a0b072bf483bc2e602c6ef670f210d5ea348b4d9d3b33b242206aaa3f3"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/chat.rs",
+      "sha256": "d8f4bbc6abcdec6f915cea7ae54290a8ac1b40698aed1b5692636908ee047ae1"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/chat_tests.rs",
+      "sha256": "429dd8ade416b01f4a54c02aadb49ca46b9797ae8eeb20267b517f747ce00ec5"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/collaboration.rs",
+      "sha256": "b07b9bc6dba5319b1bd50fd44d1521c603b800a3137b0ac8c82524ae880abf4e"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/contract.rs",
+      "sha256": "f0dfdddefed7addf4236e64a4247f017dc783bd1a9ca92f08f69a15fc23ed352"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/credentials.rs",
+      "sha256": "29a87593a8ab1009359650be72f4c5caa44d8083e2ddae2ac88e1d66999618e1"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/guest.rs",
+      "sha256": "a61ea18874a41bd0787f770f4fab2e5e46bb692e20af8d0b64c8d2cf2a9bd706"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/history_writer.rs",
+      "sha256": "89fdb24485d78a90eba2387377a3e63b3d789f48d863390811a4a86bc70d3bb3"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/host.rs",
+      "sha256": "f16e4e9e77ffec46ada4ce0a9a61b0702e160fd265e22b44cef97fec10604d3c"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/host_jobs.rs",
+      "sha256": "a57953a31371a4f60a623b0a6ce563d2c57b83b413a35bfc7b3d7a06aebca428"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/host_native_tests.rs",
+      "sha256": "26c70cb562405eff02be18abe7e40c98689b0fd0e7446cb47308cd49621fa9a6"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/manager.rs",
+      "sha256": "b81f96c72615572df71e4fcbe3abdcb7dc6bc0860daaedd9b46def92ed2a4381"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/mod.rs",
+      "sha256": "3d5633fd9a939835bb02fa4c5c0f17f36dd4359ebedf2d640f1bf654dce2cbfc"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/online_source.rs",
+      "sha256": "1108a1aa84c7c7e2ecb818d64958dc311f52621838c196f35361143dee097715"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/output_preferences.rs",
+      "sha256": "dfed76ce15677d72a9c57ea6cb8d5bbfd34a5553ddac1fbee4fc7ed6f27becb2"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/presentation.rs",
+      "sha256": "a6f789efe931154604944405cd3564806d5338c056f580b167e1d4110bf9c024"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/producer.rs",
+      "sha256": "7b8d1b03b70b6e2984c0dc282f4184a9832547106217002bdda60cc32a8238c6"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/producer_native_tests.rs",
+      "sha256": "30a94b281de2145565c6659b0aa3b2a04edd630ea94bbaf4067f830f34946ca2"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/receiver.rs",
+      "sha256": "aa6ff882e4b36b24d6912d110875cdcd390b9cb88c69e7a967bb87549f2bfaf3"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/receiver_tests.rs",
+      "sha256": "fdac4f265c5d32eac464e93c7712fb6ca4fdaae18acef2a5a59abcf3f7355092"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/recent_chat.rs",
+      "sha256": "3c985bf34ecd27b8bce53ffef9dc8a27ed2b4d7c312b1d8f1158a67abf63bf00"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/resources.rs",
+      "sha256": "10c3d9b534f0973872e55eca6c0338abc0e18af6bda6f7f4128e81481ee77042"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/resources_tests.rs",
+      "sha256": "9990c74af003af3ae7d84cb5cbc8e10d2be9bb67eb47f309c14abbe506256c1f"
+    },
+    {
+      "path": "crates/hertz-studio/src/room/sleep_timer.rs",
+      "sha256": "faa6560fa648bd2156f62bdc9d1b7ff5435f0a326fa0cd41f2da1a104f61f3ab"
+    },
+    {
+      "path": "crates/hertz-studio/src/routes.rs",
+      "sha256": "92c090b6cd4184e6db2b5a185f4c9d115b106c34e2072d7fcba2e56e407557b7"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/ai.rs",
+      "sha256": "842c1b234fe990ba7cb8a29cfd14d88301fa707c35fda3b4a97b028e06d2983f"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/library.rs",
+      "sha256": "026a9bf3e41f52c934ed16ef3bf5310b42a9bfab76a02a086cdcbd337695c666"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/maintenance.rs",
+      "sha256": "3f6c3af3c8e171620755f1f0866bcbd720e7606540d09e79100a45fc1508ef24"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/mod.rs",
+      "sha256": "665444c1a455cee0be8a990afa5e60b3952689e7e3860840c1d54ca3ec87ff2b"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/online.rs",
+      "sha256": "955bb01860469fff2133d2264bb9df5631a45f6c36c19a20be41941f812d4d83"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/playback.rs",
+      "sha256": "e745bc102c9c0662c46d8fd2eaab21b76f0f2c5496d7c118e03da96b59c37f90"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/playlists.rs",
+      "sha256": "49246b7fc8233d738f2be24d60f5c938c4c9b544e0561e91a3e1602dd65131b6"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/podcasts.rs",
+      "sha256": "ae2db464ead9a4c81c624fb91d0c5fdca8fb680f98c2024f8d06fa3607d0e7e8"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/reader.rs",
+      "sha256": "e2bd1ac2963549a9ba2aac5880258589a2b2a8b62f948deda92ddd901eef1282"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/recommend.rs",
+      "sha256": "be239bcdddc78150bd2170fca22c1aab2539aa1094cdc53af346304e00913c0b"
+    },
+    {
+      "path": "crates/hertz-studio/src/rpc/remote.rs",
+      "sha256": "cdf918be5d208ea4c84ba046c462f3d9b43ef6731bad6ebbd54593197bf64122"
+    },
+    {
+      "path": "crates/hertz-studio/src/scan.rs",
+      "sha256": "8edf2206d5a744083903e3847ac45ca7e0293ef65fe9dd826306329c5de1b1e8"
+    },
+    {
+      "path": "crates/hertz-studio/src/scan/selected.rs",
+      "sha256": "5ee1a024f6da151b5eac4b771062a130c246caff2bdf03d7c69f806ca5e1eb63"
+    },
+    {
+      "path": "crates/hertz-studio/src/secrets.rs",
+      "sha256": "bb7ce90e493b11d6f98250c73a64cf6506728be7a6614777f4874de515b4f08f"
+    },
+    {
+      "path": "crates/hertz-studio/src/space_previews.rs",
+      "sha256": "a1755e2235ceaa1d799f20d6dfb25962b7020fe68ccd17d6526d75404771a490"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_beats.rs",
+      "sha256": "13f7995845f8a0b745af42f2d0fdac6bb5b3da96f10616e957c3ce4f65afbad4"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_media.rs",
+      "sha256": "8cb3adf63b972dea96a70c491cf6bd93ed12c0486e1b7a0e73b701ffae682c91"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_media/api.rs",
+      "sha256": "1b18788a75370c4b1b4cbe4f9058697c35e1afd6ea751606085e22168639042f"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_media/prepare.rs",
+      "sha256": "47ee179f47f18263d2a024c00d8ebf4c60dbbbb8bfbf198284db0190e575532c"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_media/tests.rs",
+      "sha256": "f5a27b5ec461a47c669d3db9ecc69231ba09faecee1a8599153da93c3573eb01"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_pitch.rs",
+      "sha256": "617fffa1ea7e482faed77338ee9fec01c51ffc04acafaa1068a8e2024395c99b"
+    },
+    {
+      "path": "crates/hertz-studio/src/stage_project.rs",
+      "sha256": "17e3e2d2fdbb1881e23aedc4117f89153ed6ba3827b003c509dd9fcb59a5cef9"
+    },
+    {
+      "path": "crates/hertz-studio/src/state.rs",
+      "sha256": "c5c745984462d33917c507ed0df331c77cdc4d695d6e73d2d96758007cae0e0d"
+    },
+    {
+      "path": "crates/hertz-studio/src/state/viewers.rs",
+      "sha256": "1749c4207a73173dd60f308177e275ccc6e94b4c180ae974012d073929c1596a"
+    },
+    {
+      "path": "crates/hertz-studio/src/system_media.rs",
+      "sha256": "6cf99b704d3b3a3b92d70033f051568079146f3f7145423c5b096768d6c93a09"
+    },
+    {
+      "path": "crates/hertz-studio/src/system_media/owner.rs",
+      "sha256": "adbe762af776c3c0f77c76a68ac3222a63b5fa267d2740c91a6363c5f6799a21"
+    },
+    {
+      "path": "crates/hertz-studio/src/system_media/windows.rs",
+      "sha256": "f0381c7c3a5b3d8d98db25aa8c7f814b9a5306b5e6d892648413f4090a1e1f8f"
+    },
+    {
+      "path": "crates/hertz-studio/src/ticket.rs",
+      "sha256": "e14aa8bf383eddef22cfc3577b9a38cd4a71b56892cf0118b309f9ecbb0810a0"
+    },
+    {
+      "path": "crates/hertz-studio/src/updates.rs",
+      "sha256": "32ad703fcaa73fb5e0534f188764ac21d7ab337b2048e0a015896cc7a29dceb1"
+    },
+    {
+      "path": "crates/hertz-studio/src/updates/release.rs",
+      "sha256": "32d86c16718c9e0db9d8f705f22f8c88d6d38d9e1c4ff383c66f4233c79003fa"
+    },
+    {
+      "path": "crates/hertz-studio/src/updates/tests.rs",
+      "sha256": "03ee2f357303a4a279cd998ebf7ac3027d381d9054821e26a1747b1baae6bc7b"
+    },
+    {
+      "path": "crates/hertz-studio/src/updates/windows.rs",
+      "sha256": "f766f887f1a3a42a7914e3f15874ff6745524da7802a47e1fae67a2917aa4a43"
+    },
+    {
+      "path": "crates/hertz-studio/src/wallpaper.rs",
+      "sha256": "d10e86aef729dc3e74509c7b245ddc7c7d8fcca5c7b4d7467afda837df671803"
+    },
+    {
+      "path": "crates/hertz-studio/src/window.rs",
+      "sha256": "e1ef29e4fc7ff1858c316067e22a5dd194e2194ca06d7799c042c461c509c6ae"
+    },
+    {
+      "path": "crates/hertz-studio/src/window/file_import.rs",
+      "sha256": "e05da8e40c2d7c496c2b711e82c938244bfd1b6369f2782b00bdf8c1e7dfce1c"
+    },
+    {
+      "path": "crates/hertz-studio/src/window/obs_preview.rs",
+      "sha256": "935d6d418657d5960212c11037c02cc17072e7f8ca3bab295076de31887ea6b0"
+    },
+    {
+      "path": "crates/hertz-studio/src/window/placement.rs",
+      "sha256": "34218fa1d3a0b23755050a6b8d26140bbec9b7e049f4671814b93b686af71b79"
+    },
+    {
+      "path": "crates/hertz-studio/src/window_focus.rs",
+      "sha256": "53d78ec74ef3832d09d021c150e1d3f6d05ed2cf949724333d2dfadf3d22f326"
+    },
+    {
+      "path": "crates/hertz-studio/src/window_lifecycle.rs",
+      "sha256": "ae1ca811f247849d8a61dc671427209e312064895237ce8c8f3899cfdc8d62ca"
+    },
+    {
+      "path": "crates/hertz-studio/src/window_lifecycle/placement.rs",
+      "sha256": "cd6e1b28119ed63402dd0763d6508a02194f9435927a7e65ee6378b55f1e8cb8"
+    },
+    {
+      "path": "crates/hertz-studio/src/window_placement.rs",
+      "sha256": "5ced43a6cfae8ff352b26986cf5b49dea256bd2b096d5cba58a2e56cc2506eab"
+    },
+    {
+      "path": "crates/hertz-studio/src/window_sleep.rs",
+      "sha256": "2e100ac34ac551265ee0660606fe4611e464c5c2bdf7438441d678a69fc6efdb"
+    },
+    {
+      "path": "crates/hertz-studio/src/ws.rs",
+      "sha256": "b7b1b869d884d0b22480eb8a955b6f020969c944edbe938c2449698dc08a6fd9"
+    },
+    {
+      "path": "crates/hertz-studio/tests/mcp_sdk.rs",
+      "sha256": "780a029185195833586c4400a7ce5c361c9c7634924723d199dd6994ef41fbdc"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/Cargo.toml",
+      "sha256": "12670dee3abb36ddb50fa66283bd8d9d3c6011f0a1fc36c55f5fee8abf06d63b"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/administration.rs",
+      "sha256": "f25d73bfaf0bdf1504fd44747d4c03bddbe8d7012a8497a0c54aa3ad55a6107c"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/auth.rs",
+      "sha256": "73224be455b09bdc779b7dd82b750ffba61bc273af9b6038e350898d46021b4c"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/author_http.rs",
+      "sha256": "50fc5136e186b17a7ea0f58ed3495d30f445093aa31d949d8c4f7e56671537e9"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/author_operations.rs",
+      "sha256": "2a743cca03b1f8fe68cd005aae23ef40c7721834908069a63256a155fca35b8c"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/author_tests.rs",
+      "sha256": "a0ae4eb447b8eec2297a41b760c1e0898a73496c15cb6f7c4dc5aa32bfcfe0dc"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/authority.rs",
+      "sha256": "ae737a50a434dc04b14b5e3050748d246a6cabdc0acc3c60b804927533854f1f"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/config.rs",
+      "sha256": "a9ee2713ca01a0485434ebd8e7df913362dba402885d14b554d3cd121de68927"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/downloads.rs",
+      "sha256": "9c4093de36fb0bdd226e832fbbeb13a6b729d5e67554d55ddcc7ba0cb898c139"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/error.rs",
+      "sha256": "b1c80e35aec4b801c54ed4e2bb2c108c6780fbef059f06a7a0d9f3dfd0d99679"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/http.rs",
+      "sha256": "809db1727dcd41acb830015ad00c0cd71ab06b9901022e469f13251b404664a6"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/lib.rs",
+      "sha256": "1381f41977516712aeb63a7129880c5007851f6d1ba0b7a119508fc4b185e9e9"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/limits.rs",
+      "sha256": "0782fc0468ce114665fc3a86e5cee509fe594714f9065c5cfe75192c6d0cc11a"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/main.rs",
+      "sha256": "66bd060d4a10b9b0bdd0b39f287dd31032b8ff95ebd9e5ebaa0e55a9bad9a4a8"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/maintenance.rs",
+      "sha256": "01db72b2a97832eebdc4332c542cb413af6bf5c9cf753db735d5981e361466cf"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/management.rs",
+      "sha256": "4839e25cb3109f49c254d677e57c05ce242a01f87f21fde9854d25c4fc13f709"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/management_tests.rs",
+      "sha256": "26296ac99ba84d1d10db5d1059dd33b234f10633e679656e1caa5100a0ea9232"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/model.rs",
+      "sha256": "db9e1e3319e7c4a500c119284fe7303bf0903fe454eb016328869a96a38f7930"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/oidc_network.rs",
+      "sha256": "cc0d2103a87490991daa520645b51314902843db3bc279b9c9dcf6029fabf897"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/publication.rs",
+      "sha256": "8a537a1276df080e014716740af4822fd1661ffa0284d72020a56dfc9fec6a6d"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/publication_receipts.rs",
+      "sha256": "a2eb4f328d7b86b46e6934cfb553b07663c57390bf06250ccb1d504fafd51f3a"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/reports.rs",
+      "sha256": "8304df8c23f120ff2159cddf11030570192d3ba4990bee069f6acba4bac61bcd"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/review.rs",
+      "sha256": "4d5effca78ae2c26293b4a41e6ece1ac4657158c13198f5ec49850f386edf16b"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/revocation.rs",
+      "sha256": "7a8fde449d5736f058c259f4b0bddaa153aed1cb4da541dcf52f7e8b0f8140c4"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/store.rs",
+      "sha256": "625259254e588250cc4f9adabe2a81ae5ce52f8aa8d7ab8b29719b52ce4762ee"
+    },
+    {
+      "path": "crates/hertz-wallpaper-hub/src/uploads.rs",
+      "sha256": "380a3589bd9a6127194ae3e670e1c536e9a146eea5420e6483768a941537a73a"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/Cargo.toml",
+      "sha256": "f18b43a2ac913becd9a1f056d652eb8b193bdacf0584680d4306a0db9924243c"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/authorization.rs",
+      "sha256": "e6d7d463f39167151982f474c9e491945f86640e11b9957aba5dd97cb58d16d9"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/checkpoint.rs",
+      "sha256": "05be1348ca4279a6a959a7fb05e301fe8295205b9206075701fd322e5f77b9e3"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/client.rs",
+      "sha256": "7b622ca0146ec214a9b6b60751e8b482d14ee2aee540f009b9f39ea111aac9bd"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/config.rs",
+      "sha256": "a12534c03d2e9d76aa0bc5b3e875d3542c84d48a5997727020ad93659e8824f8"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/keys.rs",
+      "sha256": "747ab1c0f12805686dcccaef61f0fffefa848a8d4bc601d7b89485ed88c27939"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/ledger.rs",
+      "sha256": "3b0677ce47ecabceb721060f87916eccc37ac77bf6355f99e1b7993235e9f211"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/ledger/records.rs",
+      "sha256": "99e862f5558302737edc2acbbd3b89bb7b7905e783e9a62e180198e7b89c0af0"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/ledger/recovery_tests.rs",
+      "sha256": "04293a51b8a292f12abadfb43b7cbe6b8412d4d0d9e4a26e04533508feef6d7c"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/ledger/test_support.rs",
+      "sha256": "0356c9612ca0fabb450a1631af67ac82ffa567453818fd677f6f025645826846"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/ledger/tests.rs",
+      "sha256": "d418849d0c470fd491cee33782c485b751d4e40cf829d5fb91b0f5f4075309e9"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/ledger/watermarks.rs",
+      "sha256": "bb384984fed5d68a4a55a676e28c3370e3acb1ea4044f36e376f284da18120ed"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/lib.rs",
+      "sha256": "b6d646118771fa3c030419613af521385bb70a9575ea745344d29ca41aeec7f4"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/main.rs",
+      "sha256": "dffb15e75bcdb53831b2fdf6e914eff78dded471b13baa447f289e40e9160cfb"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/platform.rs",
+      "sha256": "2dbb0085e7805569217ec096dc45f5f8a25ac1a4f78188f98211da5888dce231"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/platform/unix.rs",
+      "sha256": "67c719312edc9c3f88bac0e9fe016deea6e2e3e04e67444114230bcb3f7c753a"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/platform/windows.rs",
+      "sha256": "8fd97134095a947407bf48d9a83b534e883132f328fce8d6ab138fe9d2ab898d"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/platform/windows_pipe.rs",
+      "sha256": "a26c952676512406109434b72bedb1bd809b96e9e8f4240b3ba57156df6365c5"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/protocol.rs",
+      "sha256": "5bbe142609fe0dbd9e1ce284419ee626ba8b8d616c3d5c0e51a69b4d11ab984e"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/root_main.rs",
+      "sha256": "47105e29cdcd9222987d3cedd4ffcdb56584fef522367561122ded663626e36d"
+    },
+    {
+      "path": "crates/hertz-wallpaper-signer/src/server.rs",
+      "sha256": "88bfc8cd696ecf9111ba446c67aa99c6d3d26a85a355f77bb2939fa13934a16f"
+    },
+    {
+      "path": "crates/hertz-wallpaper/Cargo.toml",
+      "sha256": "b1179f1c31b5a9f004bd6544b6ca122c8398582c8ffb7ae14f503353757c8c5b"
+    },
+    {
+      "path": "crates/hertz-wallpaper/examples/export_composition_ir.rs",
+      "sha256": "4a60960b4baf954c4da8b1839a5a899b7be7aa92127cbdb512430b2558dd5046"
+    },
+    {
+      "path": "crates/hertz-wallpaper/examples/export_model_profile_facts.rs",
+      "sha256": "dacaecbe63603830e42e99597c17c23ed5648e7b109c64e9b368802c12fb03c0"
+    },
+    {
+      "path": "crates/hertz-wallpaper/examples/validate_package.rs",
+      "sha256": "933bd939e2f8e789943a739d460344b024edfbf06f329bd32f1dfb090e40721e"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/ai.rs",
+      "sha256": "e420b1d2287c6b6b88cebb382bc9b58b2fd5b2656e3edcd96a30fc55673e607c"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/archive.rs",
+      "sha256": "586dec8ad0816bc69c13c916d1b8ef35a0f0a33323c1795e2c1371ac82adb0c4"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/archive/heap_bounds.rs",
+      "sha256": "a5e15654add4f0c963a369ef1d6a4b5b8128a0da0b82e4ddb25205cd4472a925"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/catalog.rs",
+      "sha256": "29448ac677b275948d51102fcaf9fb53a7bda9afbe635e26b91ebeca6a7d9d5d"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/document.rs",
+      "sha256": "58cf58924e9a40451ec50c7cf6f7707cd62bbbfcd972a56bf8ea6b119a727b52"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/document/cache.rs",
+      "sha256": "ef0290c1b0cf8b590e970a91a1c696087bf09e8fd80a4e268b6bad4dd083e941"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/document/catalog.rs",
+      "sha256": "93256da3cf91332b55762ad3c31e774577f448007723866a6c535cf7c9381758"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/document/catalog_heap_bounds.rs",
+      "sha256": "ebf223e197b7ce99067bf16599ed5b597387c2a2df7d30cc8e93c6b9468db339"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/document/compile.rs",
+      "sha256": "edf117868eec04053601612211c55b6598813fc9bfe0305dfaad56dff1c046db"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/external_requests.rs",
+      "sha256": "7fce65ac16fe362483e26e0b67f2124d4f8482cc6bb38ed5941bc14c4a7b7ace"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/external_requests_tests.rs",
+      "sha256": "2e08e84ebd7a8e570fcf31e6fad883ce23c60b3dc33156a6079bdeba137d8b46"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/generation.rs",
+      "sha256": "6cc6a6ca0ad93d103c6b113ddf84d9e2c01c4670465d1a75df0fe2f470e74665"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/generation/composition.rs",
+      "sha256": "203ecc2e6e52c266829ae8fdabeee07f25627f54581c253e6d92c705f868f7b2"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/generation/composition_tests.rs",
+      "sha256": "0637a8c837c4027a54d25fa4a9e94e3413eea2f84f4d34c25511ec403120e080"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/image_prepare.rs",
+      "sha256": "8cef61db5f4a0bf353374e4b2dbbd0cd3bfb880ed33e95b129f89d8422bb8c4b"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/image_prepare_tests.rs",
+      "sha256": "bcf15f477af924a17473748e6b38128af59a713b25aaa130bdc351d2d6ba0522"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/json.rs",
+      "sha256": "5f971650828cb731b4df05dacb503e77ad6f30e245e5978a7937d9e3e68f7672"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/ktx2_upload.rs",
+      "sha256": "3a38e82cd1690398763f743b200dfbb79ad600e5a1cf25b4a863494b84d3fc9f"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/lib.rs",
+      "sha256": "120304348d60f4721e5a72119f1db1cd1d39d7ec26566b1041559799bf7afdfc"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/manifest.rs",
+      "sha256": "5b22b66b8b876c656d0ee9bcb769bc2d70eeb89b472fd4d3f9efdbc94986745d"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/manifest/heap_bounds.rs",
+      "sha256": "ec04ebb7b10b5bc7f3bae823a88668291dfa6f63e050289074c84f122c722ab8"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/media.rs",
+      "sha256": "70db7a4519ac53deeea1617bc962a01ee6105a045adb927c4dcb6faa85cadb51"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/media_images.rs",
+      "sha256": "21ae38cf9f8d5db0a6672886cfcb430e0707b5c090a2c20a3c9f5b1f57510bcb"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/media_tests.rs",
+      "sha256": "388d90cc3018c9cf21b82fea2f25fe02d738e19e3c5f6d384978a0ee2681f105"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_binary.rs",
+      "sha256": "691f64cfabd1657a128dd9a7634c30ed2f966b2bda7e7272f23a2f518e893817"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_binary/compact.rs",
+      "sha256": "ea385f768e89fe736a47f783a76565b89ed0fb7624ed99c2a3bd2a5cc56ebce5"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_binary/skin.rs",
+      "sha256": "5001dc456b97675bd9bdb98edf7c73fac1412b6e443f1c6485793bb87ec85ffa"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_container.rs",
+      "sha256": "82f0cccf79c5a8279d6ec411d571de910325e3ea893ba8e4f78d5c329ffb9c25"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_profile.rs",
+      "sha256": "881de2f90a8e2311402d5001062bb0af9f746ab0b6e5fb3e152749b9b58ce83e"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_structure.rs",
+      "sha256": "c2f16a69d22fa52801164fb988dd90b5db83f297f28ad2094f4c8fb80cd2a1d7"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_structure/animation.rs",
+      "sha256": "40a6e6a4e168033dec0796994b72be224919487f829be3c3e7b2973cf1e1acd7"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_structure/heap_bounds.rs",
+      "sha256": "3dbbd5ad0bf4089bc4a8250091298b13b86edad527d4786917f11287f6fed5e2"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/model_structure/metadata.rs",
+      "sha256": "6c32b6fe12e867678a964b069f26f2904c62e81dde0853f0b23ae1e40ec9be96"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/pairing.rs",
+      "sha256": "8c20461a77ea89960149cc251c7f9cd29bae3cd55cd8ba255c8588e041ca60de"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/paths.rs",
+      "sha256": "c892df9c0069e905fc618554d0f19a2128c7d59b3f1aefbc137118ae09949f0a"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/properties.rs",
+      "sha256": "d0c2552e2b11be41fa508e14161c91d67b174cddab049abd7c0c4aeee58a7d43"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/release.rs",
+      "sha256": "8ac1361a8a49cf3444f842304f0ca262020ed8a1d72594d7bdaa33719f2aa87e"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/release/authorization.rs",
+      "sha256": "3f336ed3742690d7ac5577c9d0b89f87a092c76045c068dd59011f3e46165e1a"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/release/watermarks.rs",
+      "sha256": "133852ae84ff3404a553bd742067f1610154cd015c638c02f54aec971dffbccb"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/resource_container_io.rs",
+      "sha256": "fd7d0aa5af9e59ad8073fc6596cd1b63da336ca4e1a42af99f6e320197c5fd5c"
+    },
+    {
+      "path": "crates/hertz-wallpaper/src/texture_container.rs",
+      "sha256": "724b6e9186f892725a95ab8e2bc373b6d9f1f1e665cd89c9c91b6514d616ac29"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/archive_bounds.rs",
+      "sha256": "8982ff80842da9fbbb889c2e965640220c12595ad8b4aaeb3ed9f64225ffe29d"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/archive_io_diagnostics.rs",
+      "sha256": "620cfb04c541a5a5d3996cb236877f5b39437f95edb4615c5e8cc8ac710c6029"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/canonical_identity.rs",
+      "sha256": "967f85c11bf4de21a3096cef6252791d33366787f67a82d681f9b6a0712b422b"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/canonical_identity_heap_bounds.rs",
+      "sha256": "e3da93c49ed260f5f3d36727a70f3f31cce87e902f945bc55781f7c298dddc9f"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/composition.rs",
+      "sha256": "40a569354bd0a9179ba29ba15dfbcf1812e632aeecc2a73ab4b041e61dcb14c8"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/composition_catalog_heap_bounds.rs",
+      "sha256": "efae14fe9759c8914407f50be96fe4aaf4c8a1668be8bfee318ecbbf74f460a7"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/ktx2_upload.rs",
+      "sha256": "d56bad9aafb2bcdfa0677da79806b218148b8fd24d476765c83e3c37c00a4ed8"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/literal_json.rs",
+      "sha256": "7589825583d6cc70b8e7a97b415b45b889e1cb3ef9986ff28e35cda3f944cd70"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/manifest_heap_bounds.rs",
+      "sha256": "f72027099ea2562899ae3847c3117e5f144fba4183d0b4967dabf58f34e5900e"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_animations.rs",
+      "sha256": "23647bc725b14ea7928e55aa5ed9da322bf30207947a3fa10fc28874308b4fdf"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_binaries.rs",
+      "sha256": "5afbe71ced720df67055852130a85c18898eb157633e6bae32e070343143de68"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_cancellation.rs",
+      "sha256": "04f0b0587f50041442e8d21fb4449186b8d316be8b4f454e313a83d652e2867f"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_compact_facts.rs",
+      "sha256": "a8765f9b9be6a048d2260bca48ae75bfd0c880f898f16e52bcd46f0540d0ae52"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_heap_bounds.rs",
+      "sha256": "ca3069364a52bff27ad16b1d188be7583adbc250856241a98da8e2d557250214"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_json_numbers.rs",
+      "sha256": "6f13012a5e63f52a7725502aa60c225dfeaa890cecc51360150762d4b1627622"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_morphs.rs",
+      "sha256": "f9f17a6fdab0186174d5c8f2cb2c1a2f6cb93d6da65f5f7e375c5deaaaa22384"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_normalized_animations.rs",
+      "sha256": "9dad1eafbd412a5f7b4e57ee5639bc5729ec6a0cbf7c6c10b8c7b97c48748459"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_skins.rs",
+      "sha256": "d9a326dfdefd8d9eabde720716eb4c4a832548c6621a71d7a29460028565ac5b"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_static_facts.rs",
+      "sha256": "f65703353ca637b4ea4b69531c28a2e0175938a4bca71f6e0bba2887c5d30c50"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/model_structures.rs",
+      "sha256": "a41b9bd7b5ff64c940fa336cf38942c91da59039ced7e6d752521974e5393144"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/package.rs",
+      "sha256": "e2bd97d6b22d81178b5159a12bd72321e4d56aa1af71264aafe5dc4ac2ad440d"
+    },
+    {
+      "path": "crates/hertz-wallpaper/tests/resource_containers.rs",
+      "sha256": "38a15f20bd9bf5214d722899ff9a92bf105ab30dc7a7778b9cf5cd6386c837fc"
+    },
+    {
+      "path": "crates/vmusic-audio/Cargo.toml",
+      "sha256": "4f87c955abe7e8b44d649c9d2fea6a75fe7d3b888d3183159aabd7c293eb30fd"
+    },
+    {
+      "path": "crates/vmusic-audio/examples/clocked_resample_probe.rs",
+      "sha256": "20fc5458e4d01f60889ac622d3f55db593431e7833767789d3c566d240e11a4d"
+    },
+    {
+      "path": "crates/vmusic-audio/examples/device_clock_probe.rs",
+      "sha256": "48cdcd22d90f06ca04c2b7891c96981fd71ba79ba1a6978dc75dd0be0c7f3890"
+    },
+    {
+      "path": "crates/vmusic-audio/examples/eq_output_probe.rs",
+      "sha256": "ffcc8816fb4991aab92a1a4df5f33422d0c24536f392ee408a70d424202226a6"
+    },
+    {
+      "path": "crates/vmusic-audio/examples/resample_probe.rs",
+      "sha256": "d4a321ba1c9d1bb72f07c909c8ee2716009f048cbb18f84bdf09c5b711fd682d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/actor.rs",
+      "sha256": "ba974533c2f8d45368a95faaae171eef4a8e071a8cd2596038a05489c638f0bc"
+    },
+    {
+      "path": "crates/vmusic-audio/src/clocked_resample.rs",
+      "sha256": "a31ee7de1cb0ee0f751e663c08ed759ee136cefa3759c3a6f3f6cd3be43386e8"
+    },
+    {
+      "path": "crates/vmusic-audio/src/cpal_backend.rs",
+      "sha256": "a3ddecd82369d0afc4b3c2adff41d77a351c366e95fd144455cd8d9d8ea9c456"
+    },
+    {
+      "path": "crates/vmusic-audio/src/impulse.rs",
+      "sha256": "cfd50cff29acd47c0cc5ce251a264a40418e6f381f405807b1ee972b2a265b6d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/lib.rs",
+      "sha256": "84af3dba83c82943e86f9e921541140766e2cd74ecd223f5cb2226205317a000"
+    },
+    {
+      "path": "crates/vmusic-audio/src/local_output/mod.rs",
+      "sha256": "707cb097fba44ea85d34a6b30a7f7364285995c81635da0a2cf5e44dd597164e"
+    },
+    {
+      "path": "crates/vmusic-audio/src/local_output/quantize.rs",
+      "sha256": "428af7bc378b043911cbdb797c5fde22d12d36dd60ac2368a355f7b70c07e346"
+    },
+    {
+      "path": "crates/vmusic-audio/src/local_output/wasapi.rs",
+      "sha256": "788ad41b71d5a432f830e86b7e4e33d74b9ba67ef9539ea7ca13bc19109b04a6"
+    },
+    {
+      "path": "crates/vmusic-audio/src/loudness.rs",
+      "sha256": "860951f08cf515f1cdced868f003a3466da823216071943a28aab7777f762032"
+    },
+    {
+      "path": "crates/vmusic-audio/src/null.rs",
+      "sha256": "a3263611f3221431491a057f89591ffaad74c1f78a68fe1ce61d024b7a13f67d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/output_clock.rs",
+      "sha256": "9569268c7a1337333b88857dd156a7dbb270fdce47d8cd3330888575dc2b5eb3"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render.rs",
+      "sha256": "384a052216f0844c43314ae4a358bd6dc3552737ddec02cff77c69f08bd30324"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/continuity_tests.rs",
+      "sha256": "1545710d8b515ca42edeee7dd419bf05a959b38daad944016537e7beac607c28"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp.rs",
+      "sha256": "307cd6788e74834f80108465b604468dd6fd8ea9e2590b0be82ef2de56caea23"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp/parametric_tests.rs",
+      "sha256": "9c348ff80f52cd1f0c4eb7b6378957822b72932c0ac7e18e7b1347898e584bba"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp/preparation.rs",
+      "sha256": "dcd49c64124994a693e565de30db99617522a5d251c1d5fa50b3548695fb6ff1"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/dsp/tests.rs",
+      "sha256": "62563e56d9a239a4ef2ff3f4524169bcc4296cd75b29d938231149126cf28b91"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/impulse.rs",
+      "sha256": "e497d0c58f37e58a0e2056625f5a82c1988d221f7f0922311a18722185b23654"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/native.rs",
+      "sha256": "192e9b28374c21f0748ee94d999b7f20a663ac9ba6b1596f8b7e9146198538c3"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/output_gate.rs",
+      "sha256": "c1030f88db9a936eb0fbe2294ca906d36c465edbfd05547e95eabaa2d980c007"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/terminal.rs",
+      "sha256": "88a6069cfaf15ef916884eba44f503b787e6af25cb1def0f0bff41f3cc0a2e8d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/render/tone.rs",
+      "sha256": "7ea428164cd69f85494f80be9ea1e92966e119fca0997c4ab079b0092dea300d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/resample.rs",
+      "sha256": "06b2a2da58fec5a79c446415cbfaf327516caee3b015d51a3237484dbcd20096"
+    },
+    {
+      "path": "crates/vmusic-audio/src/scheduled_output.rs",
+      "sha256": "649725b3b4abdd3637514bf3d9b64ea5cb35654000b9a60540536634cc13094d"
+    },
+    {
+      "path": "crates/vmusic-audio/src/scheduled_output/wasapi.rs",
+      "sha256": "ea2e7f4a301d5880c33243a610029a3aa34790b665a1f1ff35b4fb88556c34a6"
+    },
+    {
+      "path": "crates/vmusic-audio/src/scheduled_output/wasapi_clock.rs",
+      "sha256": "ddbe92c4d156cb49ac26a89d0f4124985f9b3053266589f3efc55fe66a3f1bdf"
+    },
+    {
+      "path": "crates/vmusic-audio/src/sleep_deadline.rs",
+      "sha256": "6221573ed648da176b6cd044c8aafd4b9b213870e5619df95fa6072c7629995c"
+    },
+    {
+      "path": "crates/vmusic-audio/src/true_peak.rs",
+      "sha256": "0f03a67bdcd241372e23e2f238aaad3365cd381e50b14648ce6324128339e8d6"
+    },
+    {
+      "path": "crates/vmusic-audio/tests/resampling.rs",
+      "sha256": "0b9dddb1b7a6560e6eb9b03bcd91002f0093eb906dc5ded75a9aaf50a1601999"
+    },
+    {
+      "path": "crates/vmusic-audio/tests/scheduled_output_alloc.rs",
+      "sha256": "d1b43728efde3be047b51e64bf8c1306e00aaafd0905a91ed1ac28b018a9d8ad"
+    },
+    {
+      "path": "crates/vmusic-beats/Cargo.toml",
+      "sha256": "9ffbdc99e8858565bf9a85edf2945adf54473ef7ca782960db2a9054d3314ade"
+    },
+    {
+      "path": "crates/vmusic-beats/examples/pitch_evaluation.rs",
+      "sha256": "7aaaf858a3b06387bd8f888086b1d575a426e5caf235e075eb9b677e6ae0ae6c"
+    },
+    {
+      "path": "crates/vmusic-beats/src/lib.rs",
+      "sha256": "1a659d274ec402dd927a4b2abb545fd404871412a9221a0796a70893b6cb1794"
+    },
+    {
+      "path": "crates/vmusic-beats/src/pitch.rs",
+      "sha256": "b3fac540bc46279118372b2de5042f30248f2f05aa64d9c6a91bb2aeb9e3a486"
+    },
+    {
+      "path": "crates/vmusic-beats/tests/pitch.rs",
+      "sha256": "3574051a85ca479ab577d58c772d6acc886ae271a8e83a63ce296011fc160794"
+    },
+    {
+      "path": "crates/vmusic-beats/tests/support/pitch_cases.rs",
+      "sha256": "7c71b48427ad12d0729cb97b7e0e830d35b7d03ccff5361eb3c1df3f49a119dd"
+    },
+    {
+      "path": "crates/vmusic-core/Cargo.toml",
+      "sha256": "baf740b5261d5c53743e120860b6efb43c63a074e2c91ecc91658dc699cad3bd"
+    },
+    {
+      "path": "crates/vmusic-core/src/audio.rs",
+      "sha256": "dfd054cfc642c1cc2d83b34eb22967f4b1a2c29ce0d4d94a9e87d89e3cc2975e"
+    },
+    {
+      "path": "crates/vmusic-core/src/audio_quality.rs",
+      "sha256": "f13492a7769b71cd40ee77b899e4773bf9535bcee64c1f22a8b4fefd66557269"
+    },
+    {
+      "path": "crates/vmusic-core/src/error.rs",
+      "sha256": "f9b77ccc179e40caf3b566bc0641505c0c49472ddefc51c06cdae392fde91c3c"
+    },
+    {
+      "path": "crates/vmusic-core/src/impulse.rs",
+      "sha256": "e9e1aa543ec52ae51ca7a8fa4ff891d5ad694be24a19540bcb6abb21516bd10a"
+    },
+    {
+      "path": "crates/vmusic-core/src/lib.rs",
+      "sha256": "bd3671dd31cf1b7901310a973290e1fd6aa03f36673f2a3fa10544aee6925fd7"
+    },
+    {
+      "path": "crates/vmusic-core/src/model.rs",
+      "sha256": "ac53afbcd8d49042fe88fd95763a53f9046bdf0df8b2ea6fb58092c6d457452d"
+    },
+    {
+      "path": "crates/vmusic-core/src/output.rs",
+      "sha256": "eb38a114405cdd8726da65f65339fa588e4e0f2a4adea3c8f5580e075f8186f8"
+    },
+    {
+      "path": "crates/vmusic-core/src/room.rs",
+      "sha256": "b4b1c5483604669a42eac540612747976db0aa2bd766991fb0fa206fcfc5fa71"
+    },
+    {
+      "path": "crates/vmusic-core/src/room/receiver.rs",
+      "sha256": "ae7df0296d6eff14bd8268e8654aab32b18a2b5cf35c7f5969f79f212ec7dae9"
+    },
+    {
+      "path": "crates/vmusic-lan/Cargo.toml",
+      "sha256": "de901dcde4c47d0e2f26bd347045aa87c8c5e68e25ef4c2cb6183b4dcd2aa89e"
+    },
+    {
+      "path": "crates/vmusic-lan/src/admission.rs",
+      "sha256": "08667f2bff523b03936bcc5b5434688cfaefc390d08f6baabd0052c024f06c9c"
+    },
+    {
+      "path": "crates/vmusic-lan/src/buffer.rs",
+      "sha256": "dd089ebb6bfa574e8cf2207ca466699631c755a1964dec77615ee5b349ca1f35"
+    },
+    {
+      "path": "crates/vmusic-lan/src/client.rs",
+      "sha256": "0e715a59850e62143f5e1acec8958c35f4af1e906dcbbf7579b08c1c5baf5767"
+    },
+    {
+      "path": "crates/vmusic-lan/src/clock.rs",
+      "sha256": "e252c0e32c7f544f4e2fd2af83db3c082de2b382d496afe134b2e38d51473a44"
+    },
+    {
+      "path": "crates/vmusic-lan/src/discovery.rs",
+      "sha256": "edb82784584167a7a2a439a207e55610a9ce54a262f957941cfa98fc708bd1fa"
+    },
+    {
+      "path": "crates/vmusic-lan/src/invitation.rs",
+      "sha256": "e773e2fdd3fec48bffd3e4864e37f3454cdc97e129a54a64a78c007f5e217723"
+    },
+    {
+      "path": "crates/vmusic-lan/src/lib.rs",
+      "sha256": "ba0be370f6ef113e8a0677d3de79c8d977d715f9f67e0e0c10513491303b9bcb"
+    },
+    {
+      "path": "crates/vmusic-lan/src/lobby.rs",
+      "sha256": "34e28e756689b64a4f959ae0cc29e491ef20acdd2dc6ad5c315f09768baef29f"
+    },
+    {
+      "path": "crates/vmusic-lan/src/members.rs",
+      "sha256": "fd6c4b9d044f55ba2ad0c790bfec3a2170fec8035a036c762f8e1b8483a3892a"
+    },
+    {
+      "path": "crates/vmusic-lan/src/notifications.rs",
+      "sha256": "84c9e560fd14dd64a45972c49c15134aa866561b44f26f1537b9850954b88b0a"
+    },
+    {
+      "path": "crates/vmusic-lan/src/protocol.rs",
+      "sha256": "f6dea04bbd4889bae4920bb8169290998663704a008f9f684adcfa960403f066"
+    },
+    {
+      "path": "crates/vmusic-lan/src/server.rs",
+      "sha256": "6fee94917d32973991bad79314197569ba900efd95a6f96a4b3333f18165e0ae"
+    },
+    {
+      "path": "crates/vmusic-lan/src/tls.rs",
+      "sha256": "558ec50bc7cc1059b566591ae337277b0124de6811b61f8a551ceb0ad270913a"
+    },
+    {
+      "path": "crates/vmusic-lan/tests/admission.rs",
+      "sha256": "febf577573cba017b970310aa301759dc3538b1d4ce9749af5989c6c8cf50105"
+    },
+    {
+      "path": "crates/vmusic-lan/tests/native_transport.rs",
+      "sha256": "c896b0fd93fb9f86dfec15f0f2c3c0688e983682b18b263bab39a14a7754a52b"
+    },
+    {
+      "path": "crates/vmusic-lan/tests/transport.rs",
+      "sha256": "2f1373dfff5013c7a764c9be02d8f3d7f25012cbd7c49b5fd9a78a458fb2c287"
+    },
+    {
+      "path": "crates/vmusic-library/Cargo.toml",
+      "sha256": "6ee53d65cb1eb20c24545bebc2a138e464aaec7f84d68da36f4c778d4b582c7b"
+    },
+    {
+      "path": "crates/vmusic-library/src/lib.rs",
+      "sha256": "38f2dd2b9e54978ef5bcf430b3bf26aed2697f1329755d8c97a6e82770ab39b2"
+    },
+    {
+      "path": "crates/vmusic-lyrics/Cargo.toml",
+      "sha256": "07e36c77a3c898ec8027c8907370c79df115b2d6b5cad5fc44ed097f59b73e30"
+    },
+    {
+      "path": "crates/vmusic-lyrics/examples/inspect_import.rs",
+      "sha256": "1499949bb25b8b78f758c513ff0d034b88acd242acc20a64b0764ba5bddc54c5"
+    },
+    {
+      "path": "crates/vmusic-lyrics/src/lib.rs",
+      "sha256": "48006a48afb9d40fa4455175332be0e227187f2f624bfa322eafda8ffcc44076"
+    },
+    {
+      "path": "crates/vmusic-lyrics/src/structured.rs",
+      "sha256": "92b047a63b224abd6fe04042c628db8a80330eb57f480b048d564b618aa197cf"
+    },
+    {
+      "path": "crates/vmusic-lyrics/tests/structured.rs",
+      "sha256": "6d1d4e859f0a0f37a618212c0e700b367e7f2caebf7b3b61b34a19db0fc42213"
+    },
+    {
+      "path": "crates/vmusic-lyrics/tests/vocals.rs",
+      "sha256": "8c028727463a8954c87984981262ce3193368356b572993db2c87c1119acf7f3"
+    },
+    {
+      "path": "crates/vmusic-store/Cargo.toml",
+      "sha256": "953f6b1a4a7ca7f07d66afe0b0291b2f39653b294814fcaa8c36bc5264dc65e0"
+    },
+    {
+      "path": "crates/vmusic-store/build.rs",
+      "sha256": "cdde0c6193dd2e6732aa96f59926a7a51e05e819fef7425b0ae3ee2f5ca480ed"
+    },
+    {
+      "path": "crates/vmusic-store/examples/profile-search-candidates.rs",
+      "sha256": "62f097ccec8206f4d719de96103ab6cc63a02992f374c657e3d1f70ce16a8f53"
+    },
+    {
+      "path": "crates/vmusic-store/src/ai.rs",
+      "sha256": "4effb691018e7aa1b490686639331640a7927d8e98d60c6dc9d0352f1acc61f9"
+    },
+    {
+      "path": "crates/vmusic-store/src/ai_jobs.rs",
+      "sha256": "c1fe7472dfb5fdb7d018f0768cd7268109804a1bd162f5ffd700c44eae2a8d9e"
+    },
+    {
+      "path": "crates/vmusic-store/src/ai_ledger.rs",
+      "sha256": "fae8e845ab32845b9d5f2c97b9e2b8bf8efa0ec9d63a7b969e70be97c4b04817"
+    },
+    {
+      "path": "crates/vmusic-store/src/audio_quality.rs",
+      "sha256": "d31c3fe91cf883b317141c70c0b758b5b8f0670303bd2f20a0e088fbef2d33a9"
+    },
+    {
+      "path": "crates/vmusic-store/src/backup.rs",
+      "sha256": "143a49090a4ed680400f57d0510afd5aa68dc2222c47a02cee5c069995bca6bb"
+    },
+    {
+      "path": "crates/vmusic-store/src/emotion.rs",
+      "sha256": "d06b5ff775f8dcdcb89c6a81e59c49c220a007192159d5c9b5e762f9b740cbc9"
+    },
+    {
+      "path": "crates/vmusic-store/src/favorites.rs",
+      "sha256": "b3cf11642794b046d7ccb72b58b824eb57d5a4aefa25fc7a49f5edc28e5b7b27"
+    },
+    {
+      "path": "crates/vmusic-store/src/lib.rs",
+      "sha256": "608790c87a4b9a669f7ec869e04a306f73a3895bf4c053634ea5885ffabc035e"
+    },
+    {
+      "path": "crates/vmusic-store/src/limits.rs",
+      "sha256": "92aa1f3c18dcc0f005dbdda65fd0802879487a179b66e7db8af28045e62a5c5b"
+    },
+    {
+      "path": "crates/vmusic-store/src/loudness.rs",
+      "sha256": "da0c672e839866bfae62bb1997b459d9de712a7248d9cd11da8c1d0b5d042a7d"
+    },
+    {
+      "path": "crates/vmusic-store/src/lyrics.rs",
+      "sha256": "5adf14333efaca021f7e54df56a950043532c0dd062807c97a817ed3f5e7a4ed"
+    },
+    {
+      "path": "crates/vmusic-store/src/no_auto_match.rs",
+      "sha256": "dd56a86f2aa814e98146500e93dc538a0991211d6e1e06086b58d3aaeced8e6f"
+    },
+    {
+      "path": "crates/vmusic-store/src/playlists.rs",
+      "sha256": "f6fe1b6567fda918cc0d3f83bf94c354ccc594a14ca7a4383791193ab97479b7"
+    },
+    {
+      "path": "crates/vmusic-store/src/remote_roots.rs",
+      "sha256": "57a7914652f4fbb9e6e3e15a99f747f1d3eb24900645a830b01c6974e734df21"
+    },
+    {
+      "path": "crates/vmusic-store/src/scan_roots.rs",
+      "sha256": "f57578d96aa48a052a64bdc39bacda7edcd19a0a1b35ffd2d9d9117f1e6fe9f7"
+    },
+    {
+      "path": "crates/vmusic-store/src/settings.rs",
+      "sha256": "3d8e9b4079d77ef60cbbcd8b51c030c9d361add42524e910b11d571d1ec64957"
+    },
+    {
+      "path": "crates/vmusic-store/src/stage_presets.rs",
+      "sha256": "b631e866e64c2e8938ecd631e379d88747cbd4bf579a5052b75f7a1666b28688"
+    },
+    {
+      "path": "crates/vmusic-store/src/track_edits.rs",
+      "sha256": "b97c699d30d4712818aa78a4a2cb3965352b6613fccdc9bf8aad3d282d423d31"
+    },
+    {
+      "path": "crates/vmusic-store/src/upgrade.rs",
+      "sha256": "5d8095901be159debf0c7912c0d98b12023cdcc74aaa9cbc15f4845fb6fe7020"
+    },
+    {
+      "path": "plugin/ui/_metrics.html",
+      "sha256": "ad0522781253b24f7c3e332fe5291d39ef4d578f5a78e50a78db346dc354d3f5"
+    },
+    {
+      "path": "plugin/ui/_wprobe.html",
+      "sha256": "6ff0360e864d32fbb4a16de34728bfb0b13e471693aa58f06e789f76978d84c5"
+    },
+    {
+      "path": "plugin/ui/ai-ledger.js",
+      "sha256": "b739039f6b2b3395359f01cffc200cbafc4163be4e585cf521223da7e1d8fcf9"
+    },
+    {
+      "path": "plugin/ui/anime-interactions.css",
+      "sha256": "4e1888c6b7ee6c3d81d1e118918b3b1c50ef821fd658bf920a55fb52a8a923ca"
+    },
+    {
+      "path": "plugin/ui/anime-interactions.js",
+      "sha256": "19109a791743033f22215045e40d61c7fcf8ec3ae85d629c4b42d3a465d63e44"
+    },
+    {
+      "path": "plugin/ui/anime-stage.css",
+      "sha256": "c8e6dd66804437c1e3a7c9559ca1c63f3923863d292374da74d17eac9c09e13b"
+    },
+    {
+      "path": "plugin/ui/anime-ui.css",
+      "sha256": "02de234e812ae99355576edab753c400f313d5f93d8f3f7972408e9219262d9d"
+    },
+    {
+      "path": "plugin/ui/app-updates.css",
+      "sha256": "a37d80337f93e88eace7e3dfb9b3973260c826bbbfdf8eaebeb857c8569949ab"
+    },
+    {
+      "path": "plugin/ui/app-updates.js",
+      "sha256": "0ce6ef842814825d27b431af5e99164a1902ddc2a53e11a26513b3d5154347f6"
+    },
+    {
+      "path": "plugin/ui/app.js",
+      "sha256": "cbe4a3927f121e2ffa9246fbeb3ae28fe8bbbcc1b0b02c9f548e3e2cc5518329"
+    },
+    {
+      "path": "plugin/ui/audio-analysis-settings.js",
+      "sha256": "26c38e69c8d44539429500178ceb1c6986cafd39921add154f0d0c7dba19204f"
+    },
+    {
+      "path": "plugin/ui/audio-output-settings.js",
+      "sha256": "e33deca89f60ba813225630b689cfa1e124f5e5eb37ef292d9c9910662aa6a82"
+    },
+    {
+      "path": "plugin/ui/audio-quality.css",
+      "sha256": "98d93799d7b0d629b9a1c622c8f5f4125fe71be9ad4f52442b4aa296499a5aa3"
+    },
+    {
+      "path": "plugin/ui/backgrounds.js",
+      "sha256": "30ad496747eaf65f6f8cd5c9fe54e64779a7e28c11b66d8079921e6ae51bc070"
+    },
+    {
+      "path": "plugin/ui/bgwall.js",
+      "sha256": "0375b3a096c49af56664a59b093d4ed5268f658f9392af3802f1ffc75e7918a9"
+    },
+    {
+      "path": "plugin/ui/cadenza-emotion-check.html",
+      "sha256": "302039c28767df8d23c737a91f7579ec153fdcf0732e655457570ed747c8266c"
+    },
+    {
+      "path": "plugin/ui/cel-ui.css",
+      "sha256": "b0bbf0b52224669052c9fa2e25c4f1d0155d4233fdb09ec63560228fb4b58678"
+    },
+    {
+      "path": "plugin/ui/components/button.css",
+      "sha256": "eacf99de088d3131d29aff225192a27f91839edffa42a0aef342407147827dbc"
+    },
+    {
+      "path": "plugin/ui/components/form.css",
+      "sha256": "a0e1f606b704b24d7e516d44402221a0b1516ffa3e006c8a0fba404fa827ff9b"
+    },
+    {
+      "path": "plugin/ui/components/popup.js",
+      "sha256": "8c2a1192068f8d4bd606db4ee4c69ac523aca303a7e5dd86e88cfe1f96345721"
+    },
+    {
+      "path": "plugin/ui/components/tooltip.js",
+      "sha256": "5cec1d9ba43fe6a7aef671dc591038493a75b38ed02edb0c6825553af325f14a"
+    },
+    {
+      "path": "plugin/ui/cover-wall.css",
+      "sha256": "f91cad2ec69e0af0e5cfe19ef148ca752a9715fd3e639a81172b68f2b8d4391f"
+    },
+    {
+      "path": "plugin/ui/cover-wall.js",
+      "sha256": "e9e1bf6252d46b82c14ccb54a76ffbc3d4b0a5b6dbf7fc4b5e8519cd4448522d"
+    },
+    {
+      "path": "plugin/ui/creative-anime.css",
+      "sha256": "d95b6d6d8eebcd4b3ed29a87f33a95279f215c0b7fd5a5843e6aa9b4fedb3243"
+    },
+    {
+      "path": "plugin/ui/creative-anime.js",
+      "sha256": "a99d741572aaa6d62ca892eaba4450dd43c0f6d31898d12fe41c4046671887de"
+    },
+    {
+      "path": "plugin/ui/creative-arrangement.js",
+      "sha256": "2aee487ea71668a0e22057aec1967c4343cfc7c41e988bbd381ebe450a0aad8b"
+    },
+    {
+      "path": "plugin/ui/creative-contract.js",
+      "sha256": "0e8d094af3c5dd4eaf5c827633b8ff3ee68852eba343c2db1a00497beed13b79"
+    },
+    {
+      "path": "plugin/ui/creative-draft.js",
+      "sha256": "f9db01f4189b3895cb8f17faff0b51899b40299c112454a21adcdeb114832200"
+    },
+    {
+      "path": "plugin/ui/creative-gl.js",
+      "sha256": "f2f5dce0340b01495e5c4eeeea7f838aa5b0dcc8af043249dcf07abb4be21f4c"
+    },
+    {
+      "path": "plugin/ui/creative-pitch.js",
+      "sha256": "84a6ff939060bc12214240d3c4ffc2554aded473b5aa660cecd5179d18eecc5d"
+    },
+    {
+      "path": "plugin/ui/creative-project.js",
+      "sha256": "0ce399e5fc840bd2038dc543069b51acf30eb2bdbc625a9f69ef3207470a9f01"
+    },
+    {
+      "path": "plugin/ui/creative-prompt.js",
+      "sha256": "aa9ac25c9364948e38710f75b45cb051bcc46f22804837d1069b899365a0dc58"
+    },
+    {
+      "path": "plugin/ui/creative-share-code.js",
+      "sha256": "24cf995c0c7af56512b1a1782d464271ebe9e498e41d3f1ec28a7cf7bf624711"
+    },
+    {
+      "path": "plugin/ui/creative-stage.js",
+      "sha256": "9018576c7d69719cda6e373142766f6322101b81650877433ed830ce69d02c9b"
+    },
+    {
+      "path": "plugin/ui/creative-templates.js",
+      "sha256": "948b98c6983795f2c2f67cb9f766943c0ef0e4d508c0c43e462a2edf5c0cd3ff"
+    },
+    {
+      "path": "plugin/ui/creative.css",
+      "sha256": "89438c5cd00462da2906576543df0626c16e5ae3853cdc40c791feea3f82b695"
+    },
+    {
+      "path": "plugin/ui/daily-view.js",
+      "sha256": "65eb217ad96e18dc0d110c1431df7f20b0164d54a8d168c928eae1a0c6e998f7"
+    },
+    {
+      "path": "plugin/ui/daily.js",
+      "sha256": "dfe01395bbc1e1fc7c40aaf2160c072418e374a7c103aade5e0991c5de190ed9"
+    },
+    {
+      "path": "plugin/ui/design/design-base.css",
+      "sha256": "fc2b7d35f760828711509ed4f803d171181bb7101579d8264029f391da6496e8"
+    },
+    {
+      "path": "plugin/ui/design/design-themes.js",
+      "sha256": "25d049bcc438d857e197249a965a86ac72455a8fdf832a24f068c21261bde542"
+    },
+    {
+      "path": "plugin/ui/desktop-lyrics-settings.css",
+      "sha256": "3ce75e09ef94b314bb076c14fc7c4b87cc3adc2fc1ceafb536eaa006ca4b4a9c"
+    },
+    {
+      "path": "plugin/ui/desktop-lyrics-settings.js",
+      "sha256": "2891d2a1ee3aef3f4eea42ed178d156efaf71b11a56314ab4d2591fff2f23706"
+    },
+    {
+      "path": "plugin/ui/dialogs.js",
+      "sha256": "5c80fe06b10717ff8062d2a05485a6d37f46326cde30478341131ec026cfdd2d"
+    },
+    {
+      "path": "plugin/ui/dsp-settings.js",
+      "sha256": "18122b92dbc6a3c8a58b5e6188d2c0021b5bcc49dd6a7d3d7ae7adcfc1886d4b"
+    },
+    {
+      "path": "plugin/ui/emotion-track-check.html",
+      "sha256": "2f5b6e7356e5b42c885f15d7b54374b6aa0ff76f1c5eb7ec308177720ed80747"
+    },
+    {
+      "path": "plugin/ui/emotion.css",
+      "sha256": "a065716c4712aa0598e039831d48d2b3bccdbb515fa93dda16950c1ac2e4d183"
+    },
+    {
+      "path": "plugin/ui/favorites.js",
+      "sha256": "b4c1ffac40dbc808da59f5e7f6b2a31ffe8bc08cbc24fe656617ba14a30bad2b"
+    },
+    {
+      "path": "plugin/ui/fonts/brand.css",
+      "sha256": "5b8c83b5d1d3328d49379070b25d9dd253cc4d4114a95ea438663a1ac88f4593"
+    },
+    {
+      "path": "plugin/ui/glyph-ab.html",
+      "sha256": "5a543b6e001b26f4f5834f95c246408248355fb01a332651398f7e69d0cc90e6"
+    },
+    {
+      "path": "plugin/ui/glyph-blend.html",
+      "sha256": "6f8cebfea77d8177f24843ba5058f616234695b6a35efb59f4a574de40477229"
+    },
+    {
+      "path": "plugin/ui/glyph-g1.html",
+      "sha256": "96079a0e75b0c8440a8a654655f8e706ea067dc3160b18f7f7f5d921b8d06e24"
+    },
+    {
+      "path": "plugin/ui/glyph-g2.html",
+      "sha256": "5111efa22c4ffe1eb44a341273c66cdb0ab6228978013279df52e404aaf22450"
+    },
+    {
+      "path": "plugin/ui/glyph-g3.html",
+      "sha256": "6acd1462daf16592f6d28424cb319ff309f159e4547c1f6d75b06c3a5eb41f63"
+    },
+    {
+      "path": "plugin/ui/glyph-g4.html",
+      "sha256": "c8596812e213eb8cf568b3861ba6b861d28ae148246c31d7b78aed900f00fdab"
+    },
+    {
+      "path": "plugin/ui/handdrawn.js",
+      "sha256": "edb3233b9a4a2c56e2c416f333291906640610a3f98f789e1177d26360d01858"
+    },
+    {
+      "path": "plugin/ui/home-dashboard.css",
+      "sha256": "eaa5ac564417f378730cfc58198d1ca0a108395d8b9c5210eb9ca827147af962"
+    },
+    {
+      "path": "plugin/ui/home-dashboard.js",
+      "sha256": "7ff93d49a0e49a0c9a2530961087d64bf119d51d86e5d6275c859856859003fa"
+    },
+    {
+      "path": "plugin/ui/home-quote.js",
+      "sha256": "0e0b8a16f9857f79029f3ab3fc2c127d30b1ec36f6cfec74d00055abd3b78116"
+    },
+    {
+      "path": "plugin/ui/host.js",
+      "sha256": "962692cd1279db030b73cff4e73ea7f0cab6ba9303392b239bc491040b7c2fb1"
+    },
+    {
+      "path": "plugin/ui/index.html",
+      "sha256": "7859db118ad2e0322dc00776cde7c4abfb74802018f40198c5ee2c98e29bb79b"
+    },
+    {
+      "path": "plugin/ui/lyric-emotion-field.js",
+      "sha256": "ccf6e76ef68412f90d2219b8316afe71faa22410a549378532d7bb7d7a7fbd6e"
+    },
+    {
+      "path": "plugin/ui/lyric-emotion.js",
+      "sha256": "77bf0a0aa50c4df6335d63d248118e85a2ab19b38cf6e6e4b69b39ad3da73e00"
+    },
+    {
+      "path": "plugin/ui/lyric-glyph-atlas.js",
+      "sha256": "9a2efebcaf3c01e00cb794d76dc3dde5df27c4fcd585ba78d999ad8c6d3376c7"
+    },
+    {
+      "path": "plugin/ui/lyric-glyph-gl.js",
+      "sha256": "c45e34bdb883c9030624fc2e71fc3f73329529729c132d12d55cc2722eb28a93"
+    },
+    {
+      "path": "plugin/ui/lyric-glyph-sdf.js",
+      "sha256": "4e1f5e04598ce06295c2e9bdf308a3283bcfbd148fd9d398a950659a27b5e35f"
+    },
+    {
+      "path": "plugin/ui/lyric-import.js",
+      "sha256": "dbe7640445411348da9c7949aa7a7facf31b23e849ebbe5f7e79a1085dbd3993"
+    },
+    {
+      "path": "plugin/ui/lyric3d-emotion-check.html",
+      "sha256": "b0e8eb06f6d5f228732623108ab21bcf583279f53b88488859a403c8eb890ab0"
+    },
+    {
+      "path": "plugin/ui/lyric3d.js",
+      "sha256": "9081cb7aa2102e19bee505beb13a8da2fb309b9739c4080dcaf1a151de420161"
+    },
+    {
+      "path": "plugin/ui/native-capsule.css",
+      "sha256": "8eba46311ded0421f99d73b1f3492d422d26ce083e4553eea3657e9db3b929ca"
+    },
+    {
+      "path": "plugin/ui/native-music-import.css",
+      "sha256": "bbaa2130316dcf3d106b29746649d20b94087edaa1989c7b68be93223752af6f"
+    },
+    {
+      "path": "plugin/ui/native-music-import.js",
+      "sha256": "91fb7365b67e2d736f63578720867281eb7f10976511255a7fe57d4b95375c60"
+    },
+    {
+      "path": "plugin/ui/now-playing.css",
+      "sha256": "9fe3fe5becdf9604731759994473c1c88a2e9131ee880524eeb4eb3e0567cb6b"
+    },
+    {
+      "path": "plugin/ui/now-playing.js",
+      "sha256": "923b8e27a0e3cb7813bee8a8e8da416097bad9b0d33f632e56ea1b5d73220850"
+    },
+    {
+      "path": "plugin/ui/obs-css.js",
+      "sha256": "aaa04c62c1bc122402a7bc3864080c1c36a15c3070012cad625cc51087828d5d"
+    },
+    {
+      "path": "plugin/ui/online-login.js",
+      "sha256": "0cd5b3bf40d2c9d58afbb90edb5ccb95643f5949645a81e894b7c8e3354327d9"
+    },
+    {
+      "path": "plugin/ui/online-playlist-view.js",
+      "sha256": "a5478bc325fe9c871880b2714ad8f655eb1d0234b6f7e2327f504935115bc4cb"
+    },
+    {
+      "path": "plugin/ui/online-playlists.js",
+      "sha256": "0875bd102a1b75188801d9a294aa2bbb1207ceac217b954b305c28079952e6c7"
+    },
+    {
+      "path": "plugin/ui/online.css",
+      "sha256": "c83634a808cf5ba02cc352f1bfeccbb10800bf843528e62e78fda16fd83775f5"
+    },
+    {
+      "path": "plugin/ui/online.js",
+      "sha256": "d8e9de0f61ac70697e51f1bfc86b78673b3f3034215069ae1cca1ad2d7c4af48"
+    },
+    {
+      "path": "plugin/ui/onset.js",
+      "sha256": "eb13746b68eb2bec080da1b85dc71ee864d83a1d3e5f4676a638e0a5a4096ae9"
+    },
+    {
+      "path": "plugin/ui/overlay.html",
+      "sha256": "9104eba6a73ed0b557ffc585002ca34ffc5b9754c6ee5bd69810e34586544413"
+    },
+    {
+      "path": "plugin/ui/palette.js",
+      "sha256": "164b364abcec0e77cad29b832e42e8f46b44a7f139c4b8519812c314658b9618"
+    },
+    {
+      "path": "plugin/ui/perf-probe.js",
+      "sha256": "40fc13db24ca20a7738a5bcfba007ff6673034ecdbc2f57abb4a50888ff37cf4"
+    },
+    {
+      "path": "plugin/ui/pl-covers.js",
+      "sha256": "9d64113ed773733d521a36f660f844843868a757a8d11ee8eea6fd9dbbe0c301"
+    },
+    {
+      "path": "plugin/ui/player-transitions.js",
+      "sha256": "47422718cce7236a22942bb706648e17e4337e9ab3f0c7b6cc2442051fa55bc3"
+    },
+    {
+      "path": "plugin/ui/podcasts.css",
+      "sha256": "b24ba93360a4f0489330640e54e9b586bdd2e88241a57166435cc3b516be2032"
+    },
+    {
+      "path": "plugin/ui/podcasts.js",
+      "sha256": "07fe4dc2c3d92bc5c6ac8fe65759b2fa8670e59c52d0244e8b8a10d26484b1f4"
+    },
+    {
+      "path": "plugin/ui/reader.css",
+      "sha256": "4429df86484b732d6450dbc9eff42d4f43be17c09a81477bb517cd5590c4fee2"
+    },
+    {
+      "path": "plugin/ui/reader.js",
+      "sha256": "180be06fddea3029ac5ade21dea0a379b2fcf3401159b3f69fd6154a756628cf"
+    },
+    {
+      "path": "plugin/ui/room-transport.js",
+      "sha256": "cd3c5fc758b32d8b4523172d72464548d54de0a77974f969ad22f886c5465221"
+    },
+    {
+      "path": "plugin/ui/room-view.js",
+      "sha256": "2279a55c220290f4dc8960b4cab3df775be7db893bdb7a306c4722b4a9368330"
+    },
+    {
+      "path": "plugin/ui/room-workspace.js",
+      "sha256": "d6761442e5b50e0f62589c19dcd75f9742ca75e59156a054deaec9886747cd0a"
+    },
+    {
+      "path": "plugin/ui/room.css",
+      "sha256": "b7dc9e5ef176465c50705d6c4a6e55c0615fa93dde3a6f66bccf83d42d09ccf4"
+    },
+    {
+      "path": "plugin/ui/room.js",
+      "sha256": "3309d43cd5b213041f4c2385415a61a0073cd59835b7849bb36d4313286b9a6e"
+    },
+    {
+      "path": "plugin/ui/search-history.js",
+      "sha256": "635005fe5451d7979828dd94e50ed51a1a29e8b5d568459237eb9088dbcbf349"
+    },
+    {
+      "path": "plugin/ui/search-session.js",
+      "sha256": "31463be44d6c69033847b5a142fccbfd8f03443f3063f0a7d3b58f78c2beb7fc"
+    },
+    {
+      "path": "plugin/ui/shelf.js",
+      "sha256": "dc638ec12fff5ab3d5e2697c32479e609dc78a9850805e31064789342217ecf5"
+    },
+    {
+      "path": "plugin/ui/shell/shell.css",
+      "sha256": "e3d3898a813c2749bdea8ea9c79c37bc1bddaa1d52546187053a9ef22d9b9ef9"
+    },
+    {
+      "path": "plugin/ui/shell/shell.js",
+      "sha256": "973bb932b8f01bc3d775d74497db0302e5fb51d2c6d7ee3a99706f75c66306b9"
+    },
+    {
+      "path": "plugin/ui/skins/skin-shared.js",
+      "sha256": "6b4570c27e35ec57e2a3717c75c086bd381f3ea5b0e4b2a49431f98d09771fc7"
+    },
+    {
+      "path": "plugin/ui/skins/skin.hertz.css",
+      "sha256": "879d43f04dffebb381fcfce8707fbf582fdb92926821bad5ea6d5bc3ec4f4ae2"
+    },
+    {
+      "path": "plugin/ui/skins/skin.hertz.js",
+      "sha256": "46a4a26cb6b7d02c96a86de6de1cbf1d4e6cda3d29d49a97e7748f4575318b6a"
+    },
+    {
+      "path": "plugin/ui/skins/skins.js",
+      "sha256": "e2af49a845c22818d57404993b6191384a42756bb2936c1183de7a67c0fad3c5"
+    },
+    {
+      "path": "plugin/ui/space-camera.js",
+      "sha256": "72cd2208445ef97cc4dd70307dea1badda6ac13dbf14c3f7d450d1b5f67cc0cb"
+    },
+    {
+      "path": "plugin/ui/space-fields.js",
+      "sha256": "18f34a02236527f54831642fbb96a7b017f96e37ac9e20b3b96768e4b0dea8cb"
+    },
+    {
+      "path": "plugin/ui/space-home.css",
+      "sha256": "7a647abfe898f8eaa2be7291410deda35ae5cf577074181dae028cb01af98c0a"
+    },
+    {
+      "path": "plugin/ui/space-home.js",
+      "sha256": "473096d84a442c2cf72838b98a5ed7f0cab97aa086c6495b6ff9448a61d03d7a"
+    },
+    {
+      "path": "plugin/ui/space-layers.css",
+      "sha256": "da780e4164c70fcda9933b94097ed4f77ad4ed701ee496c3f78a91c9ed4d7ae3"
+    },
+    {
+      "path": "plugin/ui/space-layers.js",
+      "sha256": "c897ceca5d1d74eb15a4c0dd456334e81373f6254a109cd4e4eee707f95f0054"
+    },
+    {
+      "path": "plugin/ui/space-post.js",
+      "sha256": "7769c31ef7b0afa2db806b8fb6b2b4042d881c758816b3ec5fc9a03bd663c8b1"
+    },
+    {
+      "path": "plugin/ui/space3d.css",
+      "sha256": "bbd67b0210b0c3e562779793566ccdccd6c155de0c77e61653aac0bf5fa9e25f"
+    },
+    {
+      "path": "plugin/ui/space3d.js",
+      "sha256": "aee56716cc6883d2525c6ca73fae1f78c610cf0dbc73cde66eaedf2c7de6a821"
+    },
+    {
+      "path": "plugin/ui/stage-anime-svg.css",
+      "sha256": "40f6d6bfa5fd72049ca3ea7ec51132c153aaf82662a07dab9c1a43349b032900"
+    },
+    {
+      "path": "plugin/ui/stage-anime-svg.js",
+      "sha256": "f23545fdf8a073f1ab564fdd108d30a88533b7777f4c8104459f0df97291d3e1"
+    },
+    {
+      "path": "plugin/ui/stage-cinema.js",
+      "sha256": "14fae02cd2322fe56b25c114f170c3403ad2dc4f1e57269ee2d9c9df270ed66d"
+    },
+    {
+      "path": "plugin/ui/stage-coast.js",
+      "sha256": "9ce41ce86b5ff5c9259d82c58899f6ba0ee7c00adbe2a428a56c01a84633695e"
+    },
+    {
+      "path": "plugin/ui/stage-control.js",
+      "sha256": "76ea4975d6dfcff12ea3ee366894fb4f0beca77e176026c194009e581c777fe4"
+    },
+    {
+      "path": "plugin/ui/stage-fluid.js",
+      "sha256": "739172f05b5287e5925ec36dfbe2ef41de7971b0d97bfcbe2463df558ec1b2f3"
+    },
+    {
+      "path": "plugin/ui/stage-focus.js",
+      "sha256": "7a86eb573530220438bf455d7ede3ed28d8789293222f7a710cab190951a492c"
+    },
+    {
+      "path": "plugin/ui/stage-freecam.js",
+      "sha256": "1f5077e47fd975d7a946a945663cc37176b1c0c9b80379854be9137052275bf6"
+    },
+    {
+      "path": "plugin/ui/stage-image-source.js",
+      "sha256": "59a2169eae713f3b089a991470ba7ba9b681862d0b36604865336471221febfb"
+    },
+    {
+      "path": "plugin/ui/stage-immersive.js",
+      "sha256": "a1f973d3b4eeeac4142cbb13c8b21a354f435c6c954c618b9f67d076f460df1e"
+    },
+    {
+      "path": "plugin/ui/stage-json-source.js",
+      "sha256": "0a37ab0e8a008f5a650b200abb49a14c62965cc8ee6e77efecba5b43467a3213"
+    },
+    {
+      "path": "plugin/ui/stage-lyrics.js",
+      "sha256": "af0a21ab467556c1e1fb5984b81ee948ae1c41d865a4e3eeab1a9d4e3af9ff7e"
+    },
+    {
+      "path": "plugin/ui/stage-media.js",
+      "sha256": "9534028efd223d5bd65a64efb5298cdf97aae7a7db885d6c45c6e38e79ded0f5"
+    },
+    {
+      "path": "plugin/ui/stage-particles-gl.js",
+      "sha256": "cc6510ea243f7582b13e638137d60f46341fe50c852dfc3e22fd3427cedeb57f"
+    },
+    {
+      "path": "plugin/ui/stage-particles.js",
+      "sha256": "1f8201584f8f277be12357f41e27b4e2e381281009ef29137008c295092187d7"
+    },
+    {
+      "path": "plugin/ui/stage-persistence.js",
+      "sha256": "04cf9af8bba224b8eb1298abbdf6991652a0e94a87560a74118809d20d8ae161"
+    },
+    {
+      "path": "plugin/ui/stage-resource-budget.js",
+      "sha256": "92e69875387daae507b358c84f199c72f9628ca9de5d21572dec0875ec21348b"
+    },
+    {
+      "path": "plugin/ui/stage-resource-policy.js",
+      "sha256": "edfa6e7875ed3711640d0c29a2a589929148870b7a682804717eb3f3db422c22"
+    },
+    {
+      "path": "plugin/ui/stage-scene-host.js",
+      "sha256": "6ce0e7e3cd4c0a6f30272af9d75d2f8254ab78e6a8b6dde1666ac919cdfaa792"
+    },
+    {
+      "path": "plugin/ui/stage-settings.js",
+      "sha256": "45e2f666b6480bc6775b96e70816dd288f9db2478a68f4aaf586a2057221a137"
+    },
+    {
+      "path": "plugin/ui/stage-shelf.js",
+      "sha256": "5ad03d9987dd447a08647de48e5844f2eabbd628e0a46463db07496994b86b16"
+    },
+    {
+      "path": "plugin/ui/stage-themes/starfall.css",
+      "sha256": "821fb09f4810e09a2532e63ec91a5dddb5f411f525eba2e7b23ad61ff18c0f1b"
+    },
+    {
+      "path": "plugin/ui/stage-zodiac.js",
+      "sha256": "477c2018f0cc434b3cfbf0e2cbb7067df190613ebf0377a0302a9b356d144141"
+    },
+    {
+      "path": "plugin/ui/stage.css",
+      "sha256": "49aa727d9fc4cfef3c50fee716471b3dd1d00184494acc5693b39215215744d0"
+    },
+    {
+      "path": "plugin/ui/stage.js",
+      "sha256": "283791d5711c48547aa2d120eb1fdfd8c17f667f315511781a150091a6350fe4"
+    },
+    {
+      "path": "plugin/ui/stage3d.css",
+      "sha256": "da321cc57bc985fc7b9c99cf386740de61d0505990bf13bd0f88b7dbe8a98a27"
+    },
+    {
+      "path": "plugin/ui/stage3d.js",
+      "sha256": "1e1fae1e056d0c1f91282366b03d3c4705c88ad6c07b3b398e932b706e97f480"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-bg.js",
+      "sha256": "762349f3f9a0149468d8f5ef39685ef012018638cef979e1f25c77a17ba41536"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-cadenza.js",
+      "sha256": "fb7067be392450ced127253327b81847af0141a45990071c88f9fedfd3ece1c8"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-classic.js",
+      "sha256": "be743d09e8c1832612813592c8b29c2e40ac2d1db5f73bc6f639c4c76d279e7f"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-glyph.js",
+      "sha256": "e5810d95c1f045c2a88d3e16b2b670fd3eb47a571071978c50d21f696889ac6a"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-songform.js",
+      "sha256": "c9b3c1b4b8236ef23dcb0a584e8fdd67c09637c18ad7dee21af1a8bda1ce3b3e"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-sonnet-fx.js",
+      "sha256": "424af3916d2df6ae48a5d4d5e340b3b4a2a0567e6029129a526f3cf8711f727d"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-sonnet.js",
+      "sha256": "f59511077c19572c48c2808bafcf22930aca2fbcbe26f9d5ce7f6760723b39f7"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-starborn.css",
+      "sha256": "e4badaf4ebef3664323133e5e7aa2ddfb36514e671b3f868ad107707d6c9feab"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-starborn.js",
+      "sha256": "df17ed8a9c565b813c4eb131a480f6237013b92044a01ce56d80be595a26c123"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-subtitle.js",
+      "sha256": "850ef86ee6ad8b11db2fec5166633e9fa55ebb9c17b25958f439e32901ff3451"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-tempera.js",
+      "sha256": "dd21bd7a9c1d0b13522624617a7adbb608c10e7b1b064ac902317d0233e1fea5"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-textlayout.js",
+      "sha256": "eb2c5cf97277c7dca53001f4c422621ea73b53abe5a4ea0ea101bf0bd154947b"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-theme.js",
+      "sha256": "481d0cdbef0f82bb5020bf400f83263354f022142932161faeab82b6ac77bcce"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza-util.js",
+      "sha256": "ffe62cbd68ca03b4a4bdf1a70a86fd8c3f55cc41237f613aa60f74165a67fadc"
+    },
+    {
+      "path": "plugin/ui/stanza/stanza.css",
+      "sha256": "8fb15473142e28c7282c8162f0716ae7dd8ee192d3f54f5d6e417bc3e39b3455"
+    },
+    {
+      "path": "plugin/ui/startup.css",
+      "sha256": "28bc2a46fc24f19c0211682cf24163e329f2b3ec18970447f527e985da0d6d20"
+    },
+    {
+      "path": "plugin/ui/startup.js",
+      "sha256": "f144b203ab81b6b1703c88c2c6e454270b2547c0c3451f3c6c334ff4f4fc74b9"
+    },
+    {
+      "path": "plugin/ui/style.css",
+      "sha256": "852d787f9caddf56e2d8f6e031d7767641075fdd9b6195b5bddac75db801d24d"
+    },
+    {
+      "path": "plugin/ui/system-media.js",
+      "sha256": "29e36fadf2ac3c4618f193a4804baa0ffc39959eeeba3140d63c2ba09ca3d56a"
+    },
+    {
+      "path": "plugin/ui/theme-picker.js",
+      "sha256": "e67f6fc3b0f0792703c82c383d55d0f202f7cab2e267d77335344124ac1486b9"
+    },
+    {
+      "path": "plugin/ui/theme-studio.css",
+      "sha256": "11797922d2db67281b309d4ae075e963c16db2515b6cf750dbd222e30f27f4c4"
+    },
+    {
+      "path": "plugin/ui/theme-studio.js",
+      "sha256": "3e00382c43d48b33e954142c0cc79a84e12588f99fab83d1df4513fce8db96fa"
+    },
+    {
+      "path": "plugin/ui/themes.js",
+      "sha256": "23f314c983aeb0cbdbfe23da62ec174818bd11f54f396cea90439f047ea20756"
+    },
+    {
+      "path": "plugin/ui/topsearch.js",
+      "sha256": "d9bdccfa4d64765c71da3850e1e45a20caddbdecfbf5258970234ccb6be107e9"
+    },
+    {
+      "path": "plugin/ui/ui-preference-settings.js",
+      "sha256": "076d0094dee34c4de390a37a9d8931370b0988b6a9b65b33079ec6971a95287e"
+    },
+    {
+      "path": "plugin/ui/ui-preferences.css",
+      "sha256": "c04faec432d1a13d3b22c66ff5bc20f952a7c8ea92118a030692e4591c192e69"
+    },
+    {
+      "path": "plugin/ui/ui-preferences.js",
+      "sha256": "6bf42a6b54833a671c9d4cf1932be0dd0e06e0102d476fc60f68a1ef4eff1540"
+    },
+    {
+      "path": "plugin/ui/vendor/coast-stage.js",
+      "sha256": "71879224fd5044f8562f3a486170bcb5e6fb3a3c5983345a5ae93a9cfed52975"
+    },
+    {
+      "path": "plugin/ui/vendor/pixi.min.js",
+      "sha256": "ff4a0817a03670c1c3444f3ef0151fd598ac28b3a1087ae1f7efe989db43344c"
+    },
+    {
+      "path": "plugin/ui/vendor/qrcode.js",
+      "sha256": "55427af126a7fd46b83b7a9557b7ad6a48850b31f2b4a1b32e2289e376dc80b4"
+    },
+    {
+      "path": "plugin/ui/vendor/space-stage.js",
+      "sha256": "9d0991ceebb27dd3278a6ab4d374a48a33aa9a42b3513109efce8f8dcae51104"
+    },
+    {
+      "path": "plugin/ui/vendor/stage-assets/basis_transcoder.js",
+      "sha256": "8478b5b6d6b74e7d3082b89f6417321d8d1dc0307f2b30d4484bb11b441696a1"
+    },
+    {
+      "path": "plugin/ui/vendor/stage-fluid.js",
+      "sha256": "7fda446fb1c87ce3efead5de3bdfbb8606842be8e374ad9809a69896da8c7761"
+    },
+    {
+      "path": "plugin/ui/vendor/stage-runtime.js",
+      "sha256": "4a746ca1b381010e64fe18d0b1fc574e41733cbd7d932439cff82b2d2c94b485"
+    },
+    {
+      "path": "plugin/ui/vendor/zodiac-stage.js",
+      "sha256": "001209d751bc8a9c0babbe17f79c75cdb2ebf801a74d3f1085485ec9477bc538"
+    },
+    {
+      "path": "plugin/ui/video-export.js",
+      "sha256": "eab0ede0848b695f28c7b16250c9a385fd0651022d4adb072a64b2f13e27d760"
+    },
+    {
+      "path": "plugin/ui/volume-controls.css",
+      "sha256": "2b3d025c6788517184840e94b0186fe9c7f01dd8e73cdffd3dc863581765abd4"
+    },
+    {
+      "path": "plugin/ui/volume-controls.js",
+      "sha256": "2186603bb1e00bf65a9400a41c69b752185591ad9c71d43b4abf9be6aade098e"
+    },
+    {
+      "path": "plugin/ui/wallpaper-settings.css",
+      "sha256": "56b93801f4fdd2042d1297c47e49a70c031f4d0fd1fb0dfa001b5667d89e9b54"
+    },
+    {
+      "path": "plugin/ui/wallpaper-settings.js",
+      "sha256": "8f8b88174fc3aacd2c1cd7eb2ef89b8dffb0b367e352de752b53fc3188e1514b"
+    },
+    {
+      "path": "plugin/ui/window-lifecycle.css",
+      "sha256": "ed8dab59cfb170611a728fc4a4f42c727a5c33e5f44e90618eb548b030a79a5a"
+    },
+    {
+      "path": "plugin/ui/window-lifecycle.js",
+      "sha256": "0888deea025f14850003e4611a2f7e54dffd23efceb1f8d7b563fb886728fc6c"
+    },
+    {
+      "path": "plugin/ui/window-sleep.js",
+      "sha256": "fa25fe3f28936fd2aef92ad338a9be17aaec2d78e742e81260aa44d64657846f"
+    },
+    {
+      "path": "plugin/ui/workshop.js",
+      "sha256": "97d835be9b75c05711c4ad935604023efceaeb2313077165366b970e77d1b928"
+    },
+    {
+      "path": "scripts/manual-checks.json",
+      "sha256": "8db3d8ae76bd329c3b72f876ee08b0d5f0ac83615ea1bd96334848e28584826c"
+    }
+  ],
+  "additional_current_plugin_sources": [
+    {
+      "path": "plugin/backend/Cargo.toml",
+      "sha256": "13af3822450431b2fbbf1438ffd92486a0dd02a26c3ffc937e0d070c5024c185"
+    },
+    {
+      "path": "plugin/backend/src/main.rs",
+      "sha256": "b0f88cc852ae1fcb9767d06ccbae86af0fdcb86e0288303510695e3837740046"
+    }
+  ],
+  "references": [
+    {
+      "path": "docs/audio-quality-enhancement-design.md",
+      "sha256": "478f3f35bb3ac9b86e5cf9db2a4a858a0cec2efc5956f2eb7becb1f279c9a742"
+    },
+    {
+      "path": "docs/audio-quality-q1b-q4.md",
+      "sha256": "b5bfcbab9adacaf4ffa542c480bd66505eda17f25aad2976b758590023c945dd"
+    },
+    {
+      "path": "docs/adr/0003-background-work-budget.md",
+      "sha256": "f3bf7da21e512773fb70a9d88d46663cd0c9571c15e61602b99064c29027e8f4"
+    },
+    {
+      "path": "docs/adr/0007-playback-transitions-and-intent-ownership.md",
+      "sha256": "17df44f84e5f683ad3044afab33081afb425dda83ec2581487b2bd323450665a"
+    },
+    {
+      "path": "docs/adr/0011-lan-rendering-and-output-ownership.md",
+      "sha256": "5f7823222dd4e0be3a8b767e3d43f20a305042c4192dc1f17f8a3dba82175a70"
+    },
+    {
+      "path": "docs/technical-roadmap.md",
+      "sha256": "ca47fe33bd7e22ee3b39bcb10b5d629ede635d2a98dfcef1573b2517caf9bf23"
+    },
+    {
+      "path": "docs/roadmap-progress.md",
+      "sha256": "c6786f55364304f5dc8214f4abf590a974bf561e082c61aa238d80b13b6e63b7"
+    },
+    {
+      "path": "docs/product-roadmap.md",
+      "sha256": "4ea032514db7d0c07178ce779b069190395cea4fb5101fd7c7db59e9cea91ad6"
+    },
+    {
+      "path": "docs/api-routes.md",
+      "sha256": "0759383d645cf8a10ebdf2c08a4b8852118ce4c8aeb83d56297effe5fdf4f275"
+    }
+  ],
+  "binaries": [
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "logs": [
+        "remaining-parameter-response",
+        "remaining-dsp-memory",
+        "remaining-analysis-memory",
+        "remaining-preview-chain-600s-direct"
+      ],
+      "sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba",
+      "bytes": 7688704
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/hertz_studio-8dc1d1eac1e205ea.exe",
+      "logs": [
+        "remaining-shared-zero-service-release"
+      ],
+      "sha256": "5bc512450cda06406296f0a5c995abee45a5c86ad9100d1ded1fced2f9e3aaa2",
+      "bytes": 96918016
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/hertz_studio-cbdc895e20a8fb31.exe",
+      "logs": [
+        "remaining-windows-lib-current"
+      ],
+      "sha256": "a38952f5f6df8157b746923f3c75a4c5e5840f4f3f2f578068bc80974463b45d",
+      "bytes": 194661888
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_audio-8852cc2f8e59dc3d.exe",
+      "logs": [
+        "remaining-windows-lib-current"
+      ],
+      "sha256": "ef5e1d2e27df4e22466d0e7fd9c9fbd28de0002109a29be7beba638be02c7791",
+      "bytes": 31280640
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_core-98b671743e8628f4.exe",
+      "logs": [
+        "remaining-windows-lib-current"
+      ],
+      "sha256": "113164bed4b9806f73333b14b1ce5911bb5ec7a581d79ac841093aa8a147fb58",
+      "bytes": 1576960
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_store-d504ed15e1b9cf5d.exe",
+      "logs": [
+        "remaining-windows-lib-current"
+      ],
+      "sha256": "8b8f662f37f7d157969dcb0928f0dc7a7d2bc1b6c4be23fc86ba0621389c71ec",
+      "bytes": 10384384
+    },
+    {
+      "path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/linux-target/debug/deps/hertz_studio-34a0f24e9806d833",
+      "logs": [
+        "remaining-linux-regression-2"
+      ],
+      "sha256": "d8f5eae6c1c1e360df777019e9b45843ad8299034993a90d5d1eb1a5c1d04191",
+      "bytes": 745893992
+    },
+    {
+      "path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/linux-target/debug/deps/vmusic_audio-682bcd4a673650a1",
+      "logs": [
+        "remaining-linux-regression-2"
+      ],
+      "sha256": "371661c7a49a15a99d947cbff4b190d3fd5d513aeab784cbd1ab617cdf2af9b8",
+      "bytes": 101095816
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/hertz_studio-2146108518957a5c.exe",
+      "logs": [
+        "remaining-embedded-preview-assets"
+      ],
+      "sha256": "2030bdb28ea690081732af6fb0e2f40d583ee165a7f68a5c3def089a672350d5",
+      "bytes": 21313024
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/resampling-de4938f8cd9b8694.exe",
+      "logs": [
+        "remaining-audio-integration"
+      ],
+      "sha256": "0454eac83a4cf5fa651c1458025e3870bdf26568e4e1d0699016f48d10cc61d1",
+      "bytes": 1063936
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/scheduled_output_alloc-95dc3955c926f4c2.exe",
+      "logs": [
+        "remaining-audio-integration"
+      ],
+      "sha256": "54e4eb1356d7a87d54dbab091195c4faf84d348d0f54260461728cbd1080b767",
+      "bytes": 947200
+    },
+    {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_audio-aaa7b460d66e02eb.exe",
+      "logs": [
+        "remaining-audio-null"
+      ],
+      "sha256": "148360aa2b8d62e5738e049e92eb38443bfe14b227459e59b7c9b8b6acfba7f1",
+      "bytes": 2155520
+    }
+  ],
+  "source_hash_mode": "Raw working-tree bytes, checked unchanged from freeze through final probes; Git normalization/checkout line endings are distinct.",
+  "toolchain": {
+    "windows_rustc": "rustc1.88.0 (6b00bc388 2025-06-23)",
+    "linux_rustc": "Rust1.88.0 isolated WSL2 toolchain",
+    "node": "v24.22.3",
+    "chrome": "157.0.8103.79",
+    "cpu": "13th Gen Intel Core i7-13620H",
+    "windows": "Windows11 x86_64-pc-windows-msvc",
+    "linux": "Ubuntu26.04/WSL2 x86_64 GNU/Linux 6.6.114.1"
+  },
+  "qualified_scope": {
+    "full_chain_rates": [
+      44100,
+      48000
+    ],
+    "basic_chain_rates": [
+      96000
+    ],
+    "real_output": "release Realtek CPAL/Wasapi48k shared f32 zeroPCM only",
+    "audible_qualification": false
+  },
+  "freshness": {
+    "source_count": 829,
+    "source_readback_changed": 0,
+    "release_binary_readback_changed": false,
+    "final_readback_at": "2026-11-24T11:24:47.989Z",
+    "additional_plugin_source_count": 2,
+    "executed_binaries_readback_count": 12,
+    "executed_binaries_readback_changed": 0,
+    "passed_log_readback_count": 19,
+    "passed_log_readback_changed": 0,
+    "reference_hashes_refreshed": 1,
+    "delivery_configuration_count": 1,
+    "staged_log_blob_readback_count": 19,
+    "staged_log_blob_hash_changed": 0
+  },
+  "references_captured_at": "2026-11-24T11:24:47.989Z",
+  "delivery_configuration": [
+    {
+      "path": ".gitattributes",
+      "sha256": "6a46ef7e69b8cc4dba3662cc216c72d6d02a954e00e49e64d8a76f3467666fb6",
+      "scope": "Verbatim byte preservation and final blank-line policy for only this audio evidence log directory; not a runtime/build input."
+    }
+  ]
+}

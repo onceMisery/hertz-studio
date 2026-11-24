@@ -1,0 +1,47 @@
+   Compiling syn v3.0.6
+   Compiling thiserror-impl v2.0.20
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.1
+   Compiling thiserror v2.0.20
+   Compiling serde v1.0.229
+   Compiling vmusic-core v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-core)
+   Compiling vmusic-audio v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-audio)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.28s
+     Running unittests src\lib.rs (D:/code/github/hertz-studio/target/audio-quality-msrv\debug\deps\vmusic_audio-aaa7b460d66e02eb.exe)
+
+running 31 tests
+test actor::tests::a_completed_command_is_visible_immediately ... ok
+test actor::tests::actor_loads_plays_and_seeks_on_the_null_backend ... ok
+test actor::tests::already_queued_play_checks_the_deadline_when_consumed ... ok
+test actor::tests::completed_transition_publishes_new_source_once_before_transport_changes ... ok
+test actor::tests::exclusive_lease_fences_clones_and_restores_only_idle_playback ... ok
+test actor::tests::failed_stop_preserves_stopped_intent_and_invalidates_old_events ... ok
+test actor::tests::lagged_receiver_can_rebase_on_the_authoritative_snapshot ... ok
+test actor::tests::load_and_stop_rearm_the_ended_latch_every_time ... ok
+test actor::tests::load_source_command_updates_track_id ... ok
+test actor::tests::null_transition_capability_is_explicit_and_preserves_current_track ... ok
+test actor::tests::play_without_a_track_is_rejected ... ok
+test actor::tests::playback_still_broadcasts_advancing_positions ... ok
+test actor::tests::sleep_deadline_is_local_and_can_always_be_cleared ... ok
+test actor::tests::sleep_expiry_pauses_the_actor_and_rejects_play_until_cleared ... ok
+test actor::tests::sleep_expiry_preserves_an_already_completed_transition_as_paused ... ok
+test actor::tests::snapshots_are_visible_without_a_subscription ... ok
+test actor::tests::source_identity_changes_only_when_media_is_replaced ... ok
+test actor::tests::stable_paused_state_does_not_publish_redundant_snapshots ... ok
+test actor::tests::stale_prepare_and_prepare_failure_leave_natural_end_available ... ok
+test actor::tests::unchanged_shared_snapshots_reuse_the_existing_allocation ... ok
+test actor::tests::unchanged_snapshot_is_retried_after_broadcast_had_no_receivers ... ok
+test null::tests::bounded_seek_stays_clamped_when_playing_and_replays_after_end ... ok
+test null::tests::empty_uri_is_rejected ... ok
+test null::tests::play_pause_advance_and_stop ... ok
+test null::tests::seek_is_honoured_and_clamped_by_duration ... ok
+test sleep_deadline::tests::callback_detects_a_timer_armed_expired_and_cleared_after_entry ... ok
+test sleep_deadline::tests::callback_keeps_its_deadline_after_cleanup_and_rearming ... ok
+test sleep_deadline::tests::cancellation_before_expiry_does_not_change_expiry_history ... ok
+test sleep_deadline::tests::closing_the_owner_cannot_be_reversed_by_timer_cleanup_or_rearming ... ok
+test sleep_deadline::tests::deadline_boundary_replacement_and_cancellation_are_exact ... ok
+test sleep_deadline::tests::portable_clock_samples_include_sleep_and_saturate ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+

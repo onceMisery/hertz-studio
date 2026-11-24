@@ -1,0 +1,8 @@
+
+running 1 test
+test render::resource_tests::analysis_working_memory_probe ... ANALYSIS_MEMORY_PROBE {"channels":2,"elapsed_ms":186.9228,"heap_allocated_bytes":71625659,"heap_end_bytes":7376,"heap_freed_bytes":71618283,"heap_peak_live_bytes":2514544,"mode":"streaming_analysis","process":{"baseline_private_bytes":1880064,"baseline_working_set_bytes":7315456,"os":"windows","peak_private_bytes":4661248,"peak_working_set_bytes":8499200,"private_increase_bytes":2781184,"private_metric":"private_committed_bytes","sample_interval_ms":2,"working_set_increase_bytes":1183744},"scope":"actual WAV decoder, ebur128, bounded prefix/resampler and four shared DSP paths; includes Rust allocator allocations and process memory, excludes file cache/DB/device","source_rate":96000,"source_seconds":60}
+ANALYSIS_MEMORY_PROBE {"channels":2,"elapsed_ms":806.0376,"heap_allocated_bytes":43048884,"heap_end_bytes":0,"heap_freed_bytes":43048884,"heap_peak_live_bytes":13745826,"mode":"resampled_full_comparison","process":{"baseline_private_bytes":2097152,"baseline_working_set_bytes":7925760,"os":"windows","peak_private_bytes":16044032,"peak_working_set_bytes":21893120,"private_increase_bytes":13946880,"private_metric":"private_committed_bytes","sample_interval_ms":2,"working_set_increase_bytes":13967360},"scope":"actual WAV decoder, ebur128, bounded prefix/resampler and four shared DSP paths; includes Rust allocator allocations and process memory, excludes file cache/DB/device","source_rate":96000,"source_seconds":60}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 277 filtered out; finished in 1.03s
+

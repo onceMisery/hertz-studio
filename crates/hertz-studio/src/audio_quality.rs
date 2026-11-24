@@ -58,7 +58,7 @@ pub struct QualityUpdate {
     pub patch: Value,
 }
 
-fn patch(config: QualityConfig, value: Value) -> Result<QualityConfig, ApiError> {
+pub(crate) fn patch(config: QualityConfig, value: Value) -> Result<QualityConfig, ApiError> {
     let patch = value
         .as_object()
         .filter(|v| !v.is_empty())
@@ -116,7 +116,7 @@ fn patch(config: QualityConfig, value: Value) -> Result<QualityConfig, ApiError>
     Ok(config)
 }
 
-async fn load(state: &AppState) -> Result<(QualityConfig, &'static str), ApiError> {
+pub(crate) async fn load(state: &AppState) -> Result<(QualityConfig, &'static str), ApiError> {
     from_settings(
         &vmusic_store::settings::get_all(&state.db)
             .await
@@ -191,7 +191,13 @@ async fn response(
     impulse["max_prepared_taps"] = json!(257);
     impulse["phase"] = json!("symmetric_linear");
     impulse["curve_generation"] = json!(true);
-    impulse["unknown_phase_preview"] = json!(false);
+    impulse["unknown_phase_preview"] = json!(true);
+    let preview_available = !no_output
+        && qualified
+        && state.audio.snapshot().track_id.is_some()
+        && output
+            .as_ref()
+            .is_some_and(|o| o.active && o.actual.as_ref().is_some_and(|a| a.channels <= 2));
     let matching = quality
         .as_ref()
         .is_some_and(|s| s.requested == config.params());
@@ -230,10 +236,13 @@ async fn response(
         "capabilities":{"parametric_eq":{"supported":true,"available":!no_output&&qualified,"scope":"local","reason":if room {Some("当前房间只采用共同六段 EQ")}else{None::<&str>},"history_limit_ms":2000},
             "headroom":{"supported":true,"available":!no_output&&qualified,"scope":"local"},
             "true_peak":{"supported":true,"available":!no_output&&qualified,"scope":"local","qualified_rates":vmusic_core::audio_quality::QUALITY_PROCESSING_RATES,"target_db_tp":-1.0},
-            "r128":{"supported":true,"available":cfg!(windows)&&!no_output,"scope":"local","reason":if cfg!(windows){None}else{Some("immutable_source_adoption_unavailable")}},
+            "r128":{"supported":true,"available":crate::audio_source_snapshot::available()&&!no_output,"scope":"local","reason":if crate::audio_source_snapshot::available(){None}else{Some("immutable_source_adoption_unavailable")}},
             "crossfeed":{"supported":true,"available":!no_output,"scope":"stereo_local"},
             "tone":{"supported":true,"available":!no_output,"scope":"local"},
-            "saturation":saturation,"impulse":impulse}}),
+            "saturation":saturation,"impulse":impulse,
+            "preview":{"supported":true,"available":preview_available,"scope":"local", "ttl_ms":30000,"reference_seconds":10,"warmup_seconds":2,
+                "reason":if room {Some("room_processing_unavailable")}else if !preview_available {Some("play_current_track_with_local_output")}else{None},
+                "unknown_phase_ir_rates":vmusic_core::audio_quality::CORRECTION_PROCESSING_RATES}}}),
     )
 }
 
@@ -262,6 +271,7 @@ async fn commit(
     expected: Option<String>,
 ) -> Result<Value, ApiError> {
     state.require_local_playback()?;
+    crate::audio_preview::cancel_for_change(state).await?;
     let (initial, initial_origin) = load(state).await?;
     if expected.as_deref().is_some_and(|r| r != initial.revision) {
         return Err(conflict());

@@ -41,6 +41,9 @@ MCP 适配会话在 SDK 解码后、创建 handler 前限制未完成请求；�
 | 界面路径等额度的上限（秒） | 4 | `crates/hertz-studio/src/stage_beats.rs::BEAT_PERMIT_WAIT` | GET 的最坏响应时间；测试里用注入的短时长，别改生产值来迁就测试 |
 | 状态面板列出的最近条目数 | 6 | `crates/hertz-studio/src/state.rs::BEAT_STATUS_RECENT` | 设置页那一行还读得动的上限；再大就该做成列表页，不是这条 hint |
 | 打卡上报每小时上限 | 60 | `crates/hertz-studio/src/state.rs::MAX_PER_HOUR` | 平台侧频控与「已提交」提示的诚实性（接口 200 ≠ 平台累计增加） |
+| 音质分析/试听单源上限（字节） | 2147483648 | `crates/hertz-studio/src/audio_source_snapshot.rs::MAX_SOURCE_BYTES` | 完整哈希、普通文件准入、取消和源变化回归 |
+| Unix 活动不可变快照总量（字节） | 4294967296 | `crates/hertz-studio/src/audio_source_snapshot.rs::MAX_SNAPSHOT_BYTES` | 共同磁盘许可、候选/解码借用及最后句柄退休 |
+| 试听准备期限（秒） | 120 | `crates/hertz-studio/src/audio_preview.rs::PREPARATION_TIMEOUT` | 分析/reader 许可、临时核准备与取消后的实际退出 |
 | MCP 会话未完成请求上限 | 8 | `crates/hertz-studio/src/ai/mcp/transport.rs::MAX_PENDING_REQUESTS` | 同时持有输入、HTTP 与响应的容量；真实客户端并发、取消与慢读检查必须一起更新 |
 | MCP 入站 LF 前字节上限 | 262144 | `crates/hertz-studio/src/ai/mcp/transport.rs::MAX_INPUT_LINE_BYTES` | SDK 解码前的原始帧限制，含可能的 CR，不等同业务 JSON 额度 |
 | MCP 出站 LF 前字节上限 | 262144 | `crates/hertz-studio/src/ai/mcp/transport.rs::MAX_OUTPUT_LINE_BYTES` | 按实际 JSON 转义/双表示计算，超限必须完整错误替换，不能输出半帧 |
@@ -67,3 +70,13 @@ MCP 适配会话在 SDK 解码后、创建 handler 前限制未完成请求；�
   `beatmap_outcome_status`）。两个门面各写一遍的话，插件形态与独立形态迟早对同一次
   重试给出两种答复。
 - 上下文丢失后不许定时自动创建新代际，也不能显示「正在恢复渲染」；显式重试通过原 owner 与当前有限资源准入。
+
+## 2026-11-24 补充：不可变来源与试听准备
+
+本次增量沿用分析总额和单 reader。草稿试听的完整来源指纹、参考解码、两侧响度匹配和 actor 清理占一个现有分析槽及同一个 reader；没有第三个分析额度，也没有整库试听等待队列。准备总期限为 120 秒，取消只发停止信号，许可保持到实际 I/O、计算与清理退出。临时 WAV 核准备继续共用原校正槽。实现与执行范围见[增强实施记录](../audio-quality-q1b-q4.md#临时试听与同响度比较)。
+
+测量与实际解码共同借用 `audio_source_snapshot::StableFile`。Windows 保持只允许共享读取的原文件句柄；Unix 建立无路径、无可写别名的只读副本，并核对复制前后身份和完整内容。单源仍为 2 GiB，Unix 所有活动快照共用 4 GiB 临时磁盘额度，额度随最后一个真实读取句柄退休。它是独立的磁盘预算，不计作免费内存，也不改变原 PCM 上限。
+
+分别打开路径做哈希与播放会让两次读取落在不同字节上；仅依赖 Unix 文件锁不能约束未遵守锁的写入者。因此选择共同不可变来源，代价是 Unix 复制时间和临时空间。试听参考只保留最多 12 秒处理率 PCM，匹配的处理路径依次退出，不缓存两首完整渲染。旧独立来源读取收敛到该 owner，普通非测量播放的原来源能力保留。
+
+本条补充记录已实施的来源和额度合同，不授予跨设备、听感或长稳资格。当前基线同步到[父设计 §9.4/§12](../audio-quality-enhancement-design.md#94-临时试听与同响度比较)及[技术方案](../technical-roadmap.md#92-音频专项-s1流式契约优先)。

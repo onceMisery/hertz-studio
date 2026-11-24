@@ -76,6 +76,8 @@ pub mod window_sleep;
 pub mod ws;
 
 mod audio_loudness;
+mod audio_preview;
+mod audio_source_snapshot;
 
 mod measured_loudness;
 

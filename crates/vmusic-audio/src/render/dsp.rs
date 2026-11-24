@@ -155,17 +155,30 @@ pub(super) fn soft_limit(sample: f32, ceiling: f32) -> f32 {
 /// Fixed-size coefficient message. The control thread never touches live history.
 #[derive(Clone, Copy)]
 pub(super) struct PreparedEq {
-    revision: u64,
+    pub(super) revision: u64,
     rate: u32,
     gains: [f32; 6],
     bands: [BiQuad; 6],
     preamp_db: f32,
-    params: QualityParams,
-    headroom: HeadroomInfo,
+    pub(super) params: QualityParams,
+    pub(super) preview_gain_db: f32,
+    pub(super) preview_alignment: usize,
+    pub(super) headroom: HeadroomInfo,
     warm_frames: usize,
 }
 
 impl PreparedEq {
+    pub(super) fn preview(
+        rate: u32,
+        params: QualityParams,
+        gain_db: f32,
+        alignment: usize,
+    ) -> Result<Self, AudioError> {
+        let mut result = preparation::prepare(0, rate, params)?;
+        result.preview_gain_db = gain_db;
+        result.preview_alignment = alignment;
+        Ok(result)
+    }
     fn new(revision: u64, rate: u32, gains: [f32; 6], preamp_db: f32) -> Self {
         let mut params = QualityParams::default();
         params.eq.enabled = gains.iter().any(|g| *g != 0.0);
@@ -358,7 +371,7 @@ impl DspControl {
                 .map_err(|_| AudioError::Other("校正资源不可用".into()))?;
             if !prepared
                 .as_ref()
-                .is_some_and(|k| k.id == id && k.rate == rate)
+                .is_some_and(|k| k.id == id && k.rate == rate && !k.preview_only)
             {
                 return Err(AudioError::Other("校正资源尚未按此输出格式准备".into()));
             }
@@ -384,7 +397,7 @@ impl DspControl {
                 .map_err(|_| AudioError::Other("校正资源不可用".into()))?;
             if !prepared
                 .as_ref()
-                .is_some_and(|k| k.id == id && k.rate == rate)
+                .is_some_and(|k| k.id == id && k.rate == rate && !k.preview_only)
             {
                 return Err(AudioError::Other("校正资源尚未按此输出格式准备".into()));
             }
@@ -420,6 +433,8 @@ impl DspControl {
         let observed = *self.observed.lock().unwrap_or_else(|e| e.into_inner());
         let current = observed.epoch == self.reset_epoch.load(Ordering::Acquire);
         QualityStatus {
+            preview: None,
+            track_gain_db: 0.0,
             eq,
             requested: p.params,
             applied: if current { observed.applied } else { None },
@@ -435,12 +450,49 @@ impl DspControl {
                 .load(Ordering::Acquire)
                 .then_some("processing_latency_change_waits_for_seek_or_load"),
             latency_frames: self.terminal_latency.load(Ordering::Relaxed),
-            true_peak: (self.terminal_latency.load(Ordering::Relaxed) > 0)
-                .then(|| f32::from_bits(self.terminal_peak.load(Ordering::Relaxed))),
+            true_peak: (current
+                && observed
+                    .applied
+                    .is_some_and(|p| p.limiter != vmusic_core::audio_quality::LimiterMode::Soft))
+            .then(|| f32::from_bits(self.terminal_peak.load(Ordering::Relaxed))),
             protection_reduction_db: f32::from_bits(
                 self.terminal_reduction.load(Ordering::Relaxed),
             ),
         }
+    }
+
+    pub(super) fn reserve_preview_restore(&self) -> Result<(), AudioError> {
+        let pending = self
+            .parameters
+            .lock()
+            .map_err(|_| AudioError::Other("DSP parameters unavailable".into()))?;
+        pending.revision.checked_add(2).ok_or_else(|| {
+            AudioError::Other("DSP revision exhausted; cannot reserve preview restoration".into())
+        })?;
+        Ok(())
+    }
+
+    pub(super) fn publish_preview(
+        &self,
+        mut prepared: PreparedEq,
+        kernel: Option<super::impulse::PreparedImpulse>,
+    ) -> Result<(), AudioError> {
+        // Preparation is already complete. The render consumer observes the
+        // coefficients and their matching gain/alignment as one fixed message.
+        let mut pending = self
+            .parameters
+            .lock()
+            .map_err(|_| AudioError::Other("DSP parameters unavailable".into()))?;
+        prepared.revision = pending
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| AudioError::Other("DSP revision exhausted".into()))?;
+        *self
+            .impulse
+            .lock()
+            .map_err(|_| AudioError::Other("校正准备状态不可用".into()))? = kernel;
+        *pending = prepared;
+        Ok(())
     }
 
     pub(super) fn observe(&self, peak: f32, overloads: u64) {
@@ -629,6 +681,14 @@ impl DspRuntime {
             control.deferred_reset.store(true, Ordering::Release);
             return true;
         }
+        if self.history_len > 0
+            && self
+                .terminal
+                .preview_needs_reset(parameters.preview_alignment)
+        {
+            control.deferred_reset.store(true, Ordering::Release);
+            return true;
+        }
         control.deferred_reset.store(false, Ordering::Release);
         if parameters.params.impulse_id != self.terminal.impulse_id() {
             let Ok(kernel) = control.impulse.try_lock() else {
@@ -660,6 +720,8 @@ impl DspRuntime {
             .max(2);
         self.terminal
             .configure(parameters.params.limiter, parameters.params.tone);
+        self.terminal
+            .configure_preview(parameters.preview_gain_db, parameters.preview_alignment);
         if self.history_len == 0 {
             self.configure(self.current, parameters);
             self.applied = parameters.revision;

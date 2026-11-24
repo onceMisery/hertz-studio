@@ -28,6 +28,8 @@ Q1b–Q4 实施增量继续由原 RenderCore/actor 持有时间线。实际媒�
 | 固定 EQ 输入历史毫秒 | 160 | `crates/vmusic-audio/src/render/dsp.rs::EQ_HISTORY_MS` | 固定六段历史误差、原生双历史预算和参数采用延迟 |
 | 固定 EQ 过渡毫秒 | 20 | `crates/vmusic-audio/src/render/dsp.rs::EQ_FADE_MS` | 权重和为 1、完整 EQ/前级峰值与房间生效帧 |
 | 每个实际帧最多预热历史帧 | 4 | `crates/vmusic-audio/src/render/dsp.rs::EQ_WARMUP_FRAMES_PER_FRAME` | 回调最坏工作量、追齐时间、首次/过渡零分配 |
+| 临时试听租期（毫秒） | 30000 | `crates/vmusic-core/src/audio_preview.rs::PREVIEW_TTL_MS` | actor 期限、回调硬静音门禁、隐藏/断连和续期 |
+| 试听算法延迟对齐上限（处理率帧） | 136 | `crates/vmusic-core/src/audio_preview.rs::MAX_ALIGNMENT_FRAMES` | 有界终端缓冲、两侧参考边界与首次/尾部零分配 |
 | 在线歌单窗口启用条数 | 120 | `plugin/ui/online-playlist-view.js::WINDOW_THRESHOLD` | 实际 DOM/渲染耗时、末项点击及键盘焦点测试 |
 | 集合续载上限 | 2000 | `crates/hertz-studio/src/collection.rs::LOAD_CAP` | 必须显示容量边界，不能把被截断的集合宣称已全部准备 |
 | 节拍等待重取次数 | 8 | `plugin/ui/stage-cinema.js::WAIT_RETRIES` | 预算不足时无任务事件的恢复路径、换曲作废和到限回退 |
@@ -46,3 +48,13 @@ Q1b–Q4 实施增量继续由原 RenderCore/actor 持有时间线。实际媒�
 - 不许让准备缓存被 LRU 删除，或在追加队列后继续播放原先预备的回卷曲。
 - 不许为虚拟列表重新建立曲目 owner；筛选/点击必须使用原始已加载集合和绝对索引。固定队列只改变显示，不发送播放命令。
 - 不许让控制线程持有可变滤波历史或争用时直接输出未滤波 PCM；否则调参会在块之间改变音色。也不许分别过渡 EQ 和前级；两端都不过载的配置可能在中途削波。
+
+## 2026-11-24 补充：临时试听仍归原播放时间线
+
+草稿增强/旁路试听由 AppState 校验保存修订、当前来源与输出绑定，原 audio actor/RenderCore 准备、采用、定位和恢复。`audio_quality_v2` 仍是唯一持久化配置；临时参数、UUID、匹配结果和租期不落盘。没有第二条业务队列、预览播放器或浏览器 DSP。取消、参考结束和租期结束恢复当前合法保存配置及进入前位置，并保留最近的播放/暂停意图。保存、换曲/外部定位、音量或固定增益改变、输出/房间切换撤销临时层，旧 UUID 不能恢复新状态。
+
+两侧从同一 `StableFile` 和同一参考起点重放，实际来源替换推进 `source_generation`；固定测量增益只有内容指纹、曲目身份和原来源代际仍一致时才能重新绑定。旁路保留用户音量、曲目固定增益和末端保护，分别衰减较响的一侧并追加共同安全余量；仅对齐可确定的算法延迟，最大补齐 136 个处理率帧。未知相位短核只允许临时层显式试听，不由峰位置推断可补偿的内在群延迟。
+
+选择复用原时间线，保证暂停、seek、EOF、睡眠和输出退出屏障只有一个 owner；独立预览播放器会引入双输出及恢复归属。代价是切换两侧需要受控定位，并只承诺固定参考区间内的匹配。租期 30 秒，回调先执行硬静音门禁，恢复由 actor 完成；页面隐藏/断连和迟到回执不产生新的播放授权。
+
+本条补充记录实施合同；真实听测、设备恢复和长期资格仍按[实施记录](../audio-quality-q1b-q4.md)单列。当前基线同步到[父设计 §9.4/§10/§11](../audio-quality-enhancement-design.md#94-临时试听与同响度比较)、技术路线与产品需求池。

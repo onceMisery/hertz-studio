@@ -1,0 +1,1005 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-11-24T11:39:29.196Z",
+  "base_commit": "f036e9ba29e35160e6283bc595f05e7e5e59ae89",
+  "workspace": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+  "verification_state": "software-delivery-verified-with-qualification-gaps",
+  "confidence_grade": "B",
+  "completion_boundary": {
+    "software_scope": [
+      "通用不可变来源",
+      "原引擎临时草稿试听及未知相位短WAV",
+      "固定参考两侧独立响度匹配与算法延迟对齐",
+      "资源/响应/连续回调测量",
+      "设计/ADR/路线与证据同步"
+    ],
+    "overall_audio_program_accepted": false,
+    "physical_device_qualified": false,
+    "local_commit_receipt": "Git实际回执保存在同一工作记录及最终交付；本文件记录提交前的执行身份。"
+  },
+  "evidence_files": {
+    "build_identity": "build-identity.json",
+    "logs": "logs.json",
+    "parameter_response": "parameter-response.json",
+    "working_memory": "working-memory.json",
+    "continuous_chain": "continuous-chain.json",
+    "retained_observations": "retained-observations.json",
+    "screenshots": [
+      "screenshots/390-200-dark.png",
+      "screenshots/390-200-light.png"
+    ]
+  },
+  "commands": [
+    {
+      "name": "remaining-windows-lib-current",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "test",
+        "-p",
+        "vmusic-audio",
+        "-p",
+        "vmusic-core",
+        "-p",
+        "vmusic-store",
+        "-p",
+        "hertz-studio",
+        "--lib",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv",
+        "--",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:15:11.826Z",
+      "ended_at": "2026-11-24T10:22:20.199Z",
+      "execution_status": "passed",
+      "covered_scope": "Windows Rust 1.88：Hertz981/audio269/core58/store69，共1377通过、16忽略；当前来源/试听/播放/保存回归。",
+      "log": {
+        "path": "logs/remaining-windows-lib-current.log",
+        "sha256": "f04e3a818d52c0880d85705ca34e0adb6821db51c69dc1e09949480fc393913b",
+        "bytes": 126600
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/hertz_studio-cbdc895e20a8fb31.exe",
+          "sha256": "a38952f5f6df8157b746923f3c75a4c5e5840f4f3f2f578068bc80974463b45d"
+        },
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_audio-8852cc2f8e59dc3d.exe",
+          "sha256": "ef5e1d2e27df4e22466d0e7fd9c9fbd28de0002109a29be7beba638be02c7791"
+        },
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_core-98b671743e8628f4.exe",
+          "sha256": "113164bed4b9806f73333b14b1ce5911bb5ec7a581d79ac841093aa8a147fb58"
+        },
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_store-d504ed15e1b9cf5d.exe",
+          "sha256": "8b8f662f37f7d157969dcb0928f0dc7a7d2bc1b6c4be23fc86ba0621389c71ec"
+        }
+      ]
+    },
+    {
+      "name": "remaining-linux-regression-2",
+      "executable": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--exec",
+        "sh",
+        "/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/linux-regression.sh"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:09:36.381Z",
+      "ended_at": "2026-11-24T10:30:19.269Z",
+      "execution_status": "passed",
+      "covered_scope": "WSL2 GNU/Linux：两库all-targets check；Hertz audio_27、audio preview13/comparison6通过。",
+      "log": {
+        "path": "logs/remaining-linux-regression-2.log",
+        "sha256": "daa2905737130841fea21be8c236584ecc3a44ffb31d2e83ee8116387dfee8ec",
+        "bytes": 9564
+      },
+      "binary_identities": [
+        {
+          "path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/linux-target/debug/deps/hertz_studio-34a0f24e9806d833",
+          "sha256": "d8f5eae6c1c1e360df777019e9b45843ad8299034993a90d5d1eb1a5c1d04191"
+        },
+        {
+          "path": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/output/audio-quality/linux-target/debug/deps/vmusic_audio-682bcd4a673650a1",
+          "sha256": "371661c7a49a15a99d947cbff4b190d3fd5d513aeab784cbd1ab617cdf2af9b8"
+        }
+      ]
+    },
+    {
+      "name": "remaining-embedded-preview-assets",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "test",
+        "-p",
+        "hertz-studio",
+        "--bin",
+        "hertz-studio",
+        "registered_ui_assets_are_served_with_their_own_content",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv",
+        "--",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:15:11.837Z",
+      "ended_at": "2026-11-24T10:16:28.246Z",
+      "execution_status": "passed",
+      "covered_scope": "实际内嵌HTTP路由：1项通过，核对试听脚本存在及正文；235方法/路径、175静态资源。",
+      "log": {
+        "path": "logs/remaining-embedded-preview-assets.log",
+        "sha256": "cb23cb7b6ed5a1fc4373f2d599e7666bb796196ebf9181840f4bd66c8797d19b",
+        "bytes": 738
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/hertz_studio-2146108518957a5c.exe",
+          "sha256": "2030bdb28ea690081732af6fb0e2f40d583ee165a7f68a5c3def089a672350d5"
+        }
+      ]
+    },
+    {
+      "name": "remaining-frontend-contract-2",
+      "executable": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/bin/node.exe",
+      "args": [
+        "scripts/check-frontend.js"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:09:36.385Z",
+      "ended_at": "2026-11-24T10:10:13.526Z",
+      "execution_status": "passed",
+      "covered_scope": "前端默认聚合87步通过；不包括--extra或真实宿主。",
+      "log": {
+        "path": "logs/remaining-frontend-contract-2.log",
+        "sha256": "11a85c0ebfdd641c0a3ef1095d093c10009fe508616788e655cfc84792351896",
+        "bytes": 11670
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-preview-chrome-6",
+      "executable": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/bin/node.exe",
+      "args": [
+        "-e",
+        "process.env.PLAYWRIGHT_MODULE=\"C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules/playwright\";process.env.PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe';require(\"./scripts/check-audio-preview-browser.js\");"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T09:07:23.033Z",
+      "ended_at": "2026-11-24T09:07:34.141Z",
+      "execution_status": "passed",
+      "covered_scope": "Chrome生产试听表单14组通过；实际Theme深浅配色、390px/200%和交互，受控传输。",
+      "log": {
+        "path": "logs/remaining-preview-chrome-6.log",
+        "sha256": "13ca83f42637aed278fb926694e9fd2d5d34951e58e719a74b00eaad7701b75b",
+        "bytes": 1009
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-dsp-chrome",
+      "executable": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/bin/node.exe",
+      "args": [
+        "-e",
+        "process.env.PLAYWRIGHT_MODULE=\"C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules/playwright\";process.env.PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe';require(\"./scripts/check-dsp-settings-browser.js\");"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T09:07:23.073Z",
+      "ended_at": "2026-11-24T09:07:32.417Z",
+      "execution_status": "passed",
+      "covered_scope": "Chrome生产保存表单10组通过，受控传输。",
+      "log": {
+        "path": "logs/remaining-dsp-chrome.log",
+        "sha256": "f79990a24c210e9d0f33e1644c51fce0ad8710de809ac2135f0c1f16b92003b3",
+        "bytes": 681
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-actions-chrome",
+      "executable": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/bin/node.exe",
+      "args": [
+        "-e",
+        "process.env.PLAYWRIGHT_MODULE=\"C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/node_modules/playwright\";process.env.PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe';require(\"./scripts/check-audio-quality-actions-browser.js\");"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T09:07:23.040Z",
+      "ended_at": "2026-11-24T09:07:25.204Z",
+      "execution_status": "passed",
+      "covered_scope": "Chrome生产操作表单9组通过，受控传输。",
+      "log": {
+        "path": "logs/remaining-actions-chrome.log",
+        "sha256": "42a5bbb07b76ea38b3a65554a15c3c7605b9c2e35d9ba8212cf15c1ca1bfdceb",
+        "bytes": 541
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-shared-zero-service-release",
+      "executable": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/hertz_studio-8dc1d1eac1e205ea.exe",
+      "args": [
+        "audio_preview::tests::shared_zero_pcm_http_preview_dbx_selection_and_byte_rebinding",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:25:00.143Z",
+      "ended_at": "2026-11-24T10:25:01.376Z",
+      "execution_status": "passed",
+      "covered_scope": "真实Realtek/CPAL WASAPI48k双声道f32、零PCM和音量0；实际暂停、HTTP准备、DBX RPC门面选择、撤销/恢复和来源重绑定；合成固定增益上下文。",
+      "log": {
+        "path": "logs/remaining-shared-zero-service-release.log",
+        "sha256": "e7518b657565931273e737dca43867f5d32669c090e80611ac457cddfa90b6f8",
+        "bytes": 1150
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/hertz_studio-8dc1d1eac1e205ea.exe",
+          "sha256": "5bc512450cda06406296f0a5c995abee45a5c86ad9100d1ded1fced2f9e3aaa2"
+        }
+      ]
+    },
+    {
+      "name": "remaining-parameter-response",
+      "executable": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "args": [
+        "render::resource_tests::parameter_adoption_latency_probe",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:32:25.254Z",
+      "ended_at": "2026-11-24T10:33:50.577Z",
+      "execution_status": "passed",
+      "covered_scope": "release控制准备至实际render采用：480次失败0；普通EQ达到100ms候选，音色及100Hz/Q8未达到，详见parameter-response.json。",
+      "log": {
+        "path": "logs/remaining-parameter-response.log",
+        "sha256": "3ae9b63ee3afe4f1eb2e6fd333080d17c86ad27f5b156551733ec8cc60985f67",
+        "bytes": 11542
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+          "sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+        }
+      ]
+    },
+    {
+      "name": "remaining-dsp-memory",
+      "executable": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "args": [
+        "render::resource_tests::dsp_working_memory_probe",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:33:50.583Z",
+      "ended_at": "2026-11-24T10:33:50.946Z",
+      "execution_status": "passed",
+      "covered_scope": "release DSP工作路径Rust活跃峰值及Windows进程增量；低于16MiB，不是完整应用RSS。",
+      "log": {
+        "path": "logs/remaining-dsp-memory.log",
+        "sha256": "305e63b266e34dbfeca328282729aa13eafcd74078a79f77552c8deaa13feb29",
+        "bytes": 2034
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+          "sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+        }
+      ]
+    },
+    {
+      "name": "remaining-analysis-memory",
+      "executable": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "args": [
+        "render::resource_tests::analysis_working_memory_probe",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:33:50.950Z",
+      "ended_at": "2026-11-24T10:33:51.992Z",
+      "execution_status": "passed",
+      "covered_scope": "release96k双声道60秒WAV分析及转44.1k四路径比较；低于32MiB，不含完整应用/磁盘缓存。",
+      "log": {
+        "path": "logs/remaining-analysis-memory.log",
+        "sha256": "eee212aeae5ebbb49822b295df4d2b6fba568cca34bc66ffb552c4161a9aa22e",
+        "bytes": 1613
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+          "sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+        }
+      ]
+    },
+    {
+      "name": "remaining-preview-chain-600s-direct",
+      "executable": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "args": [
+        "render::continuity_tests::complete_quality_chain_probe",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "SystemRoot": "C:\\Windows",
+        "WINDIR": "C:\\Windows",
+        "TEMP": "C:\\Users\\miracle\\AppData\\Local\\Temp",
+        "TMP": "C:\\Users\\miracle\\AppData\\Local\\Temp",
+        "HERTZ_AUDIO_PROBE_SECONDS": "100",
+        "HERTZ_AUDIO_PROBE_PACED": "1",
+        "HERTZ_AUDIO_PROBE_CHANGES": "1",
+        "HERTZ_AUDIO_PROBE_PREVIEW": "1"
+      },
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:40:05.441Z",
+      "ended_at": "2026-11-24T10:50:05.963Z",
+      "execution_status": "passed",
+      "covered_scope": "真实RenderCore/DSP六组合600.522秒连续参数/核/音色/试听切换；P99低于期限25%，零超期限、零回调分配/释放；无声卡。",
+      "log": {
+        "path": "logs/remaining-preview-chain-600s-direct.log",
+        "sha256": "90209441670e78c3c3d818a68aa002f862966b98b9b72e274e8c354b66d132e5",
+        "bytes": 3049
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+          "sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+        }
+      ]
+    },
+    {
+      "name": "remaining-final-hertz-full",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "check",
+        "-p",
+        "hertz-studio",
+        "--all-targets",
+        "--features",
+        "full",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:59:18.637Z",
+      "ended_at": "2026-11-24T10:59:34.990Z",
+      "execution_status": "passed",
+      "covered_scope": "当前Hertz Full all-targets check；编译证据。",
+      "log": {
+        "path": "logs/remaining-final-hertz-full.log",
+        "sha256": "de08a9f8263dff60ce577c26a586a38e6019da7b639d0c5b3c762778dd130e5f",
+        "bytes": 199
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-final-dbx-standard",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "check",
+        "-p",
+        "dbx-plugin-hertz",
+        "--all-targets",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:59:34.995Z",
+      "ended_at": "2026-11-24T10:59:42.437Z",
+      "execution_status": "passed",
+      "covered_scope": "当前DBX Standard all-targets check；编译证据。",
+      "log": {
+        "path": "logs/remaining-final-dbx-standard.log",
+        "sha256": "44860ba6472cdca5147c48b2d2984c3e3787809cebe2541be8634958f03cbe50",
+        "bytes": 323
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-final-dbx-full",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "check",
+        "-p",
+        "dbx-plugin-hertz",
+        "--all-targets",
+        "--features",
+        "full",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:59:42.442Z",
+      "ended_at": "2026-11-24T10:59:49.761Z",
+      "execution_status": "passed",
+      "covered_scope": "当前DBX Full all-targets check；编译证据。",
+      "log": {
+        "path": "logs/remaining-final-dbx-full.log",
+        "sha256": "8cfe38c211cee6b0ac970453284bd1f725eb20a23222efe445d60c453febbd29",
+        "bytes": 323
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-audio-integration",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "test",
+        "-p",
+        "vmusic-audio",
+        "--test",
+        "resampling",
+        "--test",
+        "scheduled_output_alloc",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv",
+        "--",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T09:43:44.330Z",
+      "ended_at": "2026-11-24T09:44:07.653Z",
+      "execution_status": "passed",
+      "covered_scope": "原音频重采样和调度分配集成7项通过。",
+      "log": {
+        "path": "logs/remaining-audio-integration.log",
+        "sha256": "2e914cf60ac5c17554d511ed631fb558140b8c76eef2462f65d2ceccfd19d997",
+        "bytes": 1230
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/resampling-de4938f8cd9b8694.exe",
+          "sha256": "0454eac83a4cf5fa651c1458025e3870bdf26568e4e1d0699016f48d10cc61d1"
+        },
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/scheduled_output_alloc-95dc3955c926f4c2.exe",
+          "sha256": "54e4eb1356d7a87d54dbab091195c4faf84d348d0f54260461728cbd1080b767"
+        }
+      ]
+    },
+    {
+      "name": "remaining-audio-null",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "test",
+        "-p",
+        "vmusic-audio",
+        "--no-default-features",
+        "--lib",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv",
+        "--",
+        "--test-threads=1"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T09:44:07.656Z",
+      "ended_at": "2026-11-24T09:44:18.069Z",
+      "execution_status": "passed",
+      "covered_scope": "无默认feature的null音频31项通过。",
+      "log": {
+        "path": "logs/remaining-audio-null.log",
+        "sha256": "efca25175f7509dd6b5035fb2bfd3c633b7cd8212a622224e6f13de2fb02cfb1",
+        "bytes": 3287
+      },
+      "binary_identities": [
+        {
+          "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/debug/deps/vmusic_audio-aaa7b460d66e02eb.exe",
+          "sha256": "148360aa2b8d62e5738e049e92eb38443bfe14b227459e59b7c9b8b6acfba7f1"
+        }
+      ]
+    },
+    {
+      "name": "remaining-service-release-compile",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "test",
+        "-p",
+        "hertz-studio",
+        "--release",
+        "--lib",
+        "--no-run",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:15:11.821Z",
+      "ended_at": "2026-11-24T10:23:44.480Z",
+      "execution_status": "passed",
+      "covered_scope": "当前Rust1.88服务release测试二进制构建，无执行资格。",
+      "log": {
+        "path": "logs/remaining-service-release-compile.log",
+        "sha256": "875ecee671b18b6be803b1d2ab9534e95d5dc88921e5bb0d425ce045db4a7493",
+        "bytes": 13567
+      },
+      "binary_identities": []
+    },
+    {
+      "name": "remaining-audio-release-current-compile",
+      "executable": "cargo",
+      "args": [
+        "+1.88",
+        "test",
+        "-p",
+        "vmusic-audio",
+        "--release",
+        "--lib",
+        "--no-run",
+        "--locked",
+        "--target-dir",
+        "D:/code/github/hertz-studio/target/audio-quality-msrv"
+      ],
+      "env": null,
+      "cwd": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+      "exit_code": 0,
+      "started_at": "2026-11-24T10:26:47.351Z",
+      "ended_at": "2026-11-24T10:27:24.225Z",
+      "execution_status": "passed",
+      "covered_scope": "当前Rust1.88音频release测试二进制构建，无执行资格。",
+      "log": {
+        "path": "logs/remaining-audio-release-current-compile.log",
+        "sha256": "3003bab960e75bc027cb03d19e7dcc240c3a241d1d637e9a25624d7bd97e9e42",
+        "bytes": 326
+      },
+      "binary_identities": []
+    }
+  ],
+  "linux_expanded_commands": [
+    [
+      "cargo",
+      "+1.88.0",
+      "check",
+      "-p",
+      "hertz-studio",
+      "-p",
+      "vmusic-audio",
+      "--all-targets",
+      "--locked",
+      "--target-dir",
+      "output/audio-quality/linux-target"
+    ],
+    [
+      "cargo",
+      "+1.88.0",
+      "test",
+      "-p",
+      "hertz-studio",
+      "--lib",
+      "--locked",
+      "--target-dir",
+      "output/audio-quality/linux-target",
+      "audio_",
+      "--",
+      "--test-threads=1"
+    ],
+    [
+      "cargo",
+      "+1.88.0",
+      "test",
+      "-p",
+      "vmusic-audio",
+      "--lib",
+      "--locked",
+      "--target-dir",
+      "output/audio-quality/linux-target",
+      "preview",
+      "--",
+      "--test-threads=1"
+    ],
+    [
+      "cargo",
+      "+1.88.0",
+      "test",
+      "-p",
+      "vmusic-audio",
+      "--lib",
+      "--locked",
+      "--target-dir",
+      "output/audio-quality/linux-target",
+      "comparison",
+      "--",
+      "--test-threads=1"
+    ]
+  ],
+  "linux_runner": "同一WSL脚本使用set -eu依次执行上列命令；独立Rust1.88工具链路径位于output/audio-quality/linux-runtime，不作为项目运行依赖。",
+  "check_summary": {
+    "windows_libraries": {
+      "passed": 1377,
+      "ignored": 16,
+      "hertz": 981,
+      "audio": 269,
+      "core": 58,
+      "store": 69
+    },
+    "audio_integration_passed": 7,
+    "audio_null_passed": 31,
+    "linux": {
+      "all_targets_check": true,
+      "hertz_audio_passed": 27,
+      "audio_preview_passed": 13,
+      "audio_comparison_passed": 6
+    },
+    "frontend_steps_passed": 87,
+    "chrome_groups": {
+      "preview": 14,
+      "save": 10,
+      "actions": 9
+    },
+    "embedded_http_asset_tests_passed": 1,
+    "release_zero_pcm_service_passed": 1,
+    "parameter_attempts": 480,
+    "parameter_execution_failures": 0,
+    "ordinary_eq_100ms_candidate_met": true,
+    "tone_100ms_candidate_met": false,
+    "continuous_seconds": 600.522,
+    "continuous_combinations": 6,
+    "callback_allocations": 0,
+    "callback_frees": 0,
+    "callback_over_deadline": 0,
+    "full_ir_saturation_rates": [
+      44100,
+      48000
+    ],
+    "basic_enhancement_rates": [
+      96000
+    ]
+  },
+  "independent_review": {
+    "status": "unavailable",
+    "coordinator_direct_review": true,
+    "reason": "所有本轮独立只读审查因模型服务容量错误中断，2026-11-24收尾再次读取agent状态确认；没有独立审查结论。"
+  },
+  "uncovered_scope": [
+    "音色P95 263.85–270.67ms，未达100ms候选；100Hz/Q8极端组P95 405.26–408.39ms单列。",
+    "debug真实共享输出两次未在5秒内暂停；release等价流程通过，未完整证明debug根因或修复。",
+    "12首合法曲目固定同响度偏好/ABX、耳机/音箱目标频响。",
+    "USB/占用/物理拔插/休眠、两小时有声实机、弱机和跨OS/跨机资格。",
+    "正式DBX宿主/正式安装包全流程、完整应用RSS及服务至设备端到端参数延迟。"
+  ],
+  "closeout_checks": [
+    {
+      "name": "rust-format",
+      "checked_at": "2026-11-24T11:24:47.989Z",
+      "exe": "rustfmt",
+      "args": [
+        "+1.88",
+        "--edition",
+        "2021",
+        "--check",
+        "crates/hertz-studio/src/assets.rs",
+        "crates/hertz-studio/src/audio_impulse.rs",
+        "crates/hertz-studio/src/audio_loudness.rs",
+        "crates/hertz-studio/src/audio_quality.rs",
+        "crates/hertz-studio/src/lib.rs",
+        "crates/hertz-studio/src/main.rs",
+        "crates/hertz-studio/src/measured_loudness.rs",
+        "crates/hertz-studio/src/routes.rs",
+        "crates/hertz-studio/src/rpc/mod.rs",
+        "crates/hertz-studio/src/state.rs",
+        "crates/vmusic-audio/src/actor.rs",
+        "crates/vmusic-audio/src/cpal_backend.rs",
+        "crates/vmusic-audio/src/impulse.rs",
+        "crates/vmusic-audio/src/lib.rs",
+        "crates/vmusic-audio/src/loudness.rs",
+        "crates/vmusic-audio/src/render.rs",
+        "crates/vmusic-audio/src/render/continuity_tests.rs",
+        "crates/vmusic-audio/src/render/dsp.rs",
+        "crates/vmusic-audio/src/render/dsp/preparation.rs",
+        "crates/vmusic-audio/src/render/impulse.rs",
+        "crates/vmusic-audio/src/render/terminal.rs",
+        "crates/vmusic-core/src/audio.rs",
+        "crates/vmusic-core/src/audio_quality.rs",
+        "crates/vmusic-core/src/lib.rs",
+        "crates/hertz-studio/src/audio_preview.rs",
+        "crates/hertz-studio/src/audio_preview/tests.rs",
+        "crates/hertz-studio/src/audio_source_snapshot.rs",
+        "crates/vmusic-audio/src/actor/preview_tests.rs",
+        "crates/vmusic-audio/src/render/comparison.rs",
+        "crates/vmusic-audio/src/render/comparison/tests.rs",
+        "crates/vmusic-audio/src/render/preview.rs",
+        "crates/vmusic-audio/src/render/preview/tests.rs",
+        "crates/vmusic-audio/src/render/resource_tests.rs",
+        "crates/vmusic-core/src/audio_preview.rs",
+        "crates/vmusic-core/src/audio_preview/tests.rs"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "adr",
+      "checked_at": "2026-11-24T11:24:47.989Z",
+      "exe": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/bin/node.exe",
+      "args": [
+        "scripts/check-adrs.js"
+      ],
+      "code": 0,
+      "stdout": "\nADR 清单与结构\n\n每一行的数值都与源码一致\n\n核对的边界条目：129 条，覆盖 14 篇决策日志\nADR 契约检查：445 项全部通过\n",
+      "stderr": ""
+    },
+    {
+      "name": "api-routes",
+      "checked_at": "2026-11-24T11:24:47.989Z",
+      "exe": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/node/bin/node.exe",
+      "args": [
+        "scripts/api-routes.js",
+        "--check"
+      ],
+      "code": 0,
+      "stdout": "REST 路由清单与源码一致（235 个「方法 + 路径」）\n",
+      "stderr": ""
+    },
+    {
+      "name": "git-diff-whitespace",
+      "checked_at": "2026-11-24T11:24:47.989Z",
+      "exe": "git",
+      "args": [
+        "diff",
+        "--check"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": "warning: in the working copy of 'crates/hertz-studio/src/audio_impulse.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/audio_loudness.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/audio_quality.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/lib.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/measured_loudness.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/routes.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/rpc/mod.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-studio/src/state.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/hertz-wallpaper-hub/src/management_tests.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/actor.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/cpal_backend.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/impulse.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/lib.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/loudness.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/render.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/render/continuity_tests.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/render/dsp.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/render/impulse.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-audio/src/render/terminal.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'crates/vmusic-core/src/audio.rs', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'docs/api-routes.md', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'plugin/ui/index.html', LF will be replaced by CRLF the next time Git touches it\n"
+    },
+    {
+      "name": "evidence-json-and-task-document-links",
+      "checked_at": "2026-11-24T11:29:02.569Z",
+      "executable": "node_repl",
+      "code": 0,
+      "scope": "7份JSON解析及24/3/2/6个实际探针行逐项比对；参数/活跃及私有提交内存/600秒/96k准入/19通过日志与失败归属核验；完整父设计、实施、本轮证据及其余文档本轮新增引用均可读。",
+      "json_files": 7,
+      "probe_rows": [
+        24,
+        3,
+        2,
+        6
+      ],
+      "local_links_examined": 216,
+      "local_links_resolved": 205,
+      "new_task_link_failures": 0,
+      "prior_unavailable_references": 11,
+      "prior_unavailable_reference_details": [
+        {
+          "document": "docs/adr/0003-background-work-budget.md",
+          "target": "../aegis/work/2026-11-08-stage-engine-m1/40-qualification.md",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/adr/0003-background-work-budget.md",
+          "target": "../aegis/work/2026-11-08-stage-engine-m1/30-resource-owner-review.md",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/technical-roadmap.md",
+          "target": "./research/ai-capability-entrypoints.final.md",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/roadmap-progress.md",
+          "target": "../output/native-http-release-final-verification-20261107.json",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/roadmap-progress.md",
+          "target": "./design/frontend-gap-prototypes.md",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/roadmap-progress.md",
+          "target": "./design/prototypes/index.html",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/roadmap-progress.md",
+          "target": "../output/evals/stage-intent-v3-baseline-refresh-20261021-final3/report.json",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/roadmap-progress.md",
+          "target": "../output/evals/stage-intent-v3-baseline-refresh-20261021-final3/report.json",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/roadmap-progress.md",
+          "target": "../output/native-http-release-dbx-compatibility-verification-20261107.json",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/product-roadmap.md",
+          "target": "./research/ai-capability-entrypoints.final.md",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        },
+        {
+          "document": "docs/api-routes.md",
+          "target": "aegis/specs/2026-11-07-desktop-lyrics-vocals-design.md",
+          "base_reference_present": true,
+          "introduced_by_task": false,
+          "reason": "已有的本地/ignored研究、原型或运行记录未包含在附加工作树；不属于本轮音质增量。"
+        }
+      ]
+    },
+    {
+      "name": "cached-diff-and-verbatim-log-blobs",
+      "checked_at": "2026-11-24T11:37:36.877Z",
+      "code": 0,
+      "scope": "精确80任务文件cached diff空白检查通过；19份暂存Git日志blob与实际捕获SHA逐项相同，源码/文档未放宽空白规则。",
+      "check": {
+        "exe": "git",
+        "args": [
+          "diff",
+          "--cached",
+          "--check"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "staged_log_blobs": 19,
+      "log_blob_hash_changed": 0
+    }
+  ],
+  "workspace_integrity": {
+    "checked_at": "2026-11-24T11:39:29.196Z",
+    "root": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+    "work": "2026-11-23-audio-quality",
+    "bundle": {
+      "exe": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/python/python.exe",
+      "args": [
+        "C:/Users/miracle/.codex/aegis/scripts/aegis-workspace.py",
+        "bundle",
+        "--root",
+        "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+        "--work",
+        "2026-11-23-audio-quality"
+      ],
+      "code": 0,
+      "stdout": "Assembled proof bundle: C:\\Users\\miracle\\.codex\\worktrees\\audio-quality-remaining\\hertz-studio\\docs\\aegis\\work\\2026-11-23-audio-quality\\proof-bundle.md\r\n",
+      "stderr": ""
+    },
+    "check": {
+      "exe": "C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/python/python.exe",
+      "args": [
+        "C:/Users/miracle/.codex/aegis/scripts/aegis-workspace.py",
+        "check",
+        "--root",
+        "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio"
+      ],
+      "code": 0,
+      "stdout": "Aegis workspace check passed: C:\\Users\\miracle\\.codex\\worktrees\\audio-quality-remaining\\hertz-studio\\docs\\aegis\r\n",
+      "stderr": ""
+    },
+    "scope": "只核验工作记录结构、索引和JSON形状，不证明软件、架构语义或整项验收。"
+  },
+  "source_freshness": {
+    "source_count": 829,
+    "source_readback_changed": 0,
+    "release_binary_readback_changed": false,
+    "final_readback_at": "2026-11-24T11:24:47.989Z",
+    "additional_plugin_source_count": 2,
+    "executed_binaries_readback_count": 12,
+    "executed_binaries_readback_changed": 0,
+    "passed_log_readback_count": 19,
+    "passed_log_readback_changed": 0,
+    "reference_hashes_refreshed": 1,
+    "delivery_configuration_count": 1,
+    "staged_log_blob_readback_count": 19,
+    "staged_log_blob_hash_changed": 0
+  },
+  "raw_log_preservation": {
+    "initial_cached_diff_check": {
+      "exe": "git",
+      "args": [
+        "diff",
+        "--cached",
+        "--check"
+      ],
+      "code": 2,
+      "stdout": "evals/audio-quality/remaining-20261124/logs/remaining-analysis-memory.log:8: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-audio-integration.log:21: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-audio-null.log:47: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-dsp-memory.log:9: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-embedded-preview-assets.log:13: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-parameter-response.log:30: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-preview-chain-600s-direct.log:12: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-shared-zero-service-release.log:7: new blank line at EOF.\nevals/audio-quality/remaining-20261124/logs/remaining-windows-lib-current.log:1424: new blank line at EOF.\n",
+      "stderr": ""
+    },
+    "scope": "evals/audio-quality/remaining-20261124/logs/*.log",
+    "policy": "evals/audio-quality/remaining-20261124/logs/*.log -text whitespace=-blank-at-eof",
+    "disposition": "9份Rust测试工具输出的末尾空行原样保留；本目录日志禁止Git换行转换，仅对原始日志不检查blank-at-eof；其它空白检查及全部源码/文档检查保留。",
+    "original_log_bytes_changed": false,
+    "final_cached_diff_check": {
+      "exe": "git",
+      "args": [
+        "diff",
+        "--cached",
+        "--check"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "staged_blob_readback": {
+      "checked_at": "2026-11-24T11:37:36.877Z",
+      "log_count": 19,
+      "sha256_changed": 0
+    }
+  }
+}

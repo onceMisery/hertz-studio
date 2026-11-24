@@ -1,0 +1,98 @@
+阶段 1/4 语法（node --check）
+  523 个文件，全部通过
+
+阶段 2/4 静态 guard（形状 / 接线 / 禁用词）
+  ✓ export-wallpaper-composition.mjs  198ms  Composition metadata verified: 7 nodes, 5 effects, 4802d1d501db55fb4ee915aee1cc22799051db9501ac754dabc57da6ccc370cd
+  ✓ check-stanza-pixi-build.js  199ms  Pinned Pixi 8.20.1 identity verified: plugin\ui\vendor\pixi.min.js, 847801 bytes.
+  ✓ export-stage-contract.js  76ms  舞台契约与源码一致（11 个场景、schema 与基线 hash）
+  ✓ check-assets.js  201ms  前端资源接线检查：1413/1413 全部通过
+  ✓ check-scripts.js  60ms  脚本登记通过：364 个 check-*，111 个在聚合入口，253 个手工登记。
+  ✓ check-lineage-names.js  324ms  出处名禁用词扫描通过：856 个文件 / 19537 KB，4 条规则零命中（上游署名见 NOTICE）
+  ✓ api-routes.js  80ms  REST 路由清单与源码一致（235 个「方法 + 路径」）
+  ✓ check-design-source.js  79ms  设计单源契约：38 项全部通过
+  ✓ check-css-tokens.js  2207ms  CSS 令牌契约检查通过（32 个文件 / 5754 条规则 / 49 个受检声明）
+  ✓ check-plugin-assets.js  250ms  插件资源 URL 契约检查：58/58 全部通过
+  ✓ check-search-pressure-evidence.js  733ms  }
+  ✓ check-lyric-calibration.js  68ms  歌词校准契约检查：25 项全部通过
+  ✓ check-crash-report.js  60ms  崩溃报告契约检查：30 项全部通过
+  ✓ check-source-origin.js  56ms  出处身份契约检查：57 项全部通过
+  ✓ check-adrs.js  97ms  ADR 契约检查：430 项全部通过
+  ✓ check-stage-fluid.js  85ms  Stage fluid: complete license, isolated bundle, inert evaluation, bounded profiles, single-clock ownership and both asset registrations passed.
+  ✓ check-desktop-in-process.js  468ms  check-desktop-in-process: 11 groups passed
+
+阶段 3/4 行为回归（vm 沙箱跑真实模块）
+  ✓ check-wallpaper-playlist-editor.js  856ms  PASS 5 playlist editor scenarios; max request 4829 bytes
+  ✓ check-wallpaper-text-layout.js  83ms  text layout checks passed: 9
+  ✓ check-wallpaper-font-probe.js  80ms  8 font probe cases passed; native Close/Drain and actual FontFace remain separate evidence.
+  ✓ check-wallpaper-ai-phases.js  107ms  }
+  ✓ check-stage-resource-budget.js  66ms  {"passed":true,"checks":13,"module":"production StageResourceBudget","scope":"deterministic contract verification"}
+  ✓ check-stage-engine-m1-persistence.js  469ms  C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\output\a09-m1-20261108\persistence-2026-11-24T10-10-05-498Z\report.json
+  ✓ check-stage-engine-m1-export.js  110ms  C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\output\a09-m1-20261108\export-2026-11-24T10-10-05-959Z\report.json
+  ✓ check-native-obs-preview.js  58ms  Native OBS preview: 8 groups passed
+  ✓ check-ui-preferences.js  162ms  PASS 8 UI preference host persistence and save checks
+  ✓ check-standalone-package.js  55ms  Windows package admission: wrong edition, feature, platform, profile, identity and malformed/wrong-architecture PE rejected; development allowance stays explicit.
+  ✓ check-desktop-mini-assets.js  66ms  PASS desktop mini assets: numbered/jpeg, dimensions, decode fallback, reload races, alpha refresh, frame timing, one-shot and native menu IPC
+  ✓ check-desktop-mini-visibility.js  54ms  desktop-mini main visibility reporting checks passed
+  ✓ check-room-ui.js  483ms  Room UI: fixed/native creation payloads, null/current/pending formats, ended position and successor errors, source/room/device diagnostics, selected-track creation/no replay, application dialogs/dots/deferred review, bounded artwork recovery, background projection recovery, inline admission verification/retries, queue instance identity, reconnect receipts, history and session isolation passed.
+  ✓ check-audio-errors.js  46ms  PASS audio error guidance: stable codes, read/codec distinction, unknown-code fallback and request IDs
+  ✓ check-stage-legacy-fixtures.js  160ms  Historical stage fixtures: 10 scenes / 20 switch+edit cases + 1 fixed gzip frame; source replay, pure materialization, rule entry and bidirectional share codec compatibility passed
+  ✓ check-stage-materialize.js  171ms  ✓ R3-K 物化检查全部通过
+  ✓ check-stage-evaluation.js  373ms  Stage evaluation offline: frozen coverage, actual baseline defaults, false acceptance/refusal, invalid materialization, sample/review denominators and release gates passed
+  ✓ check-stage-intent-label-review.js  142ms  StageIntent blind label review: 172 opaque cases, private mapping, complete coverage, mismatch reporting, and invalid answer rejection passed
+  ✓ check-stage-project.js  234ms  Stage projects: strict envelope/import, current and stale restore, isolated legacy cues, media confirmation/races and reversible timelines passed
+  ✓ check-stage-media.js  111ms  Stage media: migration/CAS, receipt recovery, bounded upload/DBX reads, cancellation, serial renewal, eight-hour simulated lease clock and cleanup passed
+  ✓ check-stage-arrangement.js  99ms  Stage arrangement: pure section compilation, shared rules, bounds, explicit replacement/media confirmation, reversible seeks, stale rejection and project/share roundtrips passed
+  ✓ check-stage-pitch.js  64ms  Pitch inspector: strict version/time/frequency bounds, null gaps, bounded plot, cancellation transport and shared asset wiring passed
+  ✓ check-stage-templates.js  249ms  Stage templates: fixed compatibility, pure canonical creation, named content identity, preview isolation, explicit apply, collection and share roundtrips passed
+  ✓ check-video-export.js  124ms  Video export lifecycle: startup/stop isolation, late permission, final chunks, real audio-track facts, all failure cleanup, interruptions, bounded stop and download retry passed
+  ✓ check-capsule-performance.js  58ms  Capsule performance: demand scheduling, high refresh/visibility/motion/resize, hidden events, local/online/podcast metadata, cover races, restored cursor, reconnect, OS media controls and resize retry passed.
+  ✓ check-home-dashboard.js  51ms  Home dashboard: snapshot actions, restored queue, no autoplay, history/cover races, empty/error/retry and recent identity passed.
+  ✓ check-creative-share-code.js  121ms  Creative share code: 44 checks passed
+  ✓ check-perf-probe.js  133ms  跨模块性能探针契约检查：230 项全部通过
+  ✓ check-cover-lifecycle.js  197ms  Cover lifecycle: 17 groups passed (admission, source borrow, stale replies, true settlement, bounded waiting/cache/probes, playlist/queue/preload ownership, detach authority and URL semantics)
+  ✓ check-beat-lifecycle.js  94ms  Beat lifecycle: status identity, bounded recovery, retry identity and queue focus passed.
+  ✓ check-daily-view.js  71ms  每日推荐独立页契约检查：91/91 全部通过
+  ✓ check-lyric-emotion.js  69ms    cache entries=5 bytes=1024995
+  ✓ check-ai-grants-ui.js  117ms  AI grants UI fixture passed: create scopes, safe summary, MCP config, rotate, revoke-after-refresh-failure, DBX and demo states.
+  ✓ check-online.js  244ms  508 checks, 0 failures
+  ✓ check-search-session.js  58ms  Search admission: shared limit, per-source serialization, bounded queue, canceled queue, raw DBX settlement, error facts and no automatic retry passed
+  ✓ check-online-transport.js  64ms  Transport bootstrap, real DBX subscription lifecycle, HTTP cancellation, response-body timeout and transient retry checks passed
+  ✓ check-quality-ceiling.js  59ms  音质上限契约检查：43 项全部通过
+  ✓ check-beat-budget.js  57ms  节拍调度契约检查：34 项全部通过
+  ✓ check-calibration-controller.js  61ms  }
+  ✓ check-search-history.js  66ms  搜索历史契约检查：43 项全部通过
+  ✓ check-online-playlist-view.js  83ms  在线歌单两层界面契约检查：102 项全部通过
+  ✓ check-stage-control.js  177ms  舞台控制契约：161 项检查，全部通过
+  ✓ check-stage-settings.js  55ms  Stage settings: 572 checks passed (mode/background/device matrix, preferences, theme ownership, dialog wiring)
+  ✓ check-stage-backgrounds.js  52ms  Shared backgrounds: 11 host clock/depth lifecycle checks passed
+  ✓ check-stage-idle.js  62ms  空闲收起契约检查：63/63 全部通过
+  ✓ check-frame-gates.js  82ms  帧门契约检查：88 项全部通过
+  ✓ check-window-rendering.js  49ms  Window rendering: spectrum bursts, hidden views, Retina fullscreen budgets and restore timing passed
+  ✓ check-obs-css.js  126ms  OBS 素材通道检查：52/52 全部通过
+  ✓ check-skins.js  92ms  界面布局契约检查：265/265 全部通过
+  ✓ check-appearance-restore.js  266ms  刷新恢复契约检查：95/95 全部通过
+  ✓ check-favorites.js  140ms  收藏与每日推荐契约检查：207/207 全部通过
+  ✓ check-library.js  55ms  Library pagination, retry, stale-query and complete-queue checks passed
+  ✓ check-scan-ui.js  60ms  Directory controls, stale roots and terminal scan status checks passed
+  ✓ check-creative.js  369ms  创意舞台契约检查：477/477 全部通过
+  ✓ check-scene-registry.js  124ms  Scene registry: 176 checks passed (new scene/preset/share/prompt, renderer lifecycle, factory ownership)
+  ✓ check-wallpaper-builtin-contract.js  209ms  wallpaper builtin source contract: 10 checks passed
+  ✓ check-wallpaper-builtin-sampling.js  49ms  Builtin sampling: pending retry, committed pause, reverse seek, exact input backing bytes and invalid-input refusal passed
+  ✓ check-anime-scenes.js  115ms  PASS 98 anime scene registration, editing, sharing, prompt and restore checks
+  ✓ check-stage-anime-svg.js  72ms  PASS 52 SVG stage adapter, audio, mirror, pause, degrade and wiring checks
+  ✓ check-anime-ui.js  60ms  晴空绘卷外观族契约检查：69/69 全部通过
+  ✓ check-stanza.js  78ms  全部通过
+  ✓ check-space-camera.js  214ms  SpaceCamera 契约检查：140 项，0 项失败
+  ✓ check-space-post.js  49ms  SpacePost: 95 checks passed
+  ✓ check-space-layers.js  56ms  SpaceLayers: 33 contracts passed.
+  ✓ check-space-resource-leases.js  80ms  shared resource leases passed: merged load, independent abort, idempotent/stale release, bounded cancellation, late callbacks, native envelope accounting, direct/tree/disposed-scope shared ownership and scope leases
+  ✓ check-stanza-sonnet.js  70ms  check-stanza-sonnet 全部通过
+  ✓ check-stanza-tempera.js  56ms  凝彩检查通过：构图、色彩、扫光时间轴、惰性初始化取消与资源接线
+  ✓ check-stanza-starborn.js  237ms  星诞导演层契约检查：205 项，0 项失败
+  ✓ check-sonnet-palette.js  78ms  PASS 调色来源、1083 组色相/饱和度、角色分色、签名刷新与旧契约；活动字最低对比 7.26:1
+  ✓ check-wallpaper-runtime.js  104ms  wallpaper runtime checks passed: scheduling, source/audio isolation, native identity, real first frames, group hold/release, circular 100ms drift, 2s sampling, pause/resume, stale clocks, bounded alignment, and callback cleanup
+
+阶段 4/4 活体检查（真实浏览器 + 运行中的服务）
+  跳过 172 项（要跑加 --live）。活体检查需要 Playwright（PLAYWRIGHT_MODULE 或 NODE_PATH）。多数检查还需要运行中的服务；Hertz 播放条等检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。
+
+前端检查聚合：通过 87 步，失败 0 步（默认集合与 ci.yml 的 Frontend contract checks 等价；--extra 的那批 CI 暂不跑）

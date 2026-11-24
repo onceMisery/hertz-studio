@@ -133,6 +133,22 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/player/loudness",
             get(get_loudness).post(analyze_loudness),
         )
+        .route(
+            "/v1/player/audio-quality/preview",
+            post(preview_audio_quality),
+        )
+        .route(
+            "/v1/player/audio-quality/preview/select",
+            post(select_audio_quality_preview),
+        )
+        .route(
+            "/v1/player/audio-quality/preview/cancel",
+            post(cancel_audio_quality_preview),
+        )
+        .route(
+            "/v1/player/audio-quality/preview/refresh",
+            post(refresh_audio_quality_preview),
+        )
         .route("/v1/player/loudness/apply", post(apply_measured_loudness))
         .route("/v1/player/impulses", post(import_audio_impulse))
         .route("/v1/player/impulses/generate", post(generate_audio_impulse))
@@ -2274,6 +2290,31 @@ async fn cancel_audio_impulse(
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(crate::audio_impulse::cancel(&state, body).await?))
 }
+async fn preview_audio_quality(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_preview::PreviewRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_preview::request(&state, body).await?))
+}
+async fn select_audio_quality_preview(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_preview::SelectRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_preview::select(&state, body).await?))
+}
+async fn cancel_audio_quality_preview(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_preview::RequestId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_preview::cancel(&state, body).await?))
+}
+async fn refresh_audio_quality_preview(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::audio_preview::RequestId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::audio_preview::refresh(&state, body).await?))
+}
+
 async fn set_audio_quality(
     State(state): State<Arc<AppState>>,
     Json(body): Json<crate::audio_quality::QualityUpdate>,
