@@ -156,7 +156,6 @@ const ui = {
   cacheClear: $('cache-clear'),
   cacheKeepCurrent: $('cache-keep-current'),
   cacheKeepList: $('cache-keep-list'),
-  dspEq: $('dsp-eq'),
   dspPreamp: $('dsp-preamp'),
   dspLoudness: $('dsp-loudness'),
   dspCrossfade: $('dsp-crossfade'),

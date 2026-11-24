@@ -42,7 +42,7 @@
   }
   function showEq() {
     if (!eqMoves.length) {
-      var group = document.getElementById('dsp-eq-row').closest('.set-group');
+      var group = document.getElementById('dsp-settings');
       move(group, el.eqPane, eqMoves); group.hidden = false;
       Skins.request('settings-enter', { sections: ['dsp'] });
     }
