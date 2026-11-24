@@ -781,6 +781,9 @@ impl PreparedPlayback {
     pub(crate) fn loudness_path(&self) -> &Path {
         &self.path
     }
+    pub(crate) fn loudness_source_generation(&self) -> u64 {
+        self.source_generation
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1942,6 +1945,16 @@ impl AppState {
             None
         };
 
+        let candidate_serial = if remote.is_none() {
+            crate::measured_loudness::candidate_ready_for_load(
+                self,
+                &track_id,
+                Path::new(&track.path),
+            )
+            .await
+        } else {
+            None
+        };
         // 取流已就绪：锁内只剩复核与 actor 入队。
         let _commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, &track_id).await {
@@ -1954,6 +1967,7 @@ impl AppState {
             self,
             &track_id,
             remote.is_none().then_some(Path::new(&track.path)),
+            candidate_serial,
         )
         .await?;
         match remote {
@@ -2515,7 +2529,8 @@ impl AppState {
                 actual_quality: None,
             });
         }
-        let decision = crate::measured_loudness::for_load_locked(self, &track_id, None).await?;
+        let decision =
+            crate::measured_loudness::for_load_locked(self, &track_id, None, None).await?;
         if let Err(e) = self
             .audio
             .load_source_with_gain(
@@ -2624,6 +2639,8 @@ impl AppState {
         path: &Path,
         actual: Option<crate::online::quality::Quality>,
     ) -> Result<Commit, vmusic_core::CoreError> {
+        let candidate_serial =
+            crate::measured_loudness::candidate_ready_for_load(self, track_id, path).await;
         let _commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, track_id).await {
             return Ok(Commit::Stale);
@@ -2634,7 +2651,8 @@ impl AppState {
             ));
         };
         let decision =
-            crate::measured_loudness::for_load_locked(self, track_id, Some(path)).await?;
+            crate::measured_loudness::for_load_locked(self, track_id, Some(path), candidate_serial)
+                .await?;
         let result = if let Some((source, ext)) = decision.source {
             self.audio
                 .load_source_with_gain(source, ext, Some(track_id.to_owned()), decision.gain_db)
@@ -3049,13 +3067,34 @@ impl AppState {
         let mut measured_next = None;
         if measured_mode {
             let config = quality.as_ref().unwrap();
-            measured_next = self
+            let candidate_serial = self
                 .loudness_candidates
-                .take_for_load(&next.to_track_id, &config.revision, &next.path)
-                .map(|v| v.into_parts());
-            if let Some((_, _, gain)) = &measured_next {
-                next.track_gain_db = gain.gain_db as f32;
-                next.measured = Some((gain.clone(), config.clone()));
+                .ready_for_load(
+                    &next.to_track_id,
+                    &config.revision,
+                    &next.path,
+                    next.source_generation,
+                )
+                .await;
+            let candidate = candidate_serial.and_then(|serial| {
+                self.loudness_candidates.take_for_load(
+                    &next.to_track_id,
+                    &config.revision,
+                    &next.path,
+                    next.source_generation,
+                    serial,
+                )
+            });
+            if let Some(candidate) = candidate {
+                let stale = match candidate.next() {
+                    Some(bound) => !self.loudness_next_matches(bound).await,
+                    None => false,
+                };
+                if stale {
+                    candidate.retire();
+                    return;
+                }
+                measured_next = Some(candidate.into_parts());
             } else {
                 if let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
                     crate::audio_loudness::schedule_next_candidate(
@@ -3067,6 +3106,10 @@ impl AppState {
                     );
                 }
                 return;
+            }
+            if let Some((_, _, gain)) = &measured_next {
+                next.track_gain_db = gain.gain_db as f32;
+                next.measured = Some((gain.clone(), config.clone()));
             }
         }
         let Some(uri) = next.path.to_str() else {
@@ -3169,6 +3212,7 @@ impl AppState {
     ) -> bool {
         if self.play_generation.load(Ordering::Relaxed) != next.play_generation
             || snapshot.mode != next.mode
+            || (!transitioned && snapshot.source_generation != next.source_generation)
             || snapshot.generation != next.actor_generation + u64::from(transitioned)
             || if transitioned {
                 // DecodeError can clear the snapshot immediately after a

@@ -1,0 +1,23 @@
+   Compiling hertz-studio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/hertz-studio)
+error[E0599]: no method named `flatten` found for enum `std::option::Option<Result<bool, tokio::task::JoinError>>` in the current scope
+   --> crates/hertz-studio/src/audio_loudness.rs:181:10
+    |
+175 | /         tokio::time::timeout(
+176 | |             CANDIDATE_IDENTITY_BUDGET,
+177 | |             tokio::task::spawn_blocking(move || identities.iter().all(OriginalIdentity::matches)),
+...   |
+180 | |         .ok()
+181 | |         .flatten()
+    | |         -^^^^^^^ `std::option::Option<Result<bool, tokio::task::JoinError>>` is not an iterator
+    | |_________|
+    |
+    |
+help: call `.into_iter()` first
+    |
+181 |         .into_iter().flatten()
+    |          ++++++++++++
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `hertz-studio` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `hertz-studio` (lib test) due to 1 previous error

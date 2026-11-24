@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.21s
+     Running unittests src\lib.rs (D:/code/github/hertz-studio/target/audio-quality-continuation\release\deps\vmusic_audio-7fe9a208f7fb0a3b.exe)
+
+running 6 tests
+test true_peak::tests::finite_extreme_impulse_reaches_ceiling_before_presentation ... ok
+test true_peak::tests::independent_frequency_phase_sweep ... ok
+test true_peak::tests::independent_output_peak_after_gain_envelope ... ok
+test true_peak::tests::independent_short_bursts_and_extreme_edges ... ok
+test true_peak::tests::sparse_alternating_extreme_bursts_stay_below_reference_ceiling ... ok
+test true_peak::tests::transparent_low_level_short_eof_and_reset ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 275 filtered out; finished in 16.27s
+

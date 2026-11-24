@@ -299,7 +299,7 @@ fn parameter_adoption_latency_probe() {
                     "scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"});
                 eprintln!("PARAMETER_ADOPTION_PROBE {report}");
                 assert_eq!(failed, 0, "{report}");
-                if group.starts_with("ordinary_") {
+                if group.starts_with("ordinary_") || group == "tone" {
                     assert!(p95 <= 100_000_000, "ordinary response budget: {report}");
                 }
                 let before = r.quality_status().unwrap().requested;

@@ -1,0 +1,24 @@
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running unittests src\lib.rs (D:/code/github/hertz-studio/target/audio-quality-continuation\release\deps\vmusic_audio-7fe9a208f7fb0a3b.exe)
+
+running 1 test
+test render::continuity_tests::complete_quality_chain_probe ... FULL_QUALITY_PROBE {"audio_priority":true,"callback_allocations":0,"callback_frees":0,"continuous_changes":true,"deadline_ns":2902494.3310657595,"delay_frames":421,"detector_phases":8,"detector_taps":128,"frames":128,"ir_taps":257,"max_ns":915600,"over_deadline":0,"p99_fraction":0.24740789062500002,"p99_ns":718100,"paced":true,"preview_processing":true,"preview_switches":3,"rate":44100,"real_device":false,"saturation_oversample":4,"scope":"qualified_full_chain","seconds":10}
+FULL_QUALITY_PROBE {"audio_priority":true,"callback_allocations":0,"callback_frees":0,"continuous_changes":true,"deadline_ns":11609977.324263038,"delay_frames":421,"detector_phases":8,"detector_taps":128,"frames":512,"ir_taps":257,"max_ns":3154900,"over_deadline":0,"p99_fraction":0.2354009765625,"p99_ns":2733000,"paced":true,"preview_processing":true,"preview_switches":3,"rate":44100,"real_device":false,"saturation_oversample":4,"scope":"qualified_full_chain","seconds":10}
+FULL_QUALITY_PROBE {"audio_priority":true,"callback_allocations":0,"callback_frees":0,"continuous_changes":true,"deadline_ns":2666666.6666666665,"delay_frames":440,"detector_phases":8,"detector_taps":128,"frames":128,"ir_taps":257,"max_ns":960000,"over_deadline":0,"p99_fraction":0.28173750000000003,"p99_ns":751300,"paced":true,"preview_processing":true,"preview_switches":3,"rate":48000,"real_device":false,"saturation_oversample":4,"scope":"qualified_full_chain","seconds":10}
+FULL_QUALITY_PROBE {"audio_priority":true,"callback_allocations":0,"callback_frees":0,"continuous_changes":true,"deadline_ns":10666666.666666666,"delay_frames":440,"detector_phases":8,"detector_taps":128,"frames":512,"ir_taps":257,"max_ns":3010300,"over_deadline":0,"p99_fraction":0.231928125,"p99_ns":2473900,"paced":true,"preview_processing":true,"preview_switches":3,"rate":48000,"real_device":false,"saturation_oversample":4,"scope":"qualified_full_chain","seconds":10}
+FULL_QUALITY_PROBE {"audio_priority":true,"callback_allocations":0,"callback_frees":0,"continuous_changes":true,"deadline_ns":1333333.3333333333,"delay_frames":544,"detector_phases":8,"detector_taps":128,"frames":128,"ir_taps":0,"max_ns":625200,"over_deadline":0,"p99_fraction":0.32085,"p99_ns":427800,"paced":true,"preview_processing":true,"preview_switches":2,"rate":96000,"real_device":false,"saturation_oversample":1,"scope":"qualified_without_ir_saturation","seconds":10}
+FULL_QUALITY_PROBE {"audio_priority":true,"callback_allocations":0,"callback_frees":0,"continuous_changes":true,"deadline_ns":5333333.333333333,"delay_frames":544,"detector_phases":8,"detector_taps":128,"frames":512,"ir_taps":0,"max_ns":1814500,"over_deadline":0,"p99_fraction":0.28771875,"p99_ns":1534500,"paced":true,"preview_processing":true,"preview_switches":3,"rate":96000,"real_device":false,"saturation_oversample":1,"scope":"qualified_without_ir_saturation","seconds":10}
+
+thread 'render::continuity_tests::complete_quality_chain_probe' panicked at crates\vmusic-audio\src\render\continuity_tests.rs:920:5:
+complete chain exceeds CPU budget: [(48000, 128, 0.28173750000000003), (96000, 128, 0.32085), (96000, 512, 0.28771875)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    render::continuity_tests::complete_quality_chain_probe
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 280 filtered out; finished in 60.52s
+
+error: test failed, to rerun pass `-p vmusic-audio --lib`

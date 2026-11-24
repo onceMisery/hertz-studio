@@ -1,0 +1,6 @@
+    Blocking waiting for file lock on build directory
+    Checking vmusic-audio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/vmusic-audio)
+   Compiling hertz-studio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/hertz-studio)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 37s
+   Compiling hertz-studio v0.3.8 (/mnt/c/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio/crates/hertz-studio)
+Terminated                 cargo +1.88.0 test -p hertz-studio --lib --locked --target-dir output/audio-quality/linux-target audio_ -- --test-threads=1

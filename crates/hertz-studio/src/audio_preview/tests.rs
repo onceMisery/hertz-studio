@@ -64,6 +64,7 @@ fn call<'a>(path: &'a str, body: Value) -> Call<'a> {
 
 #[tokio::test]
 async fn http_and_dbx_preview_errors_and_stale_cancel_share_the_service_owner() {
+    let _serial = audio_loudness::ANALYSIS_TEST_SERIAL.lock().await;
     let f = Fixture::new().await;
     let state = f.state.clone();
     let rpc = Rpc::new(state.clone());
@@ -161,6 +162,7 @@ async fn http_and_dbx_preview_errors_and_stale_cancel_share_the_service_owner() 
 
 #[tokio::test]
 async fn null_preview_never_claims_audio_or_writes_preferences_and_saved_revision_invalidates_it() {
+    let _serial = audio_loudness::ANALYSIS_TEST_SERIAL.lock().await;
     let f = Fixture::new().await;
     let state = &f.state;
     vmusic_store::upsert_track(
@@ -221,6 +223,7 @@ async fn null_preview_never_claims_audio_or_writes_preferences_and_saved_revisio
 
 #[tokio::test]
 async fn observer_cancellation_does_not_release_analysis_or_reader_before_worker_cleanup() {
+    let _serial = audio_loudness::ANALYSIS_TEST_SERIAL.lock().await;
     let f = Fixture::new().await;
     let other = Fixture::new().await;
     let available = f.state.beat_slots.available_permits();
@@ -261,6 +264,7 @@ async fn observer_cancellation_does_not_release_analysis_or_reader_before_worker
 
 #[tokio::test]
 async fn measured_gain_requires_identical_bytes_before_preview_source_rebinding() {
+    let _serial = audio_loudness::ANALYSIS_TEST_SERIAL.lock().await;
     let f = Fixture::new().await;
     let state = &f.state;
     state
@@ -344,6 +348,7 @@ async fn measured_gain_requires_identical_bytes_before_preview_source_rebinding(
 #[tokio::test]
 #[ignore = "actual shared output; zero PCM only, no audible or device-quality qualification"]
 async fn shared_zero_pcm_http_preview_dbx_selection_and_byte_rebinding() {
+    let _serial = audio_loudness::ANALYSIS_TEST_SERIAL.lock().await;
     use sha2::Digest;
     let mut f = Fixture::new().await;
     f.state.audio.shutdown();

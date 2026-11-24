@@ -140,6 +140,37 @@ fn gain_only_uses_ramp_and_reports_old_actual_during_a_b_c() {
 }
 
 #[test]
+fn tone_adoption_completes_within_response_budget() {
+    let rate = 48_000;
+    let mut initial = QualityParams {
+        configuration_revision: 1,
+        ..Default::default()
+    };
+    initial.tone.crossfeed = true;
+    let control = DspControl::new();
+    control.publish_quality(rate, initial).unwrap();
+    let mut runtime = DspRuntime::new(rate, 2);
+    runtime.begin_block(&control);
+    for _ in 0..rate / 10 {
+        runtime.process(&mut [0.01, -0.01]);
+    }
+    runtime.finish_block(&control);
+
+    let mut updated = initial;
+    updated.configuration_revision = 2;
+    updated.tone.crossfeed_amount = 0.5;
+    control.publish_quality(rate, updated).unwrap();
+    runtime.begin_block(&control);
+    assert!(matches!(runtime.transition, Transition::Fading { done: 0 }));
+    assert!(runtime.fade_frames * 1000 <= rate as usize * 100);
+    for _ in 0..runtime.fade_frames {
+        runtime.process(&mut [0.01, -0.01]);
+    }
+    runtime.finish_block(&control);
+    assert_eq!(control.quality_status(true, 1).applied, Some(updated));
+}
+
+#[test]
 fn preamp_crossing_track_clamp_rebuilds_history_instead_of_copying_wrong_state() {
     let rate = 48_000;
     let mut a = QualityParams::default();

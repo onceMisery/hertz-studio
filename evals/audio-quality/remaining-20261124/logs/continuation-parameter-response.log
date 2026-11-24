@@ -1,0 +1,121 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling rustversion v1.0.23
+   Compiling bitflags v1.3.2
+   Compiling log v0.4.34
+   Compiling lazy_static v1.5.0
+   Compiling arrayvec v0.7.8
+   Compiling bytemuck v1.25.2
+   Compiling symphonia-core v0.5.5
+   Compiling cfg-if v1.0.5
+   Compiling encoding_rs v0.8.41
+   Compiling syn v3.0.6
+   Compiling multiversion_no_op v1.0.0
+   Compiling core_detect v1.0.0
+   Compiling scopeguard v1.2.0
+   Compiling simdutf8 v0.1.5
+   Compiling syn v2.0.119
+   Compiling autocfg v1.5.1
+   Compiling windows-link v0.1.3
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling version_check v0.9.5
+   Compiling num-traits v0.2.19
+   Compiling generic-array v0.14.7
+   Compiling windows-result v0.3.4
+   Compiling windows-strings v0.4.2
+   Compiling typenum v1.20.1
+   Compiling serde_core v1.0.229
+   Compiling multiversion-macros v0.9.0
+   Compiling num-integer v0.1.47
+   Compiling windows-targets v0.52.6
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+   Compiling windows-link v0.2.1
+   Compiling windows-sys v0.61.2
+   Compiling multiversion v0.9.0
+   Compiling windows-result v0.1.2
+   Compiling windows-core v0.61.2
+   Compiling serde v1.0.229
+   Compiling symphonia-metadata v0.5.5
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling dasp_sample v0.11.0
+   Compiling zmij v1.0.23
+   Compiling thiserror v2.0.20
+   Compiling windows-core v0.54.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling windows-threading v0.1.0
+   Compiling cpal v0.15.3
+   Compiling serde_json v1.0.151
+   Compiling ebur128 v0.1.10
+   Compiling once_cell v1.21.4
+   Compiling extended v0.1.0
+   Compiling strength_reduce v0.2.4
+   Compiling pin-project-lite v0.2.17
+   Compiling transpose v0.2.3
+   Compiling symphonia-format-riff v0.5.5
+   Compiling tracing-core v0.1.36
+   Compiling windows v0.54.0
+   Compiling windows-future v0.2.1
+   Compiling digest v0.10.7
+   Compiling dasp_frame v0.11.0
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.3
+   Compiling windows-collections v0.2.0
+   Compiling windows-numerics v0.2.0
+   Compiling tracing-attributes v0.1.31
+   Compiling primal-check v0.3.4
+   Compiling tokio-macros v2.7.2
+   Compiling num-complex v0.4.6
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling symphonia-codec-alac v0.5.5
+   Compiling symphonia-codec-adpcm v0.5.5
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling memchr v2.8.3
+   Compiling cpufeatures v0.2.17
+   Compiling itoa v1.0.18
+   Compiling smallvec v1.16.1
+   Compiling symphonia v0.5.5
+   Compiling sha2 v0.10.9
+   Compiling tracing v0.1.44
+   Compiling rustfft v6.4.1
+   Compiling tokio v1.53.1
+   Compiling windows v0.61.1
+   Compiling vmusic-core v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-core)
+   Compiling rubato v0.16.2
+   Compiling arc-swap v1.9.2
+   Compiling vmusic-audio v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\vmusic-audio)
+    Finished `release` profile [optimized] target(s) in 1m 29s
+     Running unittests src\lib.rs (D:/code/github/hertz-studio/target/audio-quality-continuation\release\deps\vmusic_audio-7fe9a208f7fb0a3b.exe)
+
+running 1 test
+test render::resource_tests::parameter_adoption_latency_probe ... PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":128,"group":"ordinary_fixed","history_filled_seconds":2,"max_total_ms":76.9138,"ordinary_target_met":true,"ordinary_target_ms":100,"p95_after_accept_ms":76.1934,"p95_consumed_frames":3328,"p95_prepare_ms":0.7208,"p95_total_ms":76.6416,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":128,"group":"ordinary_parametric","history_filled_seconds":2,"max_total_ms":44.4237,"ordinary_target_met":true,"ordinary_target_ms":100,"p95_after_accept_ms":44.084,"p95_consumed_frames":1920,"p95_prepare_ms":0.3646,"p95_total_ms":44.4211,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":128,"group":"low_frequency_high_q","history_filled_seconds":2,"max_total_ms":408.3084,"ordinary_target_met":false,"ordinary_target_ms":100,"p95_after_accept_ms":407.0216,"p95_consumed_frames":17920,"p95_prepare_ms":1.5938,"p95_total_ms":408.1733,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":128,"group":"tone","history_filled_seconds":2,"max_total_ms":100.4079,"ordinary_target_met":true,"ordinary_target_ms":100,"p95_after_accept_ms":53.1341,"p95_consumed_frames":2304,"p95_prepare_ms":45.163,"p95_total_ms":98.0509,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":512,"group":"ordinary_fixed","history_filled_seconds":2,"max_total_ms":85.3919,"ordinary_target_met":true,"ordinary_target_ms":100,"p95_after_accept_ms":83.5101,"p95_consumed_frames":3584,"p95_prepare_ms":1.9696,"p95_total_ms":85.2161,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":512,"group":"ordinary_parametric","history_filled_seconds":2,"max_total_ms":51.0568,"ordinary_target_met":true,"ordinary_target_ms":100,"p95_after_accept_ms":48.293,"p95_consumed_frames":2048,"p95_prepare_ms":1.9695,"p95_total_ms":50.1647,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":512,"group":"low_frequency_high_q","history_filled_seconds":2,"max_total_ms":410.2137,"ordinary_target_met":false,"ordinary_target_ms":100,"p95_after_accept_ms":408.3888,"p95_consumed_frames":17920,"p95_prepare_ms":1.9634,"p95_total_ms":409.3094,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+PARAMETER_ADOPTION_PROBE {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":512,"group":"tone","history_filled_seconds":2,"max_total_ms":106.1452,"ordinary_target_met":false,"ordinary_target_ms":100,"p95_after_accept_ms":60.0129,"p95_consumed_frames":2560,"p95_prepare_ms":45.4419,"p95_total_ms":104.8316,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+
+thread 'render::resource_tests::parameter_adoption_latency_probe' panicked at crates\vmusic-audio\src\render\resource_tests.rs:303:21:
+ordinary response budget: {"attempts":20,"audio_priority":true,"failed":0,"failure_rate":0.0,"frames":512,"group":"tone","history_filled_seconds":2,"max_total_ms":106.1452,"ordinary_target_met":false,"ordinary_target_ms":100,"p95_after_accept_ms":60.0129,"p95_consumed_frames":2560,"p95_prepare_ms":45.4419,"p95_total_ms":104.8316,"paced":true,"rate":44100,"scope":"RenderCore control preparation and actual local render adoption; excludes HTTP/DBX/storage/device"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    render::resource_tests::parameter_adoption_latency_probe
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 280 filtered out; finished in 22.65s
+
+error: test failed, to rerun pass `-p vmusic-audio --lib`

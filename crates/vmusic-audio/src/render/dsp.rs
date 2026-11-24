@@ -10,6 +10,7 @@ use vmusic_core::AudioError;
 
 const EQ_HISTORY_MS: u64 = 160;
 const EQ_FADE_MS: u64 = 20;
+const TONE_FADE_MS: u64 = 20;
 const EQ_WARMUP_FRAMES_PER_FRAME: usize = 4;
 
 /// 一个双二阶节（RBJ cookbook peaking EQ）+ 一条声道的历史状态。
@@ -715,8 +716,13 @@ impl DspRuntime {
                 .configure_impulse(prepared, self.history_len == 0);
         }
         let tone_changed = self.configs[self.current].tone != parameters.params.tone;
-        self.fade_frames = ((self.rate as u64 * if tone_changed { 250 } else { EQ_FADE_MS })
-            .div_ceil(1000) as usize)
+        self.fade_frames = ((self.rate as u64
+            * if tone_changed {
+                TONE_FADE_MS
+            } else {
+                EQ_FADE_MS
+            })
+        .div_ceil(1000) as usize)
             .max(2);
         self.terminal
             .configure(parameters.params.limiter, parameters.params.tone);
@@ -829,6 +835,8 @@ impl DspRuntime {
                 read = (read + 1) % self.history_frames;
                 remaining -= 1;
             }
+            // Account for the live frame written below; the 4:1 catch-up rate
+            // keeps the read cursor behind the write cursor.
             phase = if remaining == 0 {
                 Transition::Fading { done: 0 }
             } else {

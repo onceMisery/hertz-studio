@@ -1,0 +1,40 @@
+   Compiling hertz-studio v0.3.8 (C:\Users\miracle\.codex\worktrees\audio-quality-remaining\hertz-studio\crates\hertz-studio)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 52s
+     Running unittests src\lib.rs (D:/code/github/hertz-studio/target/audio-quality-continuation\debug\deps\hertz_studio-cbdc895e20a8fb31.exe)
+
+running 32 tests
+test audio_impulse::tests::generation_requests_are_strict_and_require_provenance ... ok
+test audio_impulse::tests::managed_ids_are_canonical_lowercase ... ok
+test audio_impulse::tests::request_drop_keeps_worker_slot_and_stale_cancel_cannot_cancel_new_job ... ok
+test audio_loudness::tests::cancelled_observer_retains_slots_until_blocking_and_async_work_exit ... ok
+test audio_impulse::tests::cancelled_generation_and_staged_publication_leave_no_resource ... ok
+test audio_loudness::tests::fixed_gain_is_peak_limited_and_silence_is_not_amplified ... ok
+test audio_loudness::tests::new_source_generation_does_not_deduplicate_against_stale_candidate ... ok
+test audio_impulse::tests::generated_resource_is_content_addressed_with_provenance_and_regular_preparation ... ok
+test audio_loudness::tests::next_preparation_coalesces_notifications_without_an_unbounded_queue ... ok
+test audio_impulse::tests::identical_wav_cannot_overwrite_existing_provenance ... ok
+test audio_loudness::tests::complete_sources_cache_identity_album_and_failure_preservation ... ok
+test audio_loudness::tests::next_online_candidate_requires_playback_confirmed_path_and_intent ... ok
+test audio_preview::tests::http_and_dbx_preview_errors_and_stale_cancel_share_the_service_owner ... ok
+test audio_preview::tests::shared_zero_pcm_http_preview_dbx_selection_and_byte_rebinding ... ignored, actual shared output; zero PCM only, no audible or device-quality qualification
+test audio_quality::tests::correction_capabilities_follow_software_rate_qualification ... ok
+test audio_preview::tests::measured_gain_requires_identical_bytes_before_preview_source_rebinding ... ok
+test audio_quality::tests::strict_patch_preserves_disabled_curve_and_rejects_unknowns ... ok
+test audio_source_snapshot::tests::cancellation_and_source_size_are_checked_before_snapshot_work ... ok
+test audio_source_snapshot::tests::empty_and_nonempty_copies_can_be_rewound_for_independent_consumers ... ok
+test audio_source_snapshot::tests::unlinked_copy_retains_exact_bytes_and_no_writable_handle_after_source_change ... ok
+test online::jamendo::tests::malformed_ids_and_non_http_audio_are_not_playable ... ok
+test podcasts::tests::atom_accepts_public_audio_enclosures_and_rejects_local_or_live_links ... ok
+test podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges ... ignored, 访问 Apple 目录、三份真实中文 RSS，并只读取音频的第一个 Range 块
+test podcasts::tests::live_overseas_directory_feed_and_audio_range ... ignored, 访问海外 Apple 目录、NPR RSS，并只读取音频第一个 Range 块
+test podcasts::tests::rss_preserves_chinese_cdata_and_namespaces_with_audio_only_entries ... ok
+test podcasts::tests::stable_identity_uses_canonical_feed_and_guid_not_rotating_audio_urls ... ok
+test room::receiver::tests::ready_never_authorizes_audio_without_commit ... ok
+test system_media::tests::local_play_respects_the_audio_sleep_deadline ... ok
+test window_lifecycle::tests::a_room_without_local_audio_also_requires_a_fresh_decision ... ok
+test audio_quality::tests::migration_cas_legacy_projection_and_failed_transaction ... ok
+test audio_preview::tests::null_preview_never_claims_audio_or_writes_preferences_and_saved_revision_invalidates_it ... ok
+test audio_preview::tests::observer_cancellation_does_not_release_analysis_or_reader_before_worker_cleanup ... ok
+
+test result: ok. 29 passed; 0 failed; 3 ignored; 0 measured; 958 filtered out; finished in 1.43s
+

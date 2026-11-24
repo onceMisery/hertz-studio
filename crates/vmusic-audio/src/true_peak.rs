@@ -446,6 +446,31 @@ mod tests {
     }
 
     #[test]
+    fn sparse_alternating_extreme_bursts_stay_below_reference_ceiling() {
+        let mut worst = 0.0f64;
+        for rate in [44_100, 48_000, 96_000] {
+            for first in [0, 1, 7, 31, 63, 127] {
+                for gap in [1, 2, 3, 7, 15, 31, 63, 127] {
+                    for signs in [(10.0, 10.0), (10.0, -10.0), (-10.0, 10.0), (-10.0, -10.0)] {
+                        let mut input = vec![0.0; 512];
+                        input[first] = signs.0;
+                        input[first + gap] = signs.1;
+                        let output = run(&input, rate);
+                        let peak = reference_peak(&output);
+                        worst = worst.max(peak);
+                        assert!(
+                            peak <= 10.0f64.powf(-1.0 / 20.0),
+                            "rate={rate} first={first} gap={gap} signs={signs:?} {} dBTP",
+                            20.0 * peak.log10()
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!("sparse true-peak worst={} dBTP", 20.0 * worst.log10());
+    }
+
+    #[test]
     fn independent_short_bursts_and_extreme_edges() {
         let mut seed = 17u32;
         for rate in [44_100, 48_000, 96_000] {

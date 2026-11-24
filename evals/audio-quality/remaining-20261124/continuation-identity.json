@@ -1,0 +1,253 @@
+{
+  "date": "2026-11-24",
+  "base_commit": "989103863dccd9d7849d6b365f7c11cb0a71c962",
+  "workspace": "C:/Users/miracle/.codex/worktrees/audio-quality-remaining/hertz-studio",
+  "detached_head": true,
+  "target_dir": "D:/code/github/hertz-studio/target/audio-quality-continuation",
+  "toolchain": {
+    "windows_rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)",
+    "cpu": "13th Gen Intel Core i7-13620H",
+    "platform": "Windows11 x86_64-pc-windows-msvc"
+  },
+  "changes": [
+    "Reduce the outer tone handoff from 250 ms to 20 ms and assert the tone response budget.",
+    "Bind R128 candidates to source_generation, include generation in preparation deduplication, validate selected and album originals on spawn_blocking with a 50 ms playback fallback budget before play_commit, bind readiness to a unique candidate serial, and keep take_for_load memory-only; use atomic same-length replacement in Unix regressions.",
+    "Canonicalize valid uppercase impulse resource IDs to lowercase before path and digest comparison.",
+    "Serialize tests sharing the process-wide loudness reader and preview owner.",
+    "Port the later master Windows fixture cleanup retry into measured-loudness tests.",
+    "Add exact warm-up cursor/budget coverage and sparse alternating true-peak burst coverage."
+  ],
+  "source_sha256": {
+    "crates/hertz-studio/src/audio_impulse.rs": "46aa7ac216474ffdce54cd12af38e20dc0e32f95c270213f3b920ff51793d2e4",
+    "crates/hertz-studio/src/audio_loudness.rs": "2444790b7be02a404a1b7d608ad49787b01282ac43cef2efd551252afd05c703",
+    "crates/hertz-studio/src/audio_preview/tests.rs": "27cb22871286c9b91b18f0866acfb47156621bc85a6e28054f34e26cdc8778cc",
+    "crates/hertz-studio/src/audio_source_snapshot.rs": "71955a4886b182d37939bb3694e386d68b70fed3b8ecf912cd4eb42fc59af629",
+    "crates/hertz-studio/src/measured_loudness.rs": "c60032e62b43cb69e4325cffab3bd7731bb13ab927eba19615de0bdb88c12a22",
+    "crates/hertz-studio/src/state.rs": "b00b4cc3399e6f330acc32cfdb46742dc6df3a88d3ea2c1fce65e461f688ba70",
+    "crates/vmusic-audio/src/render/dsp.rs": "e2e54dccf67cfc3f9fd16fb91720f6b16f023d69f1cf53390fbef1f7af9415db",
+    "crates/vmusic-audio/src/render/dsp/parametric_tests.rs": "e1a69e7650c9ded4ba4c015a3596176a5c022928ed6ab08f26ccf360cf02c6be",
+    "crates/vmusic-audio/src/render/dsp/tests.rs": "c2b0f59834d740997f40ab77da067f551d5252948ee56b2056855990e61d7d86",
+    "crates/vmusic-audio/src/render/resource_tests.rs": "342db807f42dfe85f001f2c0489c0d10aa13c95c3ce0e8d1bc71f4d50cd319e5",
+    "crates/vmusic-audio/src/true_peak.rs": "a3011ecd32d5f1411fa0f0a90ba25d94c1c51aec0d6e7b447b917b49266a93f7"
+  },
+  "binaries": {
+    "current_release_probe": {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-continuation/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "sha256": "7201c788c6570d89c92572ca8c3c7e5e61aa77b26c09c2ce823208f35401a459"
+    },
+    "previous_release_control": {
+      "path": "D:/code/github/hertz-studio/target/audio-quality-msrv/release/deps/vmusic_audio-7fe9a208f7fb0a3b.exe",
+      "sha256": "b7e3a323b7562fa54f4987d643083b3b552c8fab591c83511ea754b0ec4954ba"
+    }
+  },
+  "verification": {
+    "windows_four_libraries": {
+      "status": "passed",
+      "passed": 1382,
+      "ignored": 16,
+      "suites": {
+        "hertz_studio": {
+          "passed": 983,
+          "ignored": 7
+        },
+        "vmusic_audio": {
+          "passed": 272,
+          "ignored": 9
+        },
+        "vmusic_core": {
+          "passed": 58,
+          "ignored": 0
+        },
+        "vmusic_store": {
+          "passed": 69,
+          "ignored": 0
+        }
+      },
+      "log": "logs/continuation-four-libraries-serial-final.log"
+    },
+    "all_targets_check": {
+      "status": "passed",
+      "suites": [
+        "hertz-studio full",
+        "dbx-plugin-hertz standard",
+        "dbx-plugin-hertz full"
+      ],
+      "logs": [
+        "logs/continuation-hertz-full-check-final.log",
+        "logs/continuation-dbx-standard-check-final.log",
+        "logs/continuation-dbx-full-check-final.log"
+      ]
+    },
+    "parameter_response": {
+      "status": "passed",
+      "attempts": 480,
+      "failed": 0,
+      "rates": [
+        44100,
+        48000,
+        96000
+      ],
+      "frames": [
+        128,
+        512
+      ],
+      "p95_total_ms": {
+        "ordinary_fixed": [
+          74.54,
+          82.68
+        ],
+        "ordinary_parametric": [
+          44.59,
+          54.96
+        ],
+        "tone": [
+          30.77,
+          35.08
+        ],
+        "low_frequency_high_q": [
+          404.92,
+          407.44
+        ]
+      },
+      "tone_max_total_ms": 38.42,
+      "log": "logs/continuation-parameter-response-final.log"
+    },
+    "true_peak_release": {
+      "status": "passed",
+      "tests": 6,
+      "sparse_bursts_worst_dbtp": -1.1,
+      "log": "logs/continuation-true-peak-release-final.log"
+    },
+    "continuous_chain_smoke": {
+      "status": "failed_budget",
+      "seconds_per_combination": 10,
+      "callback_allocations": 0,
+      "callback_frees": 0,
+      "over_deadline": 0,
+      "current_p99_fraction_range": [
+        0.2319,
+        0.3698
+      ],
+      "previous_binary_control_p99_fraction_range": [
+        0.2257,
+        0.3552
+      ],
+      "conclusion": "The 10-second probes under concurrent builds failed for both current and old binaries; subsequent idle 30-second and 600.57-second current-source matrices passed. Historical 600.52-second evidence remains separately attributed.",
+      "logs": [
+        "logs/continuation-chain-smoke.log",
+        "logs/continuation-chain-smoke-rerun.log",
+        "logs/continuation-chain-old-binary-control.log"
+      ]
+    },
+    "dsp_regressions": {
+      "status": "passed",
+      "tests": 2,
+      "log": "logs/continuation-dsp-regressions-final.log"
+    },
+    "linux_wsl": {
+      "status": "passed",
+      "all_targets": "hertz-studio and vmusic-audio",
+      "hertz_audio": {
+        "passed": 30,
+        "ignored": 2
+      },
+      "audio_preview": {
+        "passed": 13
+      },
+      "audio_comparison": {
+        "passed": 6
+      },
+      "log": "logs/continuation-linux-regression-serial-final.log"
+    },
+    "continuous_chain_30s": {
+      "status": "passed",
+      "seconds_per_combination": 30,
+      "combinations": 6,
+      "p99_fraction_range": [
+        0.1064,
+        0.1958
+      ],
+      "max_callback_ms": 1.9335,
+      "over_deadline": 0,
+      "callback_allocations": 0,
+      "callback_frees": 0,
+      "log": "logs/continuation-chain-30s-final.log"
+    },
+    "continuous_chain_600s": {
+      "status": "passed",
+      "combinations": 6,
+      "seconds_per_combination": 100,
+      "total_seconds": 600,
+      "elapsed_seconds": 600.57,
+      "p99_fraction_range": [
+        0.1079,
+        0.2179
+      ],
+      "max_callback_ms": 1.9937,
+      "over_deadline": 0,
+      "callback_allocations": 0,
+      "callback_frees": 0,
+      "preview_switches": [
+        39,
+        39,
+        39,
+        40,
+        38,
+        40
+      ],
+      "log": "logs/continuation-chain-600s-final.log"
+    }
+  },
+  "limitations": [
+    "No audible listening, ABX, headphone/speaker response, USB unplug, sleep/resume, two-hour audible stability, weak-machine or cross-machine qualification.",
+    "Parameter response excludes HTTP/DBX, SQLite and device presentation.",
+    "The idle 30-second and 600.57-second current-source continuous-chain matrices passed; earlier 10-second probes under concurrent builds failed for both current and old binaries.",
+    "Evidence was captured on a detached worktree based on 9891038; integration preserves newer master commits through a merge rather than replacing primary files.",
+    "At evidence capture time the continuation changes were uncommitted; this record is committed with those changes.",
+    "The passing continuous-chain matrix measures paced RenderCore/DSP callbacks, not end-to-end server/device presentation or audible stability."
+  ],
+  "review": {
+    "status": "passed_after_fixes",
+    "findings_fixed": [
+      "stale generation candidates blocked regeneration",
+      "album adoption omitted non-selected member identity",
+      "synchronous metadata under play_commit",
+      "boolean readiness could admit a replacement candidate"
+    ],
+    "final_focused_review": "no findings",
+    "windows_audio_log": "logs/continuation-windows-audio-serial-final.log"
+  },
+  "log_sha256": {
+    "logs/continuation-chain-30s-final.log": "e00f3ded30237867e46ae6e6a04f937e9be709d8f02724ebd42795feb2980eeb",
+    "logs/continuation-chain-600s-final.log": "c2db391269eddb3d3c206c056dd3360fdc4e1c9294af678ae1b19cfadf3dd57f",
+    "logs/continuation-chain-old-binary-control.log": "d0542324237bacc9e89103c6a761b7581896d54e0aa0cc38a9ec23894541dc67",
+    "logs/continuation-chain-smoke-rerun.log": "a0f2cc7d851305747957e6e6ee4ec2d733c51b1dc3c7a9eea7542995f8ac41b4",
+    "logs/continuation-chain-smoke.log": "e6ebf65e76b5b2f3283151cae435602ebed3b47b8f6348ab9675442c2063c95a",
+    "logs/continuation-dbx-full-check-final.log": "4df0b4651dbce842f791ce2ee80156cff48885d22fbe8d78583259b47f4b73c7",
+    "logs/continuation-dbx-full-check.log": "8beccdafb537d0ae3b1293258c43cfa502ddc70bedb0b95a87dd0c22e27f39b6",
+    "logs/continuation-dbx-standard-check-final.log": "90dca2f0cdbffd209c6ae87e75543d5e8b3b72530db3b2857f9252246a3b7a5c",
+    "logs/continuation-dbx-standard-check.log": "b6066f2f086c63b4e25a3ee1a3ab74aa1a8d4324f97f46ac217ee037551ec41c",
+    "logs/continuation-dsp-regressions-final.log": "db062741afb6bd8d28c5c95ea02a16a4ee9065b1b370600e92cd623ebb682aa0",
+    "logs/continuation-four-libraries-final.log": "2d6f093805ee53701d32a104a5d71f238b2f3d6d374a7f13f2ff2df210e0be55",
+    "logs/continuation-four-libraries-rerun.log": "cf0da12cfd90c50d8617de6dc63bd31bef22a86dbd3b68b36a5c09bcc448292a",
+    "logs/continuation-four-libraries-serial-final.log": "7ea954f63f718f95810cc35f0c0d44d0ded8fe978622283db9dd2f462dd84623",
+    "logs/continuation-four-libraries.log": "b1f23c39fcde2ba14f61ca91107506dfba3017fcd6c3de3e57dfd8e21b1f1ab7",
+    "logs/continuation-hertz-full-check-final.log": "c579de68587d4a07db53c9adeb040bc11b2d565d289665b51c695b1d6f408003",
+    "logs/continuation-hertz-full-check.log": "fcd543a8f3ee0cea42e39681305a44983b2fc1e21f25ccf3733e82b9c7c5f44d",
+    "logs/continuation-linux-regression-final.log": "693fadcbc774a72b3c67b016ba5658d2da7e96b730008493d5286f7f3f9ae8cc",
+    "logs/continuation-linux-regression-nonblocking.log": "b7b69b032878a578e2c9a1b17b57ba8a4871e065fbfd151b06821db6faa31ca6",
+    "logs/continuation-linux-regression-rerun.log": "95c242c3c7052eceaeda9b7a627dfe97e439bc8d7176b7cc1c7f0ef8335c82d5",
+    "logs/continuation-linux-regression-serial-final.log": "8f66c0f22049bc7b06f5fe171cc1305e0368a0a4719c023dd6f20935d65b16c9",
+    "logs/continuation-linux-regression.log": "64f708effb832c2bc9f9b20c13b6b4d6b666b6985595cd4b7e631ecba82029dd",
+    "logs/continuation-parameter-response-20ms.log": "7283856324de3c56bdcbbec5e3bea04a181807e0019f21c18e82d00e92bca4f9",
+    "logs/continuation-parameter-response-final.log": "a5931c9a675c35e0b2e239600e0402a712551fe09655b51558ac84c93e94020c",
+    "logs/continuation-parameter-response.log": "61c251889828d94cf26ef46de40d6f0d7531cbcd493cbf1bc6567950ef755da9",
+    "logs/continuation-true-peak-release-final.log": "ad9d1fe9436ef99850ad5dc2b8209a6ac3d4620084c38c21f6ab027a16d577c7",
+    "logs/continuation-true-peak-release.log": "3c48b03b2a41d36f7237bfa649e9235a6a574814f49fdecb4586996d58f3a961",
+    "logs/continuation-windows-audio-final.log": "4eba5cb52a6a74af2f5b5500cd7c8e48f525fa67a0f6cfb0f17253042725f2b1",
+    "logs/continuation-windows-audio-nonblocking-final.log": "268a9159097b04b7a4f5f080fc46be98c24bc8ac1337598cbaeafee18dd67e0d",
+    "logs/continuation-windows-audio-nonblocking.log": "5bf7d8f6bedd6e9607ccdc6dd616ab42b34fb314749d34b1424d247d0c05fd6d",
+    "logs/continuation-windows-audio-review-fixes.log": "2b9d33bf86bd6b9aff67eb3196da93b561c8043d12049442b92776d49f13aada",
+    "logs/continuation-windows-audio-serial-final.log": "9040680db597fe4d1f1f2234929c496e99c8ba3c2092fe3a812a0b5431e2ab1c"
+  }
+}

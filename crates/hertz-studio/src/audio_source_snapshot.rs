@@ -61,6 +61,17 @@ fn same_identity(a: &Metadata, b: &Metadata) -> bool {
     true
 }
 
+#[derive(Clone)]
+pub(crate) struct OriginalIdentity {
+    path: PathBuf,
+    metadata: Metadata,
+}
+impl OriginalIdentity {
+    pub(crate) fn matches(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|metadata| same_identity(&self.metadata, &metadata))
+    }
+}
+
 fn open_original(path: &Path) -> Result<File, ApiError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -289,6 +300,18 @@ impl StableFile {
         check(control)
     }
 
+    pub(crate) fn original_identity(&self) -> OriginalIdentity {
+        OriginalIdentity {
+            path: self.original.clone(),
+            metadata: self.identity.clone(),
+        }
+    }
+
+    pub(crate) fn original_identity_matches(&self) -> bool {
+        std::fs::metadata(&self.original)
+            .is_ok_and(|metadata| same_identity(&self.identity, &metadata))
+    }
+
     pub(crate) fn try_clone(&self) -> std::io::Result<File> {
         self.file.try_clone()
     }
@@ -339,7 +362,9 @@ mod tests {
         let c = control();
         let mut snapshot = copied(&path, &c);
         let fingerprint = snapshot.fingerprint(&c).unwrap();
-        std::fs::write(&path, b"replaced bytes").unwrap();
+        assert!(snapshot.original_identity_matches());
+        std::fs::write(&path, b"replaced source bytes").unwrap();
+        assert!(!snapshot.original_identity_matches());
         assert_eq!(
             snapshot.verify_original(&c).unwrap_err().code,
             "loudness_media_changed"

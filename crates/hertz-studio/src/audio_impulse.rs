@@ -175,14 +175,18 @@ fn folder(state: &AppState) -> PathBuf {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn managed_id(id: &str) -> Result<String, ApiError> {
+    if vmusic_core::audio_quality::decode_id(id).is_none() {
+        return Err(bad_request("校正资源 ID 无效"));
+    }
+    Ok(id.to_ascii_lowercase())
+}
 
 pub async fn prepare(
     state: &AppState,
     id: &str,
 ) -> Result<vmusic_core::impulse::ImpulseKernel, ApiError> {
-    if vmusic_core::audio_quality::decode_id(id).is_none() {
-        return Err(bad_request("校正资源 ID 无效"));
-    }
+    let id = managed_id(id)?;
     // Internal preparation is not identified by a previous import/generation
     // request, so a delayed UI cancellation cannot interrupt a saved adoption.
     let (mut guard, lease) = begin_job(uuid::Uuid::new_v4().to_string())?;
@@ -220,13 +224,11 @@ pub(crate) async fn prepare_preview(
     if path.is_none() && resource_id.is_none() {
         return Ok(None);
     }
-    let expected = if path.is_some() { None } else { resource_id };
-    if expected
-        .as_ref()
-        .is_some_and(|id| vmusic_core::audio_quality::decode_id(id).is_none())
-    {
-        return Err(bad_request("校正资源 ID 无效"));
-    }
+    let expected = if path.is_some() {
+        None
+    } else {
+        resource_id.map(|id| managed_id(&id)).transpose()?
+    };
     let path = path
         .map(PathBuf::from)
         .unwrap_or_else(|| folder(state).join(format!("{}.wav", expected.as_ref().unwrap())));
@@ -537,6 +539,13 @@ fn publish_resource(
 mod tests {
     use super::*;
     use vmusic_audio::impulse::FrequencyPoint;
+
+    #[test]
+    fn managed_ids_are_canonical_lowercase() {
+        let id = "A".repeat(64);
+        assert_eq!(managed_id(&id).unwrap(), "a".repeat(64));
+        assert!(managed_id("not-a-digest").is_err());
+    }
 
     fn request() -> GenerateRequest {
         GenerateRequest {
