@@ -3358,8 +3358,10 @@ impl AppState {
         });
     }
 
-    /// 写一条播放历史。在线曲用 online_meta 快照（缺失则标题退化为平台 id）；
-    /// 本地曲从库中取字段。失败只记日志，绝不能影响播放链路。
+    /// 写一条播放历史。在线曲只接受可信元数据（online_meta 快照，或同一首曲
+    /// 上一会话留下的好行）；两样都没有就**先不写**，交给提交后的详情补全任务
+    /// 补写——绝不把「平台 id + 空封面」落进历史。本地曲从库中取字段。
+    /// 失败只记日志，绝不能影响播放链路。
     async fn record_history(&self, track_id: &str) {
         if let Err(error) = self.write_history(track_id).await {
             tracing::warn!("写播放历史失败: {error}");
@@ -3379,7 +3381,14 @@ impl AppState {
         };
         let track_id = track_id.to_string();
         tokio::spawn(async move {
-            if state.online_meta.lock().await.get(&track_id).is_some() {
+            // 只有「标题不是平台 id」的快照才算可信；退化快照仍要拉详情覆盖。
+            let reliable = state
+                .online_meta
+                .lock()
+                .await
+                .get(&track_id)
+                .is_some_and(|m| !m.title.trim().is_empty() && m.title != id);
+            if reliable {
                 return;
             }
             let ctx = crate::routes::online_ctx(&state);
@@ -3504,21 +3513,33 @@ impl AppState {
     }
     pub(crate) async fn write_history(&self, track_id: &str) -> Result<(), String> {
         if let Some((source, ref_id)) = crate::online::split_virtual_id(track_id) {
-            let metadata = self.online_meta.lock().await.get(track_id).cloned();
+            // 客户端注入的快照也可能是退化的（标题 = 平台 id、无封面）：
+            // 这种快照与「没有快照」等价，必须继续往下找可信元数据。
+            let metadata = self
+                .online_meta
+                .lock()
+                .await
+                .get(track_id)
+                .cloned()
+                .filter(|m| !m.title.trim().is_empty() && m.title != ref_id);
             // online_meta 是内存快照：重启后恢复会话的起播不经过 /online/play，
             // 这里会拿不到。此时先从历史里同一首曲的旧行把元数据捞回来——
             // 上一会话写过的好数据绝不能被「平台 id」退化行覆盖。
             let (title, artist, album, cover, duration) = match metadata {
                 Some(m) => (m.title, m.artist, m.album, m.cover, m.duration_ms),
                 None => match crate::history::find_by_track(&self.db, track_id).await {
-                    Ok(Some(old)) if old.title != ref_id => (
+                    Ok(Some(old)) if !old.title.trim().is_empty() && old.title != ref_id => (
                         old.title,
                         old.artist,
                         old.album,
                         old.cover_url,
                         old.duration_ms.map(|v| v.max(0) as u64),
                     ),
-                    _ => (ref_id.clone(), None, None, None, None),
+                    // 没有任何可信元数据：先把这一行留空，等
+                    // spawn_online_meta_enrichment 拉到详情后再补写。
+                    // 写一条「标题 = 平台 id、封面为空」的行，界面会把它当歌名
+                    // 展示，用户看到的就是一串数字和没有封面的卡片。
+                    _ => return Ok(()),
                 },
             };
             crate::history::upsert(

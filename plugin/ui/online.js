@@ -1502,6 +1502,55 @@
     }
   }
 
+  // 退化历史行的读侧补全。播放历史里可能残留「标题 = 平台 id、封面为空」的
+  // 旧行（起播写历史早于元数据落位，后端要等一下才补详情）。读取侧绝不能把
+  // 平台 id 当歌名展示：这里按 id 拉一次详情，补标题/歌手/封面并写回缓存。
+  // 好数据直接返回 null，不产生额外请求；同一首并发读取只发一次。
+  var historyMetaPending = new Map();
+  // 读侧补全只等一小会儿：首页「最近播放」不该被一条退化行的详情请求拖住。
+  // 超时就先按未知曲目渲染；后端补全任务落地后，下一次刷新自然拿到真名。
+  var HISTORY_META_TIMEOUT = 3000;
+  function resolveHistoryEntry(entry) {
+    if (!entry || !entry.source || entry.source === 'local' || !entry.ref_id) {
+      return Promise.resolve(null);
+    }
+    if (entry.title && entry.title !== entry.ref_id) return Promise.resolve(null);
+    var id = virtualId({ source: entry.source, id: entry.ref_id });
+    var known = onlineMeta.get(id);
+    if (known && known.title && known.title !== entry.ref_id) {
+      return Promise.resolve({
+        title: known.title, artist: known.artist, album: known.album,
+        duration_ms: known.duration_ms, cover: safeCoverUrl(known.cover || entry.cover_url),
+      });
+    }
+    if (historyMetaPending.has(id)) return historyMetaPending.get(id);
+    var request = T.get(
+      '/v1/online/detail?source=' + encodeURIComponent(entry.source)
+      + '&id=' + encodeURIComponent(entry.ref_id)
+    );
+    var deadline = new Promise(function (resolve) {
+      setTimeout(function () { resolve(null); }, HISTORY_META_TIMEOUT);
+    });
+    var task = Promise.race([request, deadline]).then(function (d) {
+      if (!d || !d.title) return null;
+      var meta = Object.assign({}, known || {}, {
+        id: id, source: entry.source, onlineId: entry.ref_id,
+        title: d.title, artist: d.artist || '', album: d.album || '',
+        duration_ms: d.duration_ms || 0, cover: safeCoverUrl(d.cover),
+      });
+      rememberMeta(id, meta);
+      if (H && H.state && H.state.byId) H.state.byId.set(id, meta);
+      return {
+        title: meta.title, artist: meta.artist, album: meta.album,
+        duration_ms: meta.duration_ms, cover: meta.cover,
+      };
+    }).catch(function () { return null; }).finally(function () {
+      historyMetaPending.delete(id);
+    });
+    historyMetaPending.set(id, task);
+    return task;
+  }
+
   async function loadOnlineLyricDoc(track) {
     try {
       return await T.get(
@@ -1583,57 +1632,7 @@
     historyState.total = (data && data.total) || 0;
     host.hidden = (historyState.offset === 0 && items.length === 0);
     list.textContent = '';
-    items.forEach(function (it) {
-      var row = document.createElement('div');
-      row.className = 'op-history-item';
-
-      var cover = document.createElement('div');
-      cover.className = 'op-h-cover';
-      if (it.cover_url) {
-        applyBg(cover, safeCoverUrl(it.cover_url));
-      } else {
-        cover.textContent = '♪';
-      }
-
-      var main = document.createElement('div');
-      main.className = 'op-h-main';
-      var title = document.createElement('div');
-      title.className = 'op-h-title';
-      title.textContent = it.title || it.ref_id;
-      var sub = document.createElement('div');
-      sub.className = 'op-h-sub';
-      sub.textContent = [it.artist, it.album].filter(Boolean).join(' · ') || '未知艺术家';
-      main.append(title, sub);
-
-      // 最近播放的来源同样用平台 app 图标，不摆文字标签。
-      var src = badge(it.source === 'local' ? 'local' : it.source);
-      src.classList.add('op-h-src');
-
-      var time = document.createElement('span');
-      time.className = 'op-h-time';
-      time.textContent = relTime(it.played_at);
-
-      var del = document.createElement('button');
-      del.className = 'op-h-del';
-      del.type = 'button';
-      del.title = '移除';
-      del.textContent = '×';
-      del.onclick = async function (e) {
-        e.stopPropagation();
-        try {
-          await T.del('/v1/history/' + it.id);
-          loadHistory();
-        } catch (err) {
-          H.toast('移除失败', 'error');
-        }
-      };
-
-      row.append(cover, main, src, time, del);
-      row.addEventListener('click', function () {
-        replayHistory(it);
-      });
-      list.appendChild(row);
-    });
+    items.forEach(function (it) { list.appendChild(historyRow(it)); });
 
     // 游标分页：还有更早的就显示「加载更早」，追加而不是重绘。
     historyState.offset += items.length;
@@ -1688,11 +1687,22 @@
     main.className = 'op-h-main';
     var title = document.createElement('div');
     title.className = 'op-h-title';
-    title.textContent = it.title || it.ref_id;
+    // 平台 id 只是退化行的内部标识，绝不是歌名：读不到名字就显示占位，
+    // 详情补全回来后再换成真名（见 resolveHistoryEntry）。
+    var degraded = !it.title || it.title === it.ref_id;
+    title.textContent = degraded ? '未知曲目' : it.title;
     var sub = document.createElement('div');
     sub.className = 'op-h-sub';
     sub.textContent = [it.artist, it.album].filter(Boolean).join(' · ') || '未知艺术家';
     main.append(title, sub);
+    if (degraded) {
+      resolveHistoryEntry(it).then(function (meta) {
+        if (!row.isConnected || !meta) return;
+        title.textContent = meta.title;
+        sub.textContent = [meta.artist, meta.album].filter(Boolean).join(' · ') || '未知艺术家';
+        if (meta.cover) { cover.textContent = ''; applyBg(cover, meta.cover); }
+      });
+    }
 
     var src = badge(it.source === 'local' ? 'local' : it.source);
     src.classList.add('op-h-src');
@@ -1733,17 +1743,20 @@
         .catch(function (err) { H.toast(H.errText('播放失败', err), 'error'); });
       return;
     }
-    var track = {
-      source: it.source,
-      id: it.ref_id,
-      title: it.title,
-      artist: it.artist || '',
-      album: it.album || '',
-      duration_ms: it.duration_ms || 0,
-      cover: it.cover_url || '',
-      playable: true,
-    };
-    playAll([track], 0);
+    // 退化行先补详情再起播：否则会把平台 id 当成歌名写进「正在播放」与历史。
+    resolveHistoryEntry(it).then(function (meta) {
+      var track = {
+        source: it.source,
+        id: it.ref_id,
+        title: (meta && meta.title) || (it.title && it.title !== it.ref_id ? it.title : '未知曲目'),
+        artist: (meta && meta.artist) || it.artist || '',
+        album: (meta && meta.album) || it.album || '',
+        duration_ms: (meta && meta.duration_ms) || it.duration_ms || 0,
+        cover: (meta && meta.cover) || it.cover_url || '',
+        playable: true,
+      };
+      playAll([track], 0);
+    });
   }
 
   var radioEpoch = 0;
@@ -2275,6 +2288,8 @@
     rowCoverUrl: rowCoverUrl,
     bigCoverUrl: bigCoverUrl,
     fetchCover: fetchOnlineCover,
+    // 历史行退化（标题=平台 id）时按 id 补详情；宿主首页的最近播放也用它。
+    resolveHistoryEntry: resolveHistoryEntry,
     loadLyricDoc: loadOnlineLyricDoc,
     // 接力后的元数据迁移与出处（app.js 的 source_switched 分支调用）。
     relayMeta: relayMeta,

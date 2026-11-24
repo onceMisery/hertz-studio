@@ -268,31 +268,23 @@ html[data-skin="hertz"] .progress-wrap { flex: 1; }
 html[data-skin="hertz"] #progress { height: 3px; }
 html[data-skin="hertz"] .bar-right { grid-column: 3; grid-row: 1; justify-self: end; gap: 11px; }
 html[data-skin="hertz"] #bar-player-expand { display: none; }
-html[data-skin="hertz"] #top-more-menu #bar-pin-toggle { display: flex; width: 100%; justify-content: flex-start; border: 0; background: transparent; border-radius: 8px; }
+/* 收起播放栏：一个小到不抢视线的图标钮。收起后由 .bar-restore 接回。
+   图标本身 aria-hidden，可访问名沿用按钮上的 aria-label / title。 */
+html[data-skin="hertz"] .bar-right #bar-pin-toggle {
+  width: 24px; height: 24px; min-width: 24px; padding: 0; gap: 0;
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted); opacity: .55;
+  transition: opacity 160ms var(--ease), color 160ms var(--ease), background 160ms var(--ease);
+}
+html[data-skin="hertz"] .bar-right #bar-pin-toggle span { display: none; }
+html[data-skin="hertz"] .bar-right #bar-pin-toggle svg { width: 14px; height: 14px; }
+html[data-skin="hertz"] .bar-right #bar-pin-toggle:hover,
+html[data-skin="hertz"] .bar-right #bar-pin-toggle:focus-visible { opacity: 1; color: var(--text); background: var(--hover); }
 html[data-skin="hertz"] .bar-volume { display: flex; gap: 10px; padding-left: 14px; margin-left: 2px; border-left: 1px solid var(--line); }
 html[data-skin="hertz"] .bar-volume > .hint { display: none; }
 html[data-skin="hertz"] .bar-volume input { width: 76px; }
 /* 音量已并入中央播控：不再需要右栏那套分隔线与缩进。 */
 html[data-skin="hertz"] .bar-controls .bar-volume { padding-left: 0; margin-left: 0; border-left: 0; }
-/* 指针离开应用后播放栏淡出并让出高度，把空间还给内容；回来或键盘聚焦时恢复。 */
-html[data-skin="hertz"] #playback-bar {
-  transition: opacity 240ms var(--ease), transform 280ms var(--ease),
-    height 280ms var(--ease), min-height 280ms var(--ease),
-    padding 280ms var(--ease), border-top-color 280ms var(--ease);
-}
-@media (min-width: 621px) {
-  html[data-skin="hertz"] body.bar-auto-hidden #playback-bar:not(:has(:focus-visible)) {
-    opacity: 0;
-    height: 0;
-    min-height: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    overflow: hidden;
-    transform: translateY(12px);
-    border-top-color: transparent;
-    pointer-events: none;
-  }
-}
 html[data-skin="hertz"] #sleep-timer { border: 0; background: none; padding: 7px 9px; border-radius: 999px; transition: color 160ms var(--ease), background 160ms var(--ease), box-shadow 160ms var(--ease); }
 html[data-skin="hertz"] #sleep-timer:hover { color: var(--text); background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
 /* 独立队列投影；管理操作仍在原队列页面。 */

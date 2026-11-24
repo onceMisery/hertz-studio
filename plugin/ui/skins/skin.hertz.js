@@ -3,7 +3,7 @@
 (function () {
   'use strict';
   var mounted = false, layout, built, refs = {}, cleanup = [], observer;
-  var homeEpoch = 0, homeBusy = false, homeAgain = false, queueKey = '', queueLimit = 60;
+  var homeEpoch = 0, homeBusy = false, homeAgain = false, homeRefreshTimer = 0, queueKey = '', queueLimit = 60;
   var featuredAlbums = [], featuredIndex = 0;
   var queueOpen = false, queueTrigger, lastView = '', pendingFrame = 0, menuKey = '', queueBackground = [];
   var sidebarOpen = false, sidebarCollapsed = false, sidebarBackground = [], sidebarGesture = null;
@@ -640,7 +640,7 @@
     });
     // 设置已有侧栏入口；原业务节点保留以便卸载还原，更多菜单只呈现工具。
     var retiredTools = make('div', 'hz-retired-tools', document.body); retiredTools.hidden = true;
-    ['settings-entry', 'bar-pin-toggle', 'service-exit'].forEach(function (key) { layout.move(id(key), retiredTools); });
+    ['settings-entry', 'service-exit'].forEach(function (key) { layout.move(id(key), retiredTools); });
     var transport = make('div', 'hz-bar-center', id('playback-bar'));
     layout.move(document.querySelector('.bar-controls'), transport); layout.move(document.querySelector('.bar-progress'), transport);
     layout.move(id('mode'), document.querySelector('.bar-controls'), id('prev'));
@@ -661,7 +661,16 @@
       refs.listMode.classList.toggle('is-active', !open); refs.coverMode.classList.toggle('is-active', open);
       refs.listMode.setAttribute('aria-pressed', String(!open)); refs.coverMode.setAttribute('aria-pressed', String(open)); setQueue(false);
     });
-    listen(document, 'playback:track', function () { queueKey = ''; paintQueue(); refreshHome(true); });
+    listen(document, 'playback:track', function () {
+      queueKey = ''; paintQueue(); refreshHome(true);
+      // 在线曲的播放历史要等后端补完详情才写（标题不能是平台 id）。刚切歌
+      // 时这一首还不在 /v1/history 里，稍后再拉一次，最近播放才不会少一首。
+      clearTimeout(homeRefreshTimer);
+      homeRefreshTimer = setTimeout(function () {
+        homeRefreshTimer = 0;
+        if (mounted && window.HertzShell.activeView() === 'home') refreshHome(true);
+      }, 1500);
+    });
     function syncPlaying() { document.body.dataset.hzPlaying = String(window.Stage && window.Stage.presentation().playing); paintQueue(); }
     listen(document, 'stage:playing-changed', syncPlaying); syncPlaying();
     listen(document, 'nav:changed', scheduleSync);
@@ -692,7 +701,7 @@
   }
   function unmount() {
     if (!mounted) return;
-    if (sidebarOpen) setSidebar(false, false); setQueue(false); closeMenu(); mounted = false; ++homeEpoch; homeBusy = false; homeAgain = false;
+    if (sidebarOpen) setSidebar(false, false); setQueue(false); closeMenu(); mounted = false; ++homeEpoch; homeBusy = false; homeAgain = false; clearTimeout(homeRefreshTimer); homeRefreshTimer = 0;
     if (libraryController) libraryController.abort(); libraryController = null; ++libraryEpoch; libraryBusy = false;
     if (observer) observer.disconnect(); cancelAnimationFrame(pendingFrame); pendingFrame = 0;
     cleanup.splice(0).forEach(function (fn) { fn(); });

@@ -6228,9 +6228,10 @@ async function readHomeRecent() {
       catch (error) { if (error.status === 404) continue; throw error; }
       if (track) return { ...track, source: 'local' };
     } else if (entry.source && entry.source !== 'local' && entry.ref_id) {
+      const track = await onlineHistoryTrack(entry);
       return { id: 'online:' + entry.source + ':' + entry.ref_id, source: entry.source,
-        onlineId: entry.ref_id, title: entry.title, artist: entry.artist || '', album: entry.album || '',
-        duration_ms: entry.duration_ms || 0, cover: entry.cover_url || '' };
+        onlineId: entry.ref_id, title: track.title, artist: track.artist, album: track.album,
+        duration_ms: track.duration_ms, cover: track.cover };
     }
   }
   return null;
@@ -6416,8 +6417,8 @@ function initSpaceHome(playbackHost) {
         if (!entry.source || !entry.ref_id) return null;
         const id = onlineItemId({ source: entry.source, id: entry.ref_id });
         const known = state.byId.get(id) || (window.Online && Online.getMeta(id));
-        return { ...known, id: entry.ref_id, source: entry.source, title: entry.title, artist: entry.artist,
-          album: entry.album, duration_ms: entry.duration_ms, cover: entry.cover_url || '', vip_only: entry.vip_only ?? known?.vip_only };
+        const track = await onlineHistoryTrack(entry);
+        return { ...known, ...track, vip_only: entry.vip_only ?? known?.vip_only };
       }));
       return { items: remember(items.filter(Boolean)), total: page.total || items.length, nextOffset: offset + (page.items || []).length };
     },
@@ -6464,6 +6465,26 @@ function initSpaceHome(playbackHost) {
     },
     notify: (message) => toast(message, 'error'),
   });
+}
+
+// 在线历史行的统一整形。起播写历史早于元数据落位时，后端会先留下
+// 「标题 = 平台 id、封面为空」的行；读侧按 id 补一次详情，绝不把平台 id
+// 当歌名渲染，也顺手把封面补回来。非退化行不发请求。
+// 放在 initSpaceHome 之后：契约脚本只切这一段源码做 vm 沙箱，放在前面会
+// 让 host.recent 引用的函数不在沙箱里（ReferenceError）。
+async function onlineHistoryTrack(entry) {
+  const meta = window.Online && Online.resolveHistoryEntry
+    ? await Online.resolveHistoryEntry(entry) : null;
+  const degraded = !entry.title || entry.title === entry.ref_id;
+  return {
+    id: entry.ref_id,
+    source: entry.source,
+    title: (meta && meta.title) || (degraded ? '未知曲目' : entry.title),
+    artist: (meta && meta.artist) || entry.artist || '',
+    album: (meta && meta.album) || entry.album || '',
+    duration_ms: (meta && meta.duration_ms) || entry.duration_ms || 0,
+    cover: (meta && meta.cover) || entry.cover_url || '',
+  };
 }
 
 // 首页那一格右键：把曲库行上那对「让封面位有图」的动作搬过来，省得为了补一张
@@ -7689,8 +7710,7 @@ async function mobileHomeSnapshot() {
         return localSourceItem(track, 0);
       }
       if (!entry.source || !entry.ref_id) return null;
-      return onlineSourceItem({ id: entry.ref_id, source: entry.source, title: entry.title,
-        artist: entry.artist, album: entry.album, cover: entry.cover_url, duration_ms: entry.duration_ms }, 0);
+      return onlineSourceItem(await onlineHistoryTrack(entry), 0);
     }));
     const seen = new Set();
     recent = results.filter(result => result.status === 'fulfilled' && result.value)
@@ -8308,7 +8328,8 @@ async function toggleBarFavorite() {
   }
 }
 
-// 播放栏显隐：显式收起 / 展开。鼠标活动、播放状态和计时器不改变用户选择。
+// 播放栏显隐：显式收起 / 展开。鼠标活动、播放状态和计时器不改变用户选择，
+// 指针移出窗口也不会自动隐藏——只认栏内那颗小收起按钮。
 function initBarVisibility() {
   const bar = document.querySelector('.bar');
   const toggleBtn = $('bar-pin-toggle');
@@ -8316,13 +8337,6 @@ function initBarVisibility() {
   const STORE_KEY = 'vmusic.bar.pinned.v1';
   let collapsed = false;
   try { collapsed = localStorage.getItem(STORE_KEY) === '0'; } catch (e) { /* 本次会话仍可操作 */ }
-  // 指针离开原生窗口时自动淡出播放栏，把高度让给内容；回到窗口即恢复。
-  // 手动收起（.is-hidden）是另一条状态，互不覆盖。
-  let pointerDown = false;
-  const barAutoHide = (on) => {
-    if (!bar) return;
-    document.body.classList.toggle('bar-auto-hidden', Boolean(on) && !collapsed);
-  };
 
   function sync() {
     const hidden = collapsed;
@@ -8335,7 +8349,6 @@ function initBarVisibility() {
 
   function setCollapsed(value) {
     collapsed = value;
-    barAutoHide(false);
     try { localStorage.setItem(STORE_KEY, collapsed ? '0' : '1'); } catch (e) { /* 本次会话仍可操作 */ }
     sync();
     // 收起后焦点移到可见的恢复入口，键盘操作不会丢在隐藏的播放栏中。
@@ -8345,23 +8358,6 @@ function initBarVisibility() {
   toggleBtn.addEventListener('click', () => setCollapsed(true));
   restoreBtn.addEventListener('click', () => setCollapsed(false));
   document.addEventListener('skin:changed', sync);
-  const showBar = () => barAutoHide(false);
-  document.documentElement.addEventListener('mouseenter', showBar);
-  // 任何指针移动都恢复（部分 WebView 在窗口重新获得指针时不派发 mouseenter）。
-  document.addEventListener('pointermove', showBar, { passive: true });
-  document.documentElement.addEventListener('mouseleave', () => {
-    let popoverOpen = false;
-    try { popoverOpen = !!document.querySelector(':popover-open'); } catch (_) { /* 旧内核不支持，按无弹层处理 */ }
-    if (pointerDown || collapsed || popoverOpen) return;
-    barAutoHide(true);
-  });
-  // 拖拽/调节时不移开视线：按下指针期间始终保持可见。
-  document.addEventListener('pointerdown', () => { pointerDown = true; showBar(); }, true);
-  document.addEventListener('pointerup', () => { pointerDown = false; }, true);
-  document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
-  // 键盘 Tab 进入播放栏时恢复（鼠标点击留下的焦点不算，交给 CSS 的 :focus-visible）。
-  document.addEventListener('focusin', (event) => { if (bar.contains(event.target)) showBar(); });
-  window.addEventListener('focus', showBar);
   sync();
 }
 
