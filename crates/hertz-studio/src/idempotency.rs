@@ -505,15 +505,17 @@ mod tests {
     }
 
     /// 在闸门上等待的 owner：把「注册完成」「合并等待」「断开」这些时序
-    /// 从竞态变成确定事件。
+    /// 从竞态变成确定事件。闸门是 Semaphore 而不是 Notify：owner 可能已
+    /// detach，放行时它未必 poll 过 `notified()`，而 `notify_waiters()`
+    /// 不留凭证，信号会丢。
     fn gated_exec(
         counter: Arc<AtomicUsize>,
-        gate: Arc<tokio::sync::Notify>,
+        gate: Arc<tokio::sync::Semaphore>,
     ) -> impl FnOnce(Arc<AppState>) -> OwnedPlay {
         move |s: Arc<AppState>| {
             Box::pin(async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                gate.notified().await;
+                let _permit = gate.acquire().await.unwrap();
                 s.pause_control().await
             })
         }
@@ -538,7 +540,7 @@ mod tests {
             .load("first.wav", Some("first".into()))
             .await
             .unwrap();
-        let gate = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let counter = Arc::new(AtomicUsize::new(0));
         let a = tokio::spawn(short_write(
             state.clone(),
@@ -559,7 +561,7 @@ mod tests {
         ));
         // 给第二条走到合并等待点的时间，然后放行 owner。
         tokio::time::sleep(Duration::from_millis(50)).await;
-        gate.notify_waiters();
+        gate.add_permits(2);
         let (a, b) = (a.await.unwrap().unwrap(), b.await.unwrap().unwrap());
         assert_eq!(a, b);
         assert_eq!(counter.load(Ordering::SeqCst), 1, "同键并发只执行一次");
@@ -575,7 +577,7 @@ mod tests {
             .load("first.wav", Some("first".into()))
             .await
             .unwrap();
-        let gate = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let counter = Arc::new(AtomicUsize::new(0));
         // 等待者模拟客户端断开：整个 runner future 被丢掉。
         let waiter = tokio::spawn(short_write(
@@ -588,7 +590,7 @@ mod tests {
         ));
         wait_until_registered(&state).await;
         waiter.abort();
-        gate.notify_waiters();
+        gate.add_permits(2);
         // owner 是 detached 任务：照常执行并入账。
         tokio::time::sleep(Duration::from_millis(50)).await;
         let replay = short_write(

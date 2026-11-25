@@ -1378,7 +1378,7 @@ mod tests {
         actor.join().unwrap();
         state.db.close().await;
         drop(state);
-        std::fs::remove_dir_all(dir).unwrap();
+        crate::state::tests::remove_dir_settled(dir).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1496,7 +1496,7 @@ mod tests {
         state.audio.shutdown();
         audio.join().unwrap();
         state.db.close().await;
-        std::fs::remove_dir_all(dir).unwrap();
+        crate::state::tests::remove_dir_settled(dir).await;
     }
 
     fn write_wav(path: &Path, gain: f64) {
@@ -1765,6 +1765,6 @@ mod tests {
         audio.join().unwrap();
         state.db.close().await;
         drop(state);
-        std::fs::remove_dir_all(dir).unwrap();
+        crate::state::tests::remove_dir_settled(dir).await;
     }
 }

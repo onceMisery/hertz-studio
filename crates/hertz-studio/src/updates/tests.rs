@@ -382,9 +382,9 @@ async fn cancelled_startup_check_recovers_when_throttle_write_fails() {
     for entry in std::fs::read_dir(&directory).unwrap() {
         let entry = entry.unwrap();
         assert!(entry.file_type().unwrap().is_file());
-        std::fs::remove_file(entry.path()).unwrap();
+        crate::state::tests::remove_file_settled(entry.path()).await;
     }
-    std::fs::remove_dir(directory).unwrap();
+    crate::state::tests::remove_dir_settled(directory).await;
 }
 
 async fn response_fixture(data: Vec<u8>, chunked: bool) -> (String, tokio::task::JoinHandle<()>) {

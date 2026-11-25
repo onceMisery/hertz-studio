@@ -5284,6 +5284,37 @@ pub async fn remove_discovery(data_dir: &std::path::Path) {
 pub(crate) mod tests {
     use super::*;
 
+    // SQLite WAL handles and update artifacts can outlive `close()` on Windows; the
+    // real requirement is a removable fixture, so retry through that settlement
+    // window instead of asserting the first attempt succeeds.
+    pub(crate) async fn remove_file_settled(path: std::path::PathBuf) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match std::fs::remove_file(&path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("fixture file must be removable: {error}"),
+            }
+        }
+    }
+
+    pub(crate) async fn remove_dir_settled(root: std::path::PathBuf) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match std::fs::remove_dir_all(&root) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("fixture directory must be removable: {error}"),
+            }
+        }
+    }
+
     fn measured_fixture(snapshot: &PlayerSnapshot) -> crate::measured_loudness::Applied {
         let mut config = vmusic_store::audio_quality::from_settings(&Default::default())
             .unwrap()
