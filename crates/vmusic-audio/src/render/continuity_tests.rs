@@ -852,7 +852,8 @@ fn complete_quality_chain_probe() {
                         // The real audition owner resets on a side change. Exercise
                         // the same finite gain/alignment messages here, alongside
                         // ordinary warm-up, kernel fades and retirement between sides.
-                        let next_bypass = (index / (rate as usize / frames / 2).max(1)) % 10 == 0;
+                        let next_bypass =
+                            (index / (rate as usize / frames / 2).max(1)).is_multiple_of(10);
                         if bypassed != next_bypass {
                             renderer.shared.dsp.reset();
                             preview_switches += 1;

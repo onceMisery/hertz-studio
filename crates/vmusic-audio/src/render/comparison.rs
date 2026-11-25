@@ -268,6 +268,7 @@ pub fn compare_pcm(
         channels,
     })
 }
+#[allow(clippy::too_many_arguments)] // One measured side of the same plan, plus its meters' inputs.
 fn measure_path(
     pcm: &[f32],
     plan: &PreviewPlan,

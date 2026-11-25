@@ -133,10 +133,9 @@ impl Drop for MemoryWindow {
 }
 
 fn require_release() {
-    assert!(
-        !cfg!(debug_assertions),
-        "run isolated resource probes with --release"
-    );
+    if cfg!(debug_assertions) {
+        panic!("run isolated resource probes with --release");
+    }
 }
 fn percentile(values: &mut [u128], percent: usize) -> u128 {
     values.sort_unstable();

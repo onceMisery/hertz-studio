@@ -138,7 +138,9 @@ enum Command {
     ),
     QualityStatus(Reply<Option<vmusic_core::audio_quality::QualityStatus>>),
     PrepareQualityPreview {
-        plan: vmusic_core::audio_preview::PreviewPlan,
+        // Boxed: the plan is the only payload that dominated this command's
+        // inline size, and commands move by value through the actor channel.
+        plan: Box<vmusic_core::audio_preview::PreviewPlan>,
         source: Box<dyn AudioSource>,
         ext: Option<String>,
         expected: PlayerSnapshot,
@@ -526,7 +528,7 @@ impl AudioHandle {
         expected: PlayerSnapshot,
     ) -> Result<MediaInfo, AudioError> {
         self.ask(|reply| Command::PrepareQualityPreview {
-            plan,
+            plan: Box::new(plan),
             source,
             ext,
             expected,
@@ -1450,7 +1452,7 @@ fn apply(
             reply,
         } => {
             let result = if same_preview_source(state, &expected) {
-                backend.prepare_quality_preview(plan, source, ext)
+                backend.prepare_quality_preview(*plan, source, ext)
             } else {
                 Err(AudioError::Other("试听准备期间播放意图已改变".into()))
             };

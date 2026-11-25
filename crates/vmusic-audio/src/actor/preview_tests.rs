@@ -105,7 +105,7 @@ fn preview_preparation_rejects_each_stale_source_intent_and_allows_position_prog
             &mut state,
             &sink,
             Command::PrepareQualityPreview {
-                plan: plan.clone(),
+                plan: Box::new(plan.clone()),
                 source: wave(),
                 ext: Some("wav".into()),
                 expected,
@@ -125,7 +125,7 @@ fn preview_preparation_rejects_each_stale_source_intent_and_allows_position_prog
         &mut state,
         &sink,
         Command::PrepareQualityPreview {
-            plan,
+            plan: Box::new(plan),
             source: wave(),
             ext: Some("wav".into()),
             expected,
