@@ -144,7 +144,11 @@
     }
 
     var modeNode = $('mode');
-    if (modeNode) text(el.modeBtn, modeNode.textContent || '列表循环');
+    if (modeNode) {
+      var label = modeNode.textContent || '列表循环';
+      text(el.modeLabel, label);
+      if (el.modeIcon) el.modeIcon.setAttribute('href', label.indexOf('随机') >= 0 ? '#i-shuffle' : '#i-repeat');
+    }
 
     var fav = $('bar-favorite');
     if (fav) {
@@ -225,6 +229,7 @@
     el.translateBtn.classList.toggle('is-off', !translate || !hasTranslation);
     activeIndex = -2;
     lastScrollIndex = -1;
+    userScrollUntil = 0;
   }
 
   function paintLyrics(pres) {
@@ -242,6 +247,7 @@
     if (index >= lineNodes.length) index = lineNodes.length - 1;
     if (index === activeIndex) return;
 
+    var firstPaint = activeIndex === -2;
     if (activeIndex >= 0 && lineNodes[activeIndex]) lineNodes[activeIndex].classList.remove('is-active');
     for (var i = 0; i < lineNodes.length; i += 1) {
       lineNodes[i].classList.toggle('is-past', i < index);
@@ -253,11 +259,16 @@
 
     if (index !== lastScrollIndex && performance.now() >= userScrollUntil) {
       lastScrollIndex = index;
-      centerLine(node);
+      // 首帧直接定位，避免打开页面时先停在顶部再滑到当前句。
+      centerLine(node, firstPaint);
     }
   }
 
-  function centerLine(node) {
+  function centerActive(instant) {
+    if (activeIndex >= 0 && lineNodes[activeIndex]) centerLine(lineNodes[activeIndex], instant);
+  }
+
+  function centerLine(node, instant) {
     var scroller = el.scroll;
     if (!scroller || !node) return;
     var nodeRect = node.getBoundingClientRect();
@@ -265,7 +276,7 @@
     var top = scroller.scrollTop + (nodeRect.top - boxRect.top) + nodeRect.height / 2 - scroller.clientHeight / 2;
     var max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     var reduced = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    scroller.scrollTo({ top: Math.max(0, Math.min(max, top)), behavior: reduced ? 'auto' : 'smooth' });
+    scroller.scrollTo({ top: Math.max(0, Math.min(max, top)), behavior: instant || reduced ? 'auto' : 'smooth' });
   }
 
   function paint(force) {
@@ -313,8 +324,12 @@
     // 上次关闭时的活动行可能已经过期：重新定位并把它滚到视野中央。
     activeIndex = -2;
     lastScrollIndex = -1;
+    userScrollUntil = 0;
     paint(true);
     start();
+    // 首帧布局（尤其是 flex 高度与遮罩）可能还没稳定，稍后再校正一次，
+    // 保证打开时直接停在当前唱到的那一句，而不是顶部。
+    global.setTimeout(function () { if (open) centerActive(true); }, 120);
     if (el.closeBtn) el.closeBtn.focus({ preventScroll: true });
   }
 
@@ -339,6 +354,10 @@
     text(el.vinylLabel, vinyl ? '黑胶唱盘' : '艺术封套');
     el.vinylDisc.hidden = !vinyl || !root.classList.contains('has-track');
     el.art.hidden = vinyl || !root.classList.contains('has-track');
+    if (el.artWrap) {
+      el.artWrap.setAttribute('aria-label', vinyl ? '当前为黑胶唱盘，点击切换为艺术封套' : '当前为艺术封套，点击切换为黑胶唱盘');
+      el.artWrap.title = vinyl ? '切换为艺术封套' : '切换为黑胶唱盘';
+    }
     el.translateBtn.setAttribute('aria-pressed', String(translate && !el.translateBtn.disabled));
     el.translateBtn.classList.toggle('is-off', !translate);
     for (var i = 0; i < lineNodes.length; i += 1) {
@@ -351,13 +370,24 @@
   // 交互
   // ---------------------------------------------------------------------------
 
+  function toggleVinyl() {
+    vinyl = !vinyl;
+    writeStore(VINYL_KEY, vinyl);
+    syncToggles();
+  }
+
   function bindControls() {
     el.closeBtn.addEventListener('click', closeReader);
-    el.vinylBtn.addEventListener('click', function () {
-      vinyl = !vinyl;
-      writeStore(VINYL_KEY, vinyl);
-      syncToggles();
-    });
+    el.vinylBtn.addEventListener('click', toggleVinyl);
+    // 封面本身就是最直观的切换入口：点一下在封套与黑胶之间切换。
+    if (el.artWrap) {
+      el.artWrap.addEventListener('click', toggleVinyl);
+      el.artWrap.addEventListener('keydown', function (event) {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        toggleVinyl();
+      });
+    }
     el.translateBtn.addEventListener('click', function () {
       if (el.translateBtn.disabled) return;
       translate = !translate;
@@ -376,7 +406,12 @@
     el.modeBtn.addEventListener('click', function () {
       var node = $('mode');
       if (node) node.click();
-      setTimeout(function () { var n = $('mode'); if (n) text(el.modeBtn, n.textContent); }, 0);
+      setTimeout(function () {
+        var n = $('mode');
+        if (!n) return;
+        text(el.modeLabel, n.textContent || '列表循环');
+        if (el.modeIcon) el.modeIcon.setAttribute('href', (n.textContent || '').indexOf('随机') >= 0 ? '#i-shuffle' : '#i-repeat');
+      }, 0);
     });
     el.heartBtn.addEventListener('click', function () {
       var node = $('bar-favorite');
@@ -459,10 +494,21 @@
       var node = event.target && event.target.closest ? event.target.closest('#home-immersive, #lr-open-entry') : null;
       if (!node) return;
       event.preventDefault();
+      // 首页按钮与原型一致：进入沉浸歌词舞台（沉浸声场），而不是阅读歌词。
+      if (node.id === 'home-immersive') {
+        var stageEntry = $('stage3d-entry');
+        if (stageEntry) stageEntry.click();
+        return;
+      }
       openReader();
     });
 
     document.addEventListener('keydown', onKeydown, true);
+    global.addEventListener('resize', function () {
+      if (!open) return;
+      lastScrollIndex = -1;
+      centerActive(true);
+    });
     document.addEventListener('stage:playing-changed', function () {
       if (open) paint(true);
     });
@@ -484,6 +530,7 @@
       translateBtn: $('lr-translate'),
       tech: $('lr-tech'),
       techText: $('lr-tech-text'),
+      artWrap: document.querySelector('.lr-art-wrap'),
       art: $('lr-art'),
       artEmpty: $('lr-art-empty'),
       ambient: $('lr-ambient'),
@@ -500,6 +547,8 @@
       duration: $('lr-duration'),
       seekRange: $('lr-seek'),
       modeBtn: $('lr-mode'),
+      modeLabel: $('lr-mode-label'),
+      modeIcon: $('lr-mode-icon'),
       prevBtn: $('lr-prev'),
       playBtn: $('lr-play'),
       nextBtn: $('lr-next'),

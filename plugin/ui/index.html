@@ -339,6 +339,10 @@
     <path d="M3 6h12M3 12h7M3 18h12"/>
     <path d="M17 10v8M13.5 14.5L17 18l3.5-3.5"/>
   </symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11 3.5l1.6 4.3 4.3 1.6-4.3 1.6L11 15.3 9.4 11 5.1 9.4l4.3-1.6Z"/>
+    <path d="M18.5 14.5l.9 2.3 2.3.9-2.3.9-.9 2.3-.9-2.3-2.3-.9 2.3-.9Z"/>
+  </symbol>
   <symbol id="i-skip-next" viewBox="0 0 24 24" fill="currentColor">
     <path d="M7 4h3v16H7zM11.5 12l6 4V8z"/>
   </symbol>
@@ -605,9 +609,9 @@
                 </div>
               </div>
               <div class="home-hero-actions">
-                <button class="home-immersive" id="home-immersive" type="button">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lyrics"/></svg>
-                  <span>沉浸歌词</span>
+                <button class="home-immersive" id="home-immersive" type="button" title="进入沉浸歌词舞台（沉浸声场）">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sparkles"/></svg>
+                  <span>进入沉浸歌词舞台</span>
                 </button>
               </div>
             </div>
@@ -1086,15 +1090,16 @@
     <!-- 每日推荐：一级目的地。菜单项是 daily-view.js 按配置注入的，
          这里只提供页面容器。刷新、列表/卡片排布都在模块里。 -->
     <div class="view" id="view-daily" hidden>
-      <div class="col-head">
-        <div class="col-head-left">
-          <h1 class="col-title">每日推荐</h1>
-          <span class="col-sub" id="dv-sub">—</span>
+      <div class="col-head dv-hero">
+        <div class="col-head-left dv-hero-copy">
+          <span class="dv-kicker">每日推荐 · 多音源智能聚合</span>
+          <h1 class="col-title dv-date" id="dv-date">—</h1>
+          <p class="dv-desc" id="dv-sub">—</p>
         </div>
         <div class="col-tools">
           <div class="dv-modes" id="dv-modes" role="group" aria-label="推荐来源">
-            <button class="chip active" type="button" data-dv-mode="online" aria-pressed="true">在线</button>
-            <button class="chip" type="button" data-dv-mode="local" aria-pressed="false">本地</button>
+            <button class="chip active" type="button" data-dv-mode="online" aria-pressed="true">在线 + 本地</button>
+            <button class="chip" type="button" data-dv-mode="local" aria-pressed="false">仅本地无损</button>
           </div>
           <div class="dv-layouts" id="dv-layouts" role="group" aria-label="展示方式">
             <button class="chip active" type="button" data-dv-layout="list" aria-pressed="true">列表</button>
@@ -1109,10 +1114,14 @@
 
     <!-- 收藏：歌曲 / 电台两个 tab，共用同一份列表渲染 -->
     <div class="view" id="view-favorites" hidden>
-      <div class="col-head">
-        <div class="col-head-left"><h1 class="col-title">我的收藏</h1><span class="count" id="fav-count">—</span></div>
+      <div class="col-head fav-head-line">
+        <div class="col-head-left">
+          <svg class="fav-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart"/></svg>
+          <h1 class="col-title">我喜欢的音乐</h1>
+          <span class="count" id="fav-count">—</span>
+        </div>
         <div class="col-tools">
-          <button id="fav-play-all" class="btn primary">播放本地收藏</button>
+          <button id="fav-play-all" class="btn primary">播放全部收藏</button>
           <button id="fav-refresh" class="btn" aria-label="刷新收藏">刷新</button>
         </div>
       </div>
@@ -2286,6 +2295,7 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-stop"/></svg>
     </button>
     <div class="bar-volume">
+      <svg class="bar-vol-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-volume"/></svg>
       <span class="hint">音量</span>
       <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
     </div>
@@ -2300,11 +2310,11 @@
   </div>
 
   <div class="bar-right">
-    <button id="bar-queue" class="ctrl" type="button" title="播放队列" aria-label="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button>
+    <button id="bar-queue" class="ctrl" type="button" title="播放队列" aria-label="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg><span class="bar-queue-count" id="bar-queue-count" hidden>0</span></button>
 <!-- form:desktop -->
     <button id="bar-desktop-settings" data-desktop-feature class="ctrl" type="button" title="桌面歌词设置" aria-label="桌面歌词设置" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
 <!-- form:end -->
-    <button id="bar-player-expand" class="ctrl" type="button" title="展开播放页" aria-label="展开播放页"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg></button>
+    <button id="bar-player-expand" class="ctrl" type="button" title="播放选项与均衡器" aria-label="播放选项与均衡器"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg></button>
     <button id="sleep-timer" class="btn-pill st-pill" title="睡眠定时器" aria-label="睡眠定时器" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>
       <span id="sleep-timer-label" class="st-label" hidden></span>
@@ -2355,7 +2365,7 @@
 
   <main class="lr-stage">
     <section class="lr-art-col" aria-label="当前曲目">
-      <div class="lr-art-wrap">
+      <div class="lr-art-wrap" role="button" tabindex="0" aria-label="艺术封套，点击切换黑胶唱盘" title="切换为黑胶唱盘">
         <img class="lr-art" id="lr-art" alt="当前专辑封面" hidden>
         <div class="lr-vinyl-disc" id="lr-vinyl-disc" aria-hidden="true" hidden>
           <span class="lr-grooves"></span>
@@ -2401,7 +2411,10 @@
     </div>
     <div class="lr-transport">
       <div class="lr-transport-left">
-        <button id="lr-mode" class="lr-mode" type="button" title="切换播放模式">列表循环</button>
+        <button id="lr-mode" class="lr-mode" type="button" title="切换播放模式">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use id="lr-mode-icon" href="#i-repeat"/></svg>
+          <span id="lr-mode-label">列表循环</span>
+        </button>
       </div>
       <div class="lr-controls">
         <button id="lr-prev" class="lr-ctrl" type="button" title="上一首" aria-label="上一首"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg></button>

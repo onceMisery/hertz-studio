@@ -54,6 +54,7 @@ const ui = {
 
   dvBody: $('dv-body'),
   dvSub: $('dv-sub'),
+  dvDate: $('dv-date'),
   dvRefresh: $('dv-refresh'),
   dvPlay: $('dv-play'),
   dvModes: $('dv-modes'),
@@ -225,6 +226,7 @@ const ui = {
   sleepTimerLabel: $('sleep-timer-label'),
   serviceExit: $('service-exit'),
   queueBadge: $('queue-badge'),
+  barQueueBadge: $('bar-queue-count'),
 
   setDevice: $('set-device'),
   setDensity: $('set-density'),
@@ -2705,6 +2707,7 @@ function applySnapshot(snap) {
   const capsuleLabel = snap.playing ? '正在播放' : '已暂停';
   if (ui.capsuleLabel.textContent !== capsuleLabel) ui.capsuleLabel.textContent = capsuleLabel;
   const modeLabel = state.modeLabel[snap.mode] || snap.mode;
+  if (ui.mode.dataset.mode !== snap.mode) ui.mode.dataset.mode = snap.mode;
   if (ui.mode.textContent !== modeLabel) ui.mode.textContent = modeLabel;
   // 标题只在真的变了才写：这行原先每帧赋一次值，而曲名一整个播放周期都不变。
   const nextTitle = state.current ? `${state.current.title} · hertz-studio` : 'hertz-studio';
@@ -4166,6 +4169,11 @@ function renderQueue() {
   ui.queueCount.textContent = `${list.length} 首`;
   ui.queueBadge.textContent = String(list.length);
   ui.queueBadge.hidden = list.length === 0;
+  if (ui.barQueueBadge) {
+    ui.barQueueBadge.textContent = String(list.length);
+    ui.barQueueBadge.hidden = list.length === 0;
+  }
+  document.dispatchEvent(new CustomEvent('queue:changed'));
   ui.queueList.innerHTML = '';
   if (!list.length) {
     ui.queueList.innerHTML = '<div class="hint">队列为空。点击曲目右侧的按钮可插入下一首。</div>';
@@ -7539,6 +7547,66 @@ function bindShortcuts() {
 const skinActions = {
   'open-player': () => {
     openNowPlaying();
+  },
+
+  'queue-move': (d) => {
+    const from = Number(d.index);
+    const delta = Number(d.delta) || 0;
+    const list = state.queue.slice();
+    const to = from + delta;
+    if (!Number.isInteger(from) || from < 0 || from >= list.length || to < 0 || to >= list.length) return;
+    const moved = list.splice(from, 1)[0];
+    list.splice(to, 0, moved);
+    return applyQueue(list, true);
+  },
+
+  'queue-remove': (d) => {
+    const index = Number(d.index);
+    const list = state.queue.slice();
+    if (!Number.isInteger(index) || index < 0 || index >= list.length) return;
+    list.splice(index, 1);
+    return applyQueue(list, true);
+  },
+
+  'queue-clear': () => {
+    const current = state.snapshot.track_id;
+    return applyQueue(current ? [current] : [], true);
+  },
+
+  'queue-shuffle': () => {
+    const list = state.queue.slice();
+    for (let i = list.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [list[i], list[j]] = [list[j], list[i]];
+    }
+    return applyQueue(list, true);
+  },
+
+  'history-request': (d) => {
+    const limit = Math.min(100, Math.max(1, Number(d.limit) || 40));
+    d.result = transport.get('/v1/history?limit=' + limit + '&offset=0').then(data => {
+      return ((data && data.items) || []).map((entry, index) => {
+        let cover = entry.cover_url || null;
+        if (!cover && entry.source === 'local' && state.byId.get(entry.track_id)?.has_cover) {
+          cover = transport.coverUrl(entry.track_id);
+        }
+        if (cover && window.Online && window.Online.safeCoverUrl) cover = window.Online.safeCoverUrl(cover);
+        return {
+          id: entry.track_id,
+          index,
+          title: entry.title || '未知曲目',
+          artist: entry.artist || '未知艺术家',
+          album: entry.album || '',
+          duration: Number(entry.duration_ms) || 0,
+          cover,
+          source: entry.source,
+        };
+      });
+    });
+  },
+
+  'play-history': (d) => {
+    if (d.id) playTrack(String(d.id));
   },
 
   'settings-enter': (d) => {

@@ -439,6 +439,12 @@
     if (!H || !H.ui) return;
     var ui = H.ui;
     if (ui.dvSub) ui.dvSub.textContent = subtitle();
+    if (ui.dvDate) {
+      var now = new Date();
+      ui.dvDate.textContent = now.getFullYear() + '-'
+        + String(now.getMonth() + 1).padStart(2, '0') + '-'
+        + String(now.getDate()).padStart(2, '0');
+    }
     if (ui.dvPlay) ui.dvPlay.disabled = !items().length;
     renderChips(ui.dvModes, 'data-dv-mode', st.mode);
     renderChips(ui.dvLayouts, 'data-dv-layout', st.layout);

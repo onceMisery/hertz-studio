@@ -6,6 +6,7 @@
   var homeEpoch = 0, homeBusy = false, homeAgain = false, homeRefreshTimer = 0, queueKey = '', queueLimit = 60;
   var featuredAlbums = [], featuredIndex = 0;
   var queueOpen = false, queueTrigger, lastView = '', pendingFrame = 0, menuKey = '', queueBackground = [];
+  var queueTab = 'upnext', historyCache = null, historyFailed = false, historyEpoch = 0;
   var sidebarOpen = false, sidebarCollapsed = false, sidebarBackground = [], sidebarGesture = null;
   var sidebarKey = 'vmusic.hertz.sidebar.v1';
   var libraryTab = 'songs', libraryEpoch = 0, libraryController, libraryOffset = 0, libraryTotal = 0, libraryBusy = false;
@@ -368,52 +369,178 @@
       refs.queuePane.setAttribute('role', 'dialog'); refs.queuePane.setAttribute('aria-modal', 'true');
       [refs.workspace, id('playback-bar'), refs.nav].forEach(function (node) { queueBackground.push({ node: node, inert: node.inert }); node.inert = true; });
     } else { refs.queuePane.removeAttribute('role'); refs.queuePane.removeAttribute('aria-modal'); }
-    if (queueOpen) { paintQueue(); refs.queueClose.focus({ preventScroll: true }); }
+    if (queueOpen) { queueKey = ''; paintQueue(); refs.queueClose.focus({ preventScroll: true }); }
     else if (queueTrigger && document.contains(queueTrigger)) { queueTrigger.focus({ preventScroll: true }); queueTrigger = null; }
   }
+
+  function queueRow(item, onActivate) {
+    var row = document.createElement('div');
+    row.className = 'hz-queue-row' + (item.current ? ' is-current' : '');
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.dataset.index = item.index;
+    if (item.current) row.setAttribute('aria-current', 'true');
+    var indexCell = text('span', 'hz-queue-index', '', row);
+    if (item.current) {
+      indexCell.classList.add('is-current');
+      indexCell.setAttribute('aria-label', '正在播放');
+      for (var b = 0; b < 3; b += 1) make('i', 'hz-queue-eq-bar' + (item.playing ? ' is-playing' : ''), indexCell);
+    } else {
+      indexCell.textContent = String((item.index || 0) + 1);
+    }
+    art(row, item.cover, 'hz-queue-art');
+    var meta = text('span', 'hz-queue-meta', '', row);
+    text('strong', '', item.title, meta); text('small', '', item.artist, meta);
+    var sec = Math.floor((item.duration || 0) / 1000);
+    text('time', '', sec ? Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0') : '', row);
+    row.addEventListener('click', onActivate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault(); onActivate();
+    });
+    return row;
+  }
+
   function paintQueue(nextFocus) {
     if (!mounted || !queueOpen) return;
     var queue = window.Skins.request('queue-request').queue || [];
-    var key = JSON.stringify([queue.length, queue.slice(0, queueLimit).map(function (item) { return [item.id, item.index, item.title, item.artist, item.cover, item.duration, item.current]; })]);
-    refs.queueCount.textContent = queue.length + ' 首歌曲';
+    refs.queueCount.textContent = String(queue.length);
+    refs.queueTabUp.textContent = '即将播放 (' + queue.length + ')';
+    refs.queueTabUp.classList.toggle('is-active', queueTab === 'upnext');
+    refs.queueTabUp.setAttribute('aria-pressed', String(queueTab === 'upnext'));
+    refs.queueTabHistory.classList.toggle('is-active', queueTab === 'history');
+    refs.queueTabHistory.setAttribute('aria-pressed', String(queueTab === 'history'));
+    paintQueueNow(queue.find(function (item) { return item.current; }));
+    refs.queueFootCount.textContent = queue.length ? '共 ' + queue.length + ' 首' : '队列为空';
+    if (queueTab === 'history') { paintQueueHistory(nextFocus); return; }
+
+    var key = 'upnext|' + JSON.stringify([queue.length, queue.slice(0, queueLimit).map(function (item) { return [item.id, item.index, item.title, item.artist, item.cover, item.duration, item.current]; })]);
     if (key === queueKey) return; queueKey = key;
     var active = document.activeElement, hadFocus = refs.queueList.contains(active);
-    var focused = hadFocus && active.hasAttribute('data-index') ? Number(active.dataset.index) : null;
-    var focusedMore = hadFocus && active.classList.contains('hz-queue-more');
     refs.queueList.replaceChildren();
-    if (!queue.length) notice(refs.queueList, '队列还是空的，从喜欢的音乐开始');
+    if (!queue.length) {
+      var empty = make('div', 'hz-queue-empty', refs.queueList);
+      make('span', 'hz-queue-empty-icon', empty).innerHTML = icon('queue');
+      text('strong', '', '播放队列为空', empty);
+      text('p', '', '从曲库挑一首歌，或把喜欢的曲目加入队列。', empty);
+      var browse = button(empty, 'hz-queue-empty-action', '去曲库挑歌', 'library', function () { setQueue(false); navigate('library'); });
+      browse.textContent = '去曲库挑歌';
+      return;
+    }
     queue.slice(0, queueLimit).forEach(function (item) {
-      var row = document.createElement('button'); row.type = 'button'; row.className = 'hz-queue-row'; row.dataset.index = item.index;
-      if (item.current) row.setAttribute('aria-current', 'true');
-      art(row, item.cover, 'hz-queue-art');
-      var meta = text('span', 'hz-queue-meta', '', row); text('strong', '', item.title, meta); text('small', '', item.artist, meta);
-      var sec = Math.floor((item.duration || 0) / 1000);
-      text('time', '', sec ? Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0') : '', row);
-      row.onclick = function () { window.Skins.request('play-index', { index: item.index }); };
+      var row = queueRow(item, function () { window.Skins.request('play-index', { index: item.index }); });
+      if (!item.current) {
+        var actions = make('span', 'hz-queue-row-actions', row);
+        var up = make('button', 'hz-queue-act', actions); up.type = 'button'; up.title = '上移'; up.setAttribute('aria-label', '上移'); up.innerHTML = icon('chevron-down'); up.style.transform = 'rotate(180deg)';
+        up.disabled = item.index === 0;
+        up.addEventListener('click', function (event) { event.stopPropagation(); window.Skins.request('queue-move', { index: item.index, delta: -1 }); });
+        var down = make('button', 'hz-queue-act', actions); down.type = 'button'; down.title = '下移'; down.setAttribute('aria-label', '下移'); down.innerHTML = icon('chevron-down');
+        down.disabled = item.index === queue.length - 1;
+        down.addEventListener('click', function (event) { event.stopPropagation(); window.Skins.request('queue-move', { index: item.index, delta: 1 }); });
+        var remove = make('button', 'hz-queue-act hz-queue-act-danger', actions); remove.type = 'button'; remove.title = '移除'; remove.setAttribute('aria-label', '移除');
+        remove.innerHTML = icon('trash');
+        remove.addEventListener('click', function (event) {
+          event.stopPropagation();
+          window.Skins.request('queue-remove', { index: item.index });
+        });
+      }
       refs.queueList.appendChild(row);
     });
     if (queue.length > queueLimit) {
       var more = text('button', 'btn hz-queue-more', '加载更多歌曲', refs.queueList); more.type = 'button';
       more.onclick = function () { var firstAdded = queueLimit; queueLimit += 60; queueKey = ''; paintQueue(firstAdded); };
     }
-    if (Number.isInteger(nextFocus) || focused !== null || focusedMore) {
-      var at = Number.isInteger(nextFocus) ? nextFocus : focused;
+    if (hadFocus) {
       var rows = refs.queueList.querySelectorAll('[data-index]');
-      var target = at !== null ? refs.queueList.querySelector('[data-index="' + at + '"]') : refs.queueList.querySelector('.hz-queue-more');
-      if (!target) target = rows[Math.min(Math.max(0, at || 0), rows.length - 1)] || refs.queueClose;
-      target.focus({ preventScroll: !Number.isInteger(nextFocus) });
+      var at = Number.isInteger(nextFocus) ? nextFocus : Number(active && active.dataset ? active.dataset.index : 0);
+      var target = rows[Math.min(Math.max(0, at || 0), rows.length - 1)];
+      if (target) target.focus({ preventScroll: !Number.isInteger(nextFocus) });
     }
   }
+
+  function paintQueueNow(current) {
+    refs.queueNow.replaceChildren();
+    if (!current) { refs.queueNow.hidden = true; return; }
+    refs.queueNow.hidden = false;
+    text('p', 'hz-queue-now-label', '正在播放', refs.queueNow);
+    var card = make('div', 'hz-queue-now-card', refs.queueNow);
+    art(card, current.cover, 'hz-queue-now-art');
+    var copy = make('div', 'hz-queue-now-copy', card);
+    text('strong', '', current.title, copy);
+    text('small', '', current.artist, copy);
+    var eq = make('span', 'hz-queue-eq', card);
+    for (var i = 0; i < 3; i += 1) make('i', 'hz-queue-eq-bar' + (current.playing ? ' is-playing' : ''), eq);
+    card.addEventListener('click', function () {
+      if (window.HertzPlayback && window.HertzPlayback.toggle) window.HertzPlayback.toggle();
+    });
+  }
+
+  function paintQueueHistory(nextFocus) {
+    var rows = historyCache;
+    if (!rows) {
+      refs.queueList.replaceChildren();
+      text('p', 'hz-empty-note', historyFailed ? '最近播放暂时无法读取' : '正在读取最近播放…', refs.queueList);
+      if (historyFailed) {
+        var retry = text('button', 'btn', '重试', refs.queueList); retry.type = 'button';
+        retry.onclick = function () { historyFailed = false; historyCache = null; historyKey = ''; loadQueueHistory(); };
+      }
+      return;
+    }
+    var key = 'history|' + (rows.length ? rows.map(function (item) { return item.id + item.index; }).join('|') : 'empty');
+    if (key === queueKey) return; queueKey = key;
+    refs.queueList.replaceChildren();
+    if (!rows.length) { text('p', 'hz-empty-note', '还没有最近播放记录', refs.queueList); return; }
+    rows.forEach(function (item) {
+      var row = queueRow(item, function () { window.Skins.request('play-history', { id: item.id }); });
+      refs.queueList.appendChild(row);
+    });
+  }
+
+  function loadQueueHistory() {
+    var epoch = ++historyEpoch;
+    var task = window.Skins.request('history-request', { limit: 40 }).result;
+    Promise.resolve(task).then(function (rows) {
+      if (epoch !== historyEpoch) return;
+      historyCache = rows || []; historyFailed = false; queueKey = '';
+      if (queueOpen && queueTab === 'history') paintQueue();
+    }, function () {
+      if (epoch !== historyEpoch) return;
+      historyFailed = true; queueKey = '';
+      if (queueOpen && queueTab === 'history') paintQueue();
+    });
+  }
+
   function mountQueue(app) {
     refs.queueScrim = button(document.body, 'hz-queue-scrim', '收起队列', '', function () { setQueue(false); }); refs.queueScrim.hidden = true;
     refs.queueScrim.tabIndex = -1; refs.queueScrim.setAttribute('aria-hidden', 'true');
     refs.queuePane = make('aside', 'hz-queue-pane', app); refs.queuePane.hidden = true; refs.queuePane.id = 'hz-queue-pane';
-    refs.queuePane.setAttribute('aria-label', '接下来播放');
-    var head = make('header', 'hz-queue-head', refs.queuePane), title = make('div', '', head);
-    make('h2', '', title, '接下来播放'); refs.queueCount = make('p', '', title);
-    refs.queueClose = button(head, 'hz-icon', '收起队列', 'close', function () { setQueue(false); });
+    refs.queuePane.setAttribute('aria-label', '播放队列');
+    var head = make('header', 'hz-queue-head', refs.queuePane);
+    var title = make('div', 'hz-queue-title', head);
+    make('span', 'hz-queue-title-icon', title).innerHTML = icon('queue');
+    make('h2', '', title, '播放队列');
+    refs.queueCount = make('span', 'hz-queue-count', title, '0');
+    var actions = make('div', 'hz-queue-actions', head);
+    var shuffle = button(actions, 'hz-icon', '随机打乱队列', 'shuffle', function () { window.Skins.request('queue-shuffle'); });
+    var clear = button(actions, 'hz-icon hz-queue-action-danger', '清空播放队列', 'trash', function () { window.Skins.request('queue-clear'); });
+    refs.queueClose = button(actions, 'hz-icon', '收起队列', 'close', function () { setQueue(false); });
+    var tabs = make('div', 'hz-queue-tabs', refs.queuePane);
+    refs.queueTabUp = button(tabs, 'hz-queue-tab is-active', '即将播放', '', function () {
+      if (queueTab === 'upnext') return;
+      queueTab = 'upnext'; queueKey = ''; paintQueue();
+    }); refs.queueTabUp.setAttribute('aria-pressed', 'true');
+    refs.queueTabHistory = button(tabs, 'hz-queue-tab', '最近听过', '', function () {
+      if (queueTab === 'history') return;
+      queueTab = 'history'; queueKey = ''; paintQueue();
+      if (!historyCache) loadQueueHistory();
+    }); refs.queueTabHistory.setAttribute('aria-pressed', 'false'); refs.queueTabHistory.textContent = '最近听过';
+    refs.queueNow = make('div', 'hz-queue-now', refs.queuePane);
     refs.queueList = make('div', 'hz-queue-list', refs.queuePane);
-    var manage = button(refs.queuePane, 'hz-text-link hz-queue-manage', '管理播放队列', '', function () { navigate('queue'); }); manage.textContent = '管理队列 · 排序、移除与保存';
+    var foot = make('footer', 'hz-queue-foot', refs.queuePane);
+    var manage = button(foot, 'hz-queue-manage', '管理播放队列', '', function () { setQueue(false); navigate('queue'); });
+    manage.textContent = '管理队列';
+    refs.queueFootCount = make('span', 'hz-queue-foot-count', foot, '');
+    cleanup.push(function () { historyEpoch += 1; });
   }
   function closeMenu() {
     if (refs.menu && refs.menu.open) refs.menu.close();
@@ -421,12 +548,22 @@
   }
   function syncSidebar() {
     sidebarBackground.forEach(function (saved) { saved.node.inert = saved.inert; }); sidebarBackground = [];
-    var expanded = mobile.matches ? sidebarOpen : !sidebarCollapsed;
-    document.body.classList.toggle('hz-sidebar-hidden', !mobile.matches && sidebarCollapsed);
+    var compact = !mobile.matches && sidebarCollapsed;
+    var expanded = mobile.matches ? sidebarOpen : true;
+    document.body.classList.toggle('hz-sidebar-compact', compact);
+    document.body.classList.remove('hz-sidebar-hidden');
     document.body.classList.toggle('hz-sidebar-open', mobile.matches && sidebarOpen);
     refs.rail.inert = !expanded; refs.rail.setAttribute('aria-hidden', String(!expanded));
-    refs.sidebarToggle.setAttribute('aria-expanded', String(expanded));
-    refs.sidebarToggle.title = expanded ? '收起导航菜单' : '展开导航菜单'; refs.sidebarToggle.setAttribute('aria-label', refs.sidebarToggle.title);
+    refs.sidebarToggle.setAttribute('aria-expanded', String(mobile.matches ? sidebarOpen : !sidebarCollapsed));
+    refs.sidebarToggle.title = mobile.matches
+      ? (sidebarOpen ? '关闭导航菜单' : '展开导航菜单')
+      : (sidebarCollapsed ? '展开导航菜单' : '收起导航菜单');
+    refs.sidebarToggle.setAttribute('aria-label', refs.sidebarToggle.title);
+    // 图标窄栏里只剩图标：用原生 title 补回每个入口的名字。
+    Array.from(refs.rail.querySelectorAll('.rail-item[data-view]')).forEach(function (entry) {
+      if (compact) entry.title = entry.getAttribute('aria-label') || '';
+      else entry.removeAttribute('title');
+    });
     if (mobile.matches && sidebarOpen) {
       refs.rail.setAttribute('role', 'dialog'); refs.rail.setAttribute('aria-modal', 'true'); refs.rail.setAttribute('aria-label', '导航菜单');
       [refs.workspace, id('playback-bar'), refs.nav].forEach(function (node) { sidebarBackground.push({ node: node, inert: node.inert }); node.inert = true; });
@@ -673,6 +810,11 @@
     });
     function syncPlaying() { document.body.dataset.hzPlaying = String(window.Stage && window.Stage.presentation().playing); paintQueue(); }
     listen(document, 'stage:playing-changed', syncPlaying); syncPlaying();
+    listen(document, 'queue:changed', function () {
+      if (!queueOpen) return;
+      queueKey = '';
+      paintQueue();
+    });
     listen(document, 'nav:changed', scheduleSync);
     listen(document, 'keydown', function (event) {
       if (queueOpen && !document.body.classList.contains('np-expanded') && event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); setQueue(false); }
@@ -707,10 +849,11 @@
     cleanup.splice(0).forEach(function (fn) { fn(); });
     if (window.HertzCoverWall) window.HertzCoverWall.unmount();
     layout.restore(); window.HertzShell.releaseLayout('hertz'); built.remove();
-    document.body.classList.remove('hz-queue-open', 'hz-sidebar-hidden', 'hz-sidebar-open'); delete document.body.dataset.hzView;
+    document.body.classList.remove('hz-queue-open', 'hz-sidebar-hidden', 'hz-sidebar-open', 'hz-sidebar-compact'); delete document.body.dataset.hzView;
     ['hzAnimated', 'hzWordSync', 'hzLyricSize', 'hzPlaying'].forEach(function (key) { delete document.body.dataset[key]; });
     document.documentElement.style.removeProperty('--hz-ambient-opacity'); id('view-library').removeAttribute('data-hz-library-tab'); id('view-library').removeAttribute('data-hz-library-detail');
     refs = {}; queueKey = ''; lastView = ''; menuKey = ''; libraryTab = 'songs'; libraryDetail = null; sidebarOpen = false; sidebarGesture = null; featuredAlbums = []; featuredIndex = 0;
+    queueTab = 'upnext'; historyCache = null; historyFailed = false; historyEpoch += 1;
   }
   window.HertzSkin = { refreshHome: refreshHome, openQueue: function () { setQueue(true); }, selectSettings: function (category) { if (mounted && refs.settingsNav) selectSettings(category); } };
   window.Skins.registerLifecycle('hertz', { mount: mount, unmount: unmount });
