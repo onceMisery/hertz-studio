@@ -105,6 +105,8 @@ ui_assets! {
     "/perf-probe.js", JS => const PERF_PROBE_JS: &str = edition_ui!("perf-probe.js");
     "/home-dashboard.js", JS => const HOME_DASHBOARD_JS: &str = edition_ui!("home-dashboard.js");
     "/home-dashboard.css", CSS => const HOME_DASHBOARD_CSS: &str = edition_ui!("home-dashboard.css");
+    "/lyric-reader.js", JS => const LYRIC_READER_JS: &str = edition_ui!("lyric-reader.js");
+    "/lyric-reader.css", CSS => const LYRIC_READER_CSS: &str = edition_ui!("lyric-reader.css");
     "/home-quote.js", JS => const HOME_QUOTE_JS: &str = edition_ui!("home-quote.js");
     "/creative-contract.js", JS => const CREATIVE_CONTRACT_JS: &str = edition_ui!("creative-contract.js");
     "/creative-draft.js", JS => const CREATIVE_DRAFT_JS: &str = edition_ui!("creative-draft.js");

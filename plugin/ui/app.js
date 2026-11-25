@@ -10994,6 +10994,20 @@ async function startApp() {
   initBarVisibility();
   initSkinBridge();
 
+  // 沉浸歌词阅读模式的播放桥：切换/切歌/跳转/音量全部复用主播放栏的既有函数，
+  // 阅读层只读 Stage 的快照，不再维护第二套播放状态。
+  window.HertzPlayback = {
+    toggle: togglePlay,
+    seek: seekTo,
+    previous: () => post('/v1/player/previous'),
+    next: () => post('/v1/player/next'),
+    setVolume: (value) => {
+      ui.volume.value = String(Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100));
+      return setVolumeFromInput();
+    },
+    mode: () => ui.mode.click(),
+  };
+
   bindMediaSession();
 
   // 启动落在默认视图（在线曲库）—— 见 defaultView() 上方的边界说明：

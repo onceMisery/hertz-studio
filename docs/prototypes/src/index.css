@@ -1,0 +1,138 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+    --font-display: 'Instrument Serif', 'Noto Serif SC', Georgia, serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+.font-display-serif {
+  font-family: var(--font-display);
+}
+
+.font-mono-tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom sleek desktop scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.2);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.4);
+}
+
+/* Accessible Focus Rings */
+.focus-ring:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #6366F1 !important;
+  outline-offset: 2px !important;
+}
+
+/* Equalizer playing animation */
+@keyframes eq-bar-1 {
+  0%, 100% { height: 25%; }
+  50% { height: 95%; }
+}
+@keyframes eq-bar-2 {
+  0%, 100% { height: 85%; }
+  33% { height: 30%; }
+  66% { height: 100%; }
+}
+@keyframes eq-bar-3 {
+  0%, 100% { height: 45%; }
+  40% { height: 90%; }
+  80% { height: 20%; }
+}
+@keyframes eq-bar-4 {
+  0%, 100% { height: 70%; }
+  25% { height: 25%; }
+  75% { height: 95%; }
+}
+
+.animate-eq-1 {
+  animation: eq-bar-1 0.8s ease-in-out infinite;
+}
+.animate-eq-2 {
+  animation: eq-bar-2 0.7s ease-in-out infinite;
+}
+.animate-eq-3 {
+  animation: eq-bar-3 0.9s ease-in-out infinite;
+}
+.animate-eq-4 {
+  animation: eq-bar-4 0.75s ease-in-out infinite;
+}
+
+/* Ambient slow drift */
+@keyframes ambient-drift {
+  0%, 100% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  33% {
+    transform: translate(24px, -18px) scale(1.06);
+  }
+  66% {
+    transform: translate(-18px, 16px) scale(0.96);
+  }
+}
+
+.animate-ambient-drift {
+  animation: ambient-drift 16s ease-in-out infinite;
+}
+
+/* Slow vinyl spin */
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 24s linear infinite;
+}
+
+/* Radar pulse for Listen Together */
+@keyframes radar-ping {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+  70% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+.animate-radar {
+  animation: radar-ping 3s cubic-bezier(0, 0, 0.2, 1) infinite;
+}

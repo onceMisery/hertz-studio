@@ -7,10 +7,15 @@
 
   function present(snapshot) {
     var track = snapshot.current;
-    if (track) return { action: snapshot.playing ? 'queue' : 'resume', track: track,
-      label: snapshot.playing ? '查看队列' : '继续播放',
-      status: snapshot.playing ? '正在播放' : '接着上次的位置听', title: track.title || '当前曲目',
-      detail: track.artist || '当前播放队列' };
+    if (track) {
+      // 主标题只放曲名；歌手与专辑归到下方元信息行，形成原型里的
+      // 「大标题 + 一行元信息」字阶，而不是把三者挤在同一行。
+      var meta = [track.artist, track.album].filter(Boolean).join(' · ');
+      return { action: snapshot.playing ? 'queue' : 'resume', track: track,
+        label: snapshot.playing ? '查看队列' : '继续播放',
+        status: snapshot.playing ? '正在播放' : '接着上次的位置听', title: track.title || '当前曲目',
+        detail: meta || '当前播放队列' };
+    }
     if (snapshot.queueLength) return { action: 'queue', label: '查看队列', status: '播放队列已保留',
       title: '选一首，继续听', detail: snapshot.queueLength + ' 首歌曲在队列中' };
     if (recent && recentIntent === snapshot.intent) return { action: 'recent', track: recent,
@@ -56,8 +61,8 @@
     if (model.track) {
       if (el.track) {
         el.track.hidden = false;
+        // 标题行只放曲名，歌手/专辑交给下方 .home-detail 的元信息行。
         var line = model.track.title || '当前曲目';
-        if (model.track.artist) line += ' - ' + model.track.artist;
         text(el.track, line);
       }
     } else if (el.track) {

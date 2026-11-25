@@ -763,3 +763,161 @@ html[data-skin="hertz"] [data-hz-scrolling], html[data-skin="hertz"][data-hz-scr
 }
 html[data-skin="hertz"] :is(#np-lyric-scroll, .hz-library-tabs, .hz-settings-nav, .ws-tabs) { scrollbar-width: none !important; }
 html[data-skin="hertz"] :is(#np-lyric-scroll, .hz-library-tabs, .hz-settings-nav, .ws-tabs)::-webkit-scrollbar { display: none; }
+
+/* ---------------------------------------------------------------------------
+   原型字阶与细节打磨（2026-11）
+   仅调整排版层级、留白与交互反馈：布局骨架、DOM 与业务选择器不动。
+   --------------------------------------------------------------------------- */
+
+html[data-skin="hertz"] {
+  /* 中文衬线引言：优先思源宋体/宋体，缺字体时退回 Georgia 系列。 */
+  --hz-serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STSong", "SimSun", Georgia, "Times New Roman", serif;
+}
+
+/* 首页 Hero：大封面 + 独立标题/元信息行，右侧留给引言。
+   只改列宽与间距；align-items 沿用上面两条（桌面居中、窄屏拉伸），
+   否则窄屏下封面会缩成 0 宽并居中消失。 */
+html[data-skin="hertz"] .home-primary {
+  grid-template-columns: minmax(200px, 288px) minmax(0, 1fr);
+  gap: clamp(32px, 4.2vw, 64px);
+}
+html[data-skin="hertz"] .home-art-wrap {
+  border-radius: 20px;
+  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.38);
+}
+html[data-skin="hertz"] .home-headline { gap: 10px; }
+html[data-skin="hertz"] .home-status {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; letter-spacing: 0.01em;
+}
+html[data-skin="hertz"] .home-status::before {
+  content: "";
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 18%, transparent);
+}
+html[data-skin="hertz"] .home-track {
+  font: 600 clamp(28px, 2.6vw, 38px)/1.22 var(--hz-heading);
+  letter-spacing: -0.8px;
+}
+html[data-skin="hertz"] .home-detail {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+html[data-skin="hertz"] .home-quote { margin-top: 26px; }
+html[data-skin="hertz"] .home-quote-text {
+  font-family: var(--hz-serif);
+  font-size: clamp(19px, 1.8vw, 25px);
+  line-height: 1.78;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--text) 90%, transparent);
+}
+html[data-skin="hertz"] .home-quote-from {
+  font-size: 0.64em;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+html[data-skin="hertz"] .home-quote-actions { margin-top: 16px; gap: 12px; }
+html[data-skin="hertz"] .home-quote-btn { padding: 5px 14px; font-size: 12px; }
+html[data-skin="hertz"] .home-quote-count { font-size: 12px; }
+
+/* Hero 里的沉浸歌词入口：与「换一条」同一枚胶囊语言。 */
+.home-hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.home-immersive {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 34px; padding: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+  font: 500 12px/1 var(--hz-sans);
+  cursor: pointer;
+  transition: background-color 180ms var(--ease), border-color 180ms var(--ease), transform 180ms var(--ease);
+}
+.home-immersive:hover {
+  background: color-mix(in srgb, var(--text) 11%, transparent);
+  border-color: color-mix(in srgb, var(--text) 24%, transparent);
+  transform: translateY(-1px);
+}
+.home-immersive:active { transform: translateY(0) scale(0.98); }
+.home-immersive svg { width: 15px; height: 15px; color: var(--accent-2); }
+
+/* 快捷入口卡：描边图标 + 轻抬升，避免填充图标糊成实心块。 */
+html[data-skin="hertz"] .home-links { gap: 10px; margin-top: 16px; }
+html[data-skin="hertz"] .home-link {
+  padding: 15px 16px;
+  gap: 14px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text) 4.5%, transparent);
+  transition: background-color 180ms var(--ease), border-color 180ms var(--ease), transform 180ms var(--ease);
+}
+html[data-skin="hertz"] .home-link:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  border-color: color-mix(in srgb, var(--text) 10%, transparent);
+  transform: translateY(-1px);
+}
+html[data-skin="hertz"] .home-link > svg {
+  width: 19px; height: 19px;
+  fill: none;
+  stroke: currentColor;
+  color: var(--muted);
+  opacity: 0.8;
+}
+html[data-skin="hertz"] .home-link:hover > svg { color: var(--text); opacity: 1; }
+html[data-skin="hertz"] .home-link strong { font-size: 13.5px; font-weight: 500; }
+html[data-skin="hertz"] .home-link small { margin-top: 3px; font-size: 11.5px; }
+
+/* 分区标题：中文不加大字距，保持原型的安静层级。 */
+html[data-skin="hertz"] .hz-section-head { margin-bottom: 16px; }
+html[data-skin="hertz"] .hz-section-head h2 {
+  font: 500 14px/1.5 var(--hz-sans);
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+html[data-skin="hertz"] .hz-text-link { font-size: 12px; }
+
+/* 导航徽标：队列/收藏的计数收成右侧胶囊，而不是压在图标右上角。 */
+html[data-skin="hertz"] .rail-item .rail-badge {
+  position: static;
+  margin-left: auto;
+  min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 11%, transparent);
+  color: var(--text);
+  font-size: 10.5px; font-weight: 500;
+}
+html[data-skin="hertz"] .rail-item[data-view="favorites"] .rail-badge {
+  background: color-mix(in srgb, #ff4d6d 20%, transparent);
+  color: #ff8fa3;
+}
+html[data-skin="hertz"] .rail-item .rail-badge[hidden] { display: none; }
+
+/* 播放栏：标题加粗、子行压低，播放栏里的歌词入口点亮。 */
+html[data-skin="hertz"] #bar-title { font-size: 14px; font-weight: 600; letter-spacing: -0.1px; }
+html[data-skin="hertz"] #bar-sub { color: var(--muted); }
+html[data-skin="hertz"] .bar-summary #bar-track { cursor: pointer; }
+html[data-skin="hertz"] .hz-lyrics-button {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
+}
+html[data-skin="hertz"] .hz-lyrics-button:hover {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 20%, transparent);
+}
+html[data-skin="hertz"] .hz-lyrics-button svg { width: 19px; height: 19px; }
+
+/* 顶栏搜索与主内容留白：更接近原型的一档。 */
+html[data-skin="hertz"] .topsearch { max-width: 500px; }
+
+@media (max-width: 899px) {
+  html[data-skin="hertz"] .home-primary { gap: 24px; }
+  html[data-skin="hertz"] .home-track { font-size: clamp(26px, 7vw, 32px); }
+  html[data-skin="hertz"] .home-quote-text { font-size: 18px; }
+  .home-hero-actions { margin-top: 14px; }
+}
+

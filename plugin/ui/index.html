@@ -55,6 +55,7 @@
 <link rel="stylesheet" href="podcasts.css">
 <link rel="stylesheet" href="reader.css">
 <link rel="stylesheet" href="home-dashboard.css">
+<link rel="stylesheet" href="lyric-reader.css">
 <link rel="stylesheet" href="room.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
@@ -602,6 +603,12 @@
                     <span class="home-quote-count" id="home-quote-count"></span>
                   </div>
                 </div>
+              </div>
+              <div class="home-hero-actions">
+                <button class="home-immersive" id="home-immersive" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lyrics"/></svg>
+                  <span>沉浸歌词</span>
+                </button>
               </div>
             </div>
           </div>
@@ -2316,6 +2323,105 @@
   <span>展开播放栏</span>
 </button>
 
+<!-- 沉浸歌词 · 双栏阅读模式：封套/黑胶 + 同步歌词 + 底部控制。
+     它是三维舞台之外的另一条只读呈现层（见 lyric-reader.js），播放与
+     跳转全部复用主播放栏的既有链路，不另起一套时钟。 -->
+<div class="lr" id="lyric-reader" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="lr-title">
+  <div class="lr-ambient" id="lr-ambient" aria-hidden="true">
+    <img id="lr-ambient-art" alt="">
+    <i class="lr-orb-a"></i><i class="lr-orb-b"></i>
+  </div>
+
+  <header class="lr-head">
+    <div class="lr-head-left">
+      <button id="lr-close" class="lr-pill" type="button" aria-label="返回日常视图">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        <span>返回日常视图</span>
+        <kbd>Esc</kbd>
+      </button>
+      <span class="lr-tech" id="lr-tech" hidden><i aria-hidden="true"></i><span id="lr-tech-text"></span></span>
+    </div>
+    <div class="lr-head-right">
+      <button id="lr-vinyl" class="lr-pill lr-toggle" type="button" aria-pressed="false" title="切换封套与黑胶">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg>
+        <span id="lr-vinyl-label">艺术封套</span>
+      </button>
+      <button id="lr-translate" class="lr-pill lr-toggle" type="button" aria-pressed="true" title="显示或隐藏歌词翻译">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg>
+        <span>双语注释</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="lr-stage">
+    <section class="lr-art-col" aria-label="当前曲目">
+      <div class="lr-art-wrap">
+        <img class="lr-art" id="lr-art" alt="当前专辑封面" hidden>
+        <div class="lr-vinyl-disc" id="lr-vinyl-disc" aria-hidden="true" hidden>
+          <span class="lr-grooves"></span>
+          <div class="lr-vinyl-label"><img id="lr-vinyl-art" alt=""></div>
+          <span class="lr-vinyl-hole"></span>
+        </div>
+        <div class="lr-art-empty" id="lr-art-empty">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg>
+          <span>暂无封面</span>
+        </div>
+      </div>
+      <div class="lr-meta">
+        <div class="lr-title-row">
+          <h1 class="lr-title" id="lr-title">未在播放</h1>
+          <button id="lr-favorite" class="lr-heart" type="button" aria-label="收藏当前歌曲" aria-pressed="false" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart-outline"/></svg>
+          </button>
+        </div>
+        <p class="lr-sub" id="lr-sub">从曲库选择一首歌，歌词会在这里展开</p>
+        <div class="lr-chips">
+          <span class="lr-chip" id="lr-quality" hidden></span>
+          <span class="lr-chip" id="lr-format" hidden></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="lr-lyrics-col" aria-label="同步歌词">
+      <div class="lr-lyrics-head"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lyrics"/></svg><span>同步歌词与曲目导聆 · 点击任意行跳转进度</span></div>
+      <div class="lr-lyrics-scroll" id="lr-lyrics-scroll" tabindex="0">
+        <div class="lr-lyrics" id="lr-lyrics"></div>
+        <p class="lr-empty" id="lr-empty" hidden>这首歌还没有可用歌词</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="lr-foot">
+    <div class="lr-progress">
+      <span id="lr-elapsed">0:00</span>
+      <div class="lr-track-wrap">
+        <input class="lr-seek" id="lr-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+      </div>
+      <span id="lr-duration">0:00</span>
+    </div>
+    <div class="lr-transport">
+      <div class="lr-transport-left">
+        <button id="lr-mode" class="lr-mode" type="button" title="切换播放模式">列表循环</button>
+      </div>
+      <div class="lr-controls">
+        <button id="lr-prev" class="lr-ctrl" type="button" title="上一首" aria-label="上一首"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg></button>
+        <button id="lr-play" class="lr-ctrl lr-play" type="button" title="播放 / 暂停" aria-label="播放">
+          <svg class="lr-ic-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
+          <svg class="lr-ic-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"/></svg>
+        </button>
+        <button id="lr-next" class="lr-ctrl" type="button" title="下一首" aria-label="下一首"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg></button>
+      </div>
+      <div class="lr-transport-right">
+        <label class="lr-volume" title="音量">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-volume"/></svg>
+          <input id="lr-volume" type="range" min="0" max="100" value="80" aria-label="音量">
+        </label>
+        <button id="lr-queue" class="lr-ctrl" type="button" title="播放队列" aria-label="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button>
+      </div>
+    </div>
+  </footer>
+</div>
+
 <!-- 在线歌单详情抽屉的遮罩与抽屉本体必须是 <body> 直接子级：.column 带
      backdrop-filter，会把内部 fixed 元素的包含块劫持到自身（抽屉整体下移
      一个顶栏高度、底部溢出盖住播放条）。播放不中断，关掉抽屉即恢复。 -->
@@ -3205,6 +3311,7 @@
 <script defer src="audio-output-settings.js"></script>
 <script defer src="audio-preview-settings.js"></script>
 <script defer src="dsp-settings.js"></script>
+<script defer src="lyric-reader.js"></script>
 <script defer src="app.js"></script>
 </body>
 </html>
