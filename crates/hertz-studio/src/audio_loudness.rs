@@ -495,6 +495,7 @@ async fn prepare_candidate(
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // One candidate's identity, target and the handoff it must match.
 async fn prepare_candidate_from(
     state: &Arc<AppState>,
     id: String,

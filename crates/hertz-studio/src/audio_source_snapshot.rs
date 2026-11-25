@@ -43,21 +43,25 @@ fn check(control: &Control) -> Result<(), ApiError> {
 }
 
 fn same_identity(a: &Metadata, b: &Metadata) -> bool {
-    if !a.is_file() || !b.is_file() || a.len() != b.len() || a.modified().ok() != b.modified().ok()
-    {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if a.dev() != b.dev()
-            || a.ino() != b.ino()
-            || a.ctime() != b.ctime()
-            || a.ctime_nsec() != b.ctime_nsec()
-        {
-            return false;
-        }
-    }
+    a.is_file()
+        && b.is_file()
+        && a.len() == b.len()
+        && a.modified().ok() == b.modified().ok()
+        && same_identity_stat(a, b)
+}
+
+/// 只有 Unix 暴露稳定的 inode 与创建时间，其余平台靠 size/mtime 对身份。
+#[cfg(unix)]
+fn same_identity_stat(a: &Metadata, b: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && a.ctime() == b.ctime()
+        && a.ctime_nsec() == b.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn same_identity_stat(_: &Metadata, _: &Metadata) -> bool {
     true
 }
 
@@ -329,6 +333,11 @@ impl Seek for StableFile {
         self.file.seek(pos)
     }
 }
+impl vmusic_core::AudioSource for StableFile {
+    fn media_len(&self) -> Option<u64> {
+        Some(self.len())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -410,11 +419,5 @@ mod tests {
             drop(snapshot);
             std::fs::remove_file(path).unwrap();
         }
-    }
-}
-
-impl vmusic_core::AudioSource for StableFile {
-    fn media_len(&self) -> Option<u64> {
-        Some(self.len())
     }
 }
