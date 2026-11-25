@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-plugin-hertz"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "dbx-plugin-sdk",
@@ -1817,7 +1817,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hertz-desktop"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-desktop-ipc"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-sqlite-lifecycle"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "serde",
@@ -1890,7 +1890,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-studio"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "aes",
  "ammonia",
@@ -1956,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-wallpaper"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-wallpaper-hub"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "axum",
  "fslock",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-wallpaper-signer"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -5862,7 +5862,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmusic-audio"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "arc-swap",
  "cpal",
@@ -5883,7 +5883,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-beats"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "num-complex",
  "rustfft",
@@ -5894,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-core"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -5903,7 +5903,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-lan"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -5931,7 +5931,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-library"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "symphonia",
  "thiserror 2.0.20",
@@ -5943,7 +5943,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-lyrics"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "roxmltree",
  "serde_json",
@@ -5953,7 +5953,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-store"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "hertz-sqlite-lifecycle",
