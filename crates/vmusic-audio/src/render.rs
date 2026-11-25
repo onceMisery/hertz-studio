@@ -406,7 +406,9 @@ pub struct RenderCore {
     /// 等旧源淡出完成后换装的新源。
     pending_load: Option<PendingLoad>,
     native_budget: Option<NativePcmBudget>,
-    preview: preview::PreviewSlot,
+    // Boxed because RenderCore is moved by value through the transport and room
+    // producer paths; the inline preview state dominated its stack footprint.
+    preview: Box<preview::PreviewSlot>,
 }
 
 /// Exact boundaries within one pull, relative to its first output frame.
@@ -722,7 +724,7 @@ impl RenderCore {
             tail_armed: false,
             pending_load: None,
             native_budget: None,
-            preview: preview::PreviewSlot::default(),
+            preview: Box::default(),
         };
         renderer.sync_dsp_context()?;
         Ok(renderer)
@@ -760,7 +762,7 @@ impl RenderCore {
             tail_armed: false,
             pending_load: None,
             native_budget: Some(budget),
-            preview: preview::PreviewSlot::default(),
+            preview: Box::default(),
         };
         renderer.sync_dsp_context()?;
         Ok(renderer)
