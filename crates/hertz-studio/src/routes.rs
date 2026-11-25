@@ -299,6 +299,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // RSS 图文阅读（reader 领域）：与播客分开订阅管理（方案 B）。
         .route("/v1/reader/preview", post(reader_preview))
+        .route("/v1/reader/full-text", post(reader_full_text))
+        .route("/v1/reader/full-text/image", post(reader_full_text_image))
         .route(
             "/v1/reader/subscriptions",
             get(reader_subscriptions).post(reader_subscribe),
@@ -4754,6 +4756,27 @@ async fn reader_preview(
         crate::reader::preview(&online_ctx(&state), &body.feed_url).await,
     )?;
     Ok(Json(serde_json::json!({ "preview": preview })))
+}
+
+async fn reader_full_text(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::reader::ReaderFullTextRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let data = tagged(
+        "reader",
+        crate::reader::full_text(&online_ctx(&state), &body.article_url).await,
+    )?;
+    Ok(Json(data))
+}
+
+async fn reader_full_text_image(
+    Json(body): Json<crate::reader::ReaderFullTextImageRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let data = tagged(
+        "reader",
+        crate::reader::full_text_image(&body.token, &body.key).await,
+    )?;
+    Ok(Json(data))
 }
 
 async fn reader_subscriptions(

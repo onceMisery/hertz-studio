@@ -9,8 +9,9 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -184,6 +185,18 @@ pub struct ReaderPreviewRequest {
 #[derive(Debug, Deserialize)]
 pub struct ReaderSubscribeRequest {
     pub feed_url: String,
+}
+
+/// 按条目原文链接抓取完整正文（订阅源只给摘要时的补救入口）。
+#[derive(Debug, Deserialize)]
+pub struct ReaderFullTextRequest {
+    pub article_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReaderFullTextImageRequest {
+    pub token: String,
+    pub key: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -447,6 +460,243 @@ pub async fn preview(_ctx: &online::Ctx, feed_url: &str) -> ApiResult<ReaderPrev
             .collect(),
         scan_truncated: fetched.scan_truncated,
     })
+}
+
+/// 从整页 HTML 中取最外层 article（没有则 main，再没有则整页）。
+/// 用小写副本定位 ASCII 标签边界，再按原字符串切片，避免破坏 UTF-8。
+fn extract_article_fragment(html: &str) -> &str {
+    let lower = html.to_ascii_lowercase();
+    for tag in ["article", "main"] {
+        let open_tag = format!("<{}", tag);
+        let close_tag = format!("</{}", tag);
+        let mut from = 0usize;
+        while let Some(found) = lower[from..].find(&open_tag) {
+            let open = from + found;
+            let after = open + open_tag.len();
+            if !matches!(
+                lower.as_bytes().get(after),
+                Some(b' ' | b'\t' | b'\r' | b'\n' | b'>')
+            ) {
+                from = after;
+                continue;
+            }
+            let Some(open_end) = lower[open..].find('>') else {
+                from = after;
+                continue;
+            };
+            let mut search = open + open_end + 1;
+            let mut depth = 1usize;
+            let mut end = None;
+            while search < html.len() {
+                let next_open = lower[search..].find(&open_tag).map(|i| search + i);
+                let next_close = lower[search..].find(&close_tag).map(|i| search + i);
+                if let Some(close) = next_close {
+                    if next_open.map_or(true, |opening| opening > close) {
+                        depth -= 1;
+                        let close_end = lower[close..]
+                            .find('>')
+                            .map(|i| close + i + 1)
+                            .unwrap_or(html.len());
+                        if depth == 0 {
+                            end = Some(close_end);
+                            break;
+                        }
+                        search = close_end;
+                        continue;
+                    }
+                }
+                match next_open {
+                    Some(opening) => {
+                        depth += 1;
+                        search = lower[opening..]
+                            .find('>')
+                            .map(|i| opening + i + 1)
+                            .unwrap_or(html.len());
+                    }
+                    None => break,
+                }
+            }
+            if let Some(end) = end {
+                if end > open {
+                    return &html[open..end];
+                }
+            }
+            from = after;
+        }
+    }
+    html
+}
+
+/// 整页文章常把报头、导航与侧栏“今日看点”塞进 article；这些在纯正文里只是噪音。
+/// limit 用来只摘最外层报头：各章节自己的 `<header>` 里放着栏目标题，不能一起删。
+fn strip_blocks(html: &str, tag: &str, limit: usize) -> String {
+    let lower = html.to_ascii_lowercase();
+    let open_tag = format!("<{}", tag);
+    let close_tag = format!("</{}", tag);
+    let mut out = String::with_capacity(html.len());
+    let mut from = 0usize;
+    let mut removed = 0usize;
+    while let Some(found) = lower[from..].find(&open_tag) {
+        let open = from + found;
+        let after = open + open_tag.len();
+        if !matches!(
+            lower.as_bytes().get(after),
+            Some(b' ' | b'\t' | b'\r' | b'\n' | b'>')
+        ) {
+            out.push_str(&html[from..after]);
+            from = after;
+            continue;
+        }
+        let Some(open_end) = lower[open..].find('>') else {
+            out.push_str(&html[from..]);
+            return out;
+        };
+        let mut search = open + open_end + 1;
+        let mut depth = 1usize;
+        let mut end = html.len();
+        while search < html.len() {
+            let next_open = lower[search..].find(&open_tag).map(|i| search + i);
+            let next_close = lower[search..].find(&close_tag).map(|i| search + i);
+            if let Some(close) = next_close {
+                if next_open.map_or(true, |opening| opening > close) {
+                    depth -= 1;
+                    let close_end = lower[close..]
+                        .find('>')
+                        .map(|i| close + i + 1)
+                        .unwrap_or(html.len());
+                    if depth == 0 {
+                        end = close_end;
+                        break;
+                    }
+                    search = close_end;
+                    continue;
+                }
+            }
+            match next_open {
+                Some(opening) => {
+                    depth += 1;
+                    search = lower[opening..]
+                        .find('>')
+                        .map(|i| opening + i + 1)
+                        .unwrap_or(html.len());
+                }
+                None => break,
+            }
+        }
+        out.push_str(&html[from..open]);
+        from = end;
+        removed += 1;
+        if removed >= limit {
+            break;
+        }
+    }
+    out.push_str(&html[from..]);
+    out
+}
+
+/// 全文抓取的图片登记表只在内存里短期留存：不写订阅库，也不污染条目的图片键。
+static FULL_TEXT_IMAGES: OnceLock<Mutex<HashMap<String, (Instant, HashMap<String, String>)>>> =
+    OnceLock::new();
+static FULL_TEXT_TOKEN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn full_text_image_cache() -> &'static Mutex<HashMap<String, (Instant, HashMap<String, String>)>> {
+    FULL_TEXT_IMAGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_images(items: Vec<(String, String)>) -> (String, Vec<(String, String)>) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seq = FULL_TEXT_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let token = parse::digest(&[&format!("full-text-images:{}:{}", stamp, seq)]);
+    let mut cache = full_text_image_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cutoff = Instant::now() - Duration::from_secs(600);
+    cache.retain(|_, (at, _)| *at > cutoff);
+    while cache.len() >= 16 {
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(key, _)| key.clone());
+        match oldest {
+            Some(key) => {
+                cache.remove(&key);
+            }
+            None => break,
+        }
+    }
+    cache.insert(
+        token.clone(),
+        (Instant::now(), items.iter().cloned().collect()),
+    );
+    (token, items)
+}
+
+/// 浏览器拿到的是清洗后的图片键；按 token 换回原地址并复用统一的图片代理抓取。
+pub async fn full_text_image(token: &str, key: &str) -> ApiResult<serde_json::Value> {
+    let url = {
+        let cache = full_text_image_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache
+            .get(token)
+            .and_then(|(_, urls)| urls.get(key))
+            .cloned()
+            .ok_or_else(|| not_found("图片已过期，请重新加载完整正文"))?
+    };
+    let url = reqwest::Url::parse(&url).map_err(|_| bad_request("图片地址无效"))?;
+    let (bytes, content_type) = crate::routes::fetch_remote_image(&url).await?;
+    Ok(serde_json::json!({
+        "data": crate::rpc::encode_base64(&bytes),
+        "content_type": content_type,
+    }))
+}
+
+/// 订阅源只给摘要时，按原文链接抓取网页正文；与订阅正文共用同一套清洗器。
+pub async fn full_text(_ctx: &online::Ctx, article_url: &str) -> ApiResult<serde_json::Value> {
+    let url = public_url(article_url)?;
+    let client = network::public_client()?;
+    let response = client
+        .get(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+        )
+        .timeout(REFRESH_TOTAL_TIMEOUT)
+        .send()
+        .await
+        .map_err(network::request_error)?;
+    if !response.status().is_success() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_GATEWAY,
+            "reader_full_text_rejected",
+            format!("原文站点返回 {}", response.status()),
+        )
+        .with_source("reader"));
+    }
+    let document_url = response.url().clone();
+    let bytes = network::read_bounded(response, MAX_FEED_BYTES, network::feed_too_large).await?;
+    let html = std::str::from_utf8(&bytes).map_err(|_| network::unsupported_encoding())?;
+    let fragment = extract_article_fragment(html);
+    // 只摘最外层报头，章节标题藏在各自的 header 里，必须保留。
+    let fragment = strip_blocks(fragment, "header", 1);
+    let fragment = strip_blocks(
+        &strip_blocks(&fragment, "aside", usize::MAX),
+        "nav",
+        usize::MAX,
+    );
+    let mut registry = sanitize::ImageRegistry::new();
+    let cleaned = sanitize::clean(&fragment, &document_url, &mut registry);
+    let (token, images) = remember_images(registry.items);
+    Ok(serde_json::json!({
+        "html": cleaned.html,
+        "images": images,
+        "token": token,
+        "url": document_url.to_string(),
+        "truncated": matches!(cleaned.status, sanitize::CleanStatus::Truncated),
+    }))
 }
 
 pub async fn subscriptions(ctx: &online::Ctx) -> ApiResult<Vec<FeedSummary>> {

@@ -170,7 +170,10 @@
     });
     document.addEventListener('visibilitychange', function () { if (!document.hidden) void refresh(); else { clearTimeout(timer); timer = 0; } });
     window.addEventListener('hertz-native-host-confirmed', render);
-    window.addEventListener('hertz-settings-category', function (event) { if (event.detail && event.detail.category === 'tools') void refresh(); });
+    // 关于与更新已收进「关于」分类，进入该分类时才刷新版本状态。
+    window.addEventListener('hertz-settings-category', function (event) {
+      if (event.detail && ['about', 'tools'].includes(event.detail.category)) void refresh();
+    });
     if (transport.kind === 'demo') {
       text(refs.version, '演示模式'); text(refs.status, '连接播放器服务后可以检查更新'); return;
     }

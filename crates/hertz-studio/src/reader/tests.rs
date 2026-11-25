@@ -138,6 +138,34 @@ fn rss_blog_fixture_keeps_articles_and_skips_audio() {
 }
 
 #[test]
+fn full_text_extracts_outer_article_with_nested_sections() {
+    let page = "<html><body><nav>导航</nav><article class='daily'><header>报头</header><h2>日报</h2>\
+                <header><h2>栏目标题</h2></header><p>第一段</p>\
+                <article><h3>子栏目</h3><p>第二段</p></article><aside>看点</aside></article>\
+                <footer>页脚</footer></body></html>";
+    let fragment = extract_article_fragment(page);
+    // 报头只摘最外层；章节自己的 header 里的栏目标题必须留下。
+    let fragment = strip_blocks(fragment, "header", 1);
+    let fragment = strip_blocks(
+        &strip_blocks(&fragment, "aside", usize::MAX),
+        "nav",
+        usize::MAX,
+    );
+    assert!(!fragment.contains("报头") && !fragment.contains("看点"));
+    assert!(fragment.contains("<header><h2>栏目标题</h2></header>"), "chapter heading stays");
+    assert!(fragment.starts_with("<article"));
+    assert!(fragment.ends_with("</article>"));
+    assert!(
+        fragment.contains("第一段") && fragment.contains("子栏目") && fragment.contains("第二段")
+    );
+    assert!(!fragment.contains("导航") && !fragment.contains("页脚"));
+    assert_eq!(
+        extract_article_fragment("<main><p>正文</p></main>"),
+        "<main><p>正文</p></main>"
+    );
+}
+
+#[test]
 fn rss_description_preserves_aihot_daily_structure() {
     let xml = include_str!("fixtures/aihot-daily-2026-10-23.xml");
     let url = Url::parse("https://aihot.news/feed/daily.xml").unwrap();

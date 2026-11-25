@@ -54,6 +54,7 @@
   .podcast-search{display:grid;grid-template-columns:minmax(0,1fr) auto}
   .podcast-search input{grid-column:1 / -1;grid-row:1;width:100%;box-sizing:border-box}
   .podcast-search select{width:100%;padding:var(--sp-3)}
+  .podcast-search>button{min-width:70px}
   .podcast-scroll{padding:var(--sp-5)}
   .podcast-status{padding:0 var(--sp-5)}
   .podcast-detail-head{gap:var(--sp-5)}

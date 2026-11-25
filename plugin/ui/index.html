@@ -726,7 +726,7 @@
               <option value="TW">中国台湾</option>
               <option value="SG">新加坡</option>
             </select>
-            <input id="podcast-query" type="search" aria-label="搜索播客节目" placeholder="搜索节目名或主播名…" maxlength="120" autocomplete="off">
+            <input id="podcast-query" type="search" aria-label="搜索播客节目" placeholder="搜索节目名或主播名…" value="故事FM" maxlength="120" autocomplete="off">
             <button class="btn primary" type="submit">搜索节目</button>
           </form>
           <div class="podcast-toolbar"><div class="podcast-tabs" aria-label="播客浏览">
@@ -2314,7 +2314,6 @@
 <!-- form:desktop -->
     <button id="bar-desktop-settings" data-desktop-feature class="ctrl" type="button" title="桌面歌词设置" aria-label="桌面歌词设置" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
 <!-- form:end -->
-    <button id="bar-player-expand" class="ctrl" type="button" title="播放选项与均衡器" aria-label="播放选项与均衡器"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg></button>
     <button id="sleep-timer" class="btn-pill st-pill" title="睡眠定时器" aria-label="睡眠定时器" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>
       <span id="sleep-timer-label" class="st-label" hidden></span>
@@ -2344,10 +2343,8 @@
 
   <header class="lr-head">
     <div class="lr-head-left">
-      <button id="lr-close" class="lr-pill" type="button" aria-label="返回日常视图">
+      <button id="lr-close" class="lr-pill lr-icon" type="button" title="返回日常视图" aria-label="返回日常视图">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
-        <span>返回日常视图</span>
-        <kbd>Esc</kbd>
       </button>
       <span class="lr-tech" id="lr-tech" hidden><i aria-hidden="true"></i><span id="lr-tech-text"></span></span>
     </div>
@@ -2393,7 +2390,6 @@
     </section>
 
     <section class="lr-lyrics-col" aria-label="同步歌词">
-      <div class="lr-lyrics-head"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lyrics"/></svg><span>同步歌词与曲目导聆 · 点击任意行跳转进度</span></div>
       <div class="lr-lyrics-scroll" id="lr-lyrics-scroll" tabindex="0">
         <div class="lr-lyrics" id="lr-lyrics"></div>
         <p class="lr-empty" id="lr-empty" hidden>这首歌还没有可用歌词</p>

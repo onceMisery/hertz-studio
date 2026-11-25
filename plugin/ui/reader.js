@@ -25,6 +25,7 @@
     current: null,
     selectedId: null,
     imagesLoaded: false,
+    fullTextImages: null,
   };
 
   function $(id) {
@@ -335,6 +336,7 @@
     st.selectedId = id;
     st.current = null;
     st.imagesLoaded = false;
+    st.fullTextImages = null;
     $('view-reader').classList.add('reader-reading');
     document.querySelector('.reader-article').setAttribute('aria-busy', 'true');
     document.querySelector('.reader-article').scrollTop = 0;
@@ -434,6 +436,15 @@
         text.className = 'reader-plain-text';
         text.textContent = entry.summary;
         box.appendChild(text);
+        if (entry.original_url) {
+          var full = document.createElement('button');
+          full.type = 'button';
+          full.className = 'btn reader-load-full';
+          full.id = 'reader-load-full';
+          full.textContent = '加载完整正文';
+          full.onclick = function () { loadFullText(); };
+          box.appendChild(full);
+        }
       } else {
         box.textContent = '此条目未提供正文。';
       }
@@ -442,6 +453,54 @@
       }
     }
     buildOutline();
+  }
+
+  async function loadFullText() {
+    var entry = st.current;
+    var button = $('reader-load-full');
+    if (!entry || !entry.original_url || !button || button.disabled || !T) return;
+    button.disabled = true;
+    button.textContent = '正在加载完整正文…';
+    try {
+      var data = await T.post('/v1/reader/full-text', { article_url: entry.original_url });
+      if (!data || !data.html) throw new Error('原文没有可用正文');
+      var box = $('reader-content');
+      box.textContent = '';
+      var holder = document.createElement('div');
+      holder.className = 'reader-document';
+      holder.innerHTML = data.html;
+      sanitizeTree(holder);
+      formatDocument(holder);
+      var images = Array.from(holder.querySelectorAll('img'));
+      st.fullTextImages = { token: data.token || '', images: data.images || [] };
+      st.imagesLoaded = false;
+      images.forEach(function (img) {
+        var key = img.getAttribute('src') || '';
+        if (/^[0-9a-f]{32}$/.test(key)) img.dataset.readerImageKey = key;
+        img.removeAttribute('src');
+        img.removeAttribute('width');
+        img.removeAttribute('height');
+        img.dataset.readerAlt = img.alt || '正文图片';
+        img.alt = img.dataset.readerAlt + ' · 图片尚未加载';
+        img.hidden = true;
+        img.classList.add('reader-image-pending');
+        var placeholder = document.createElement('span');
+        placeholder.className = 'reader-image-placeholder';
+        placeholder.textContent = img.alt;
+        img.after(placeholder);
+      });
+      box.appendChild(holder);
+      var imageButton = $('reader-load-images');
+      imageButton.hidden = images.length === 0;
+      imageButton.textContent = '加载本文图片（' + images.length + '）';
+      imageButton.disabled = false;
+      entryStatus('已加载原文完整正文' + (data.truncated ? '（原文过长，已截断）' : '') + '。');
+      buildOutline();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = '重试加载完整正文';
+      entryStatus('完整正文加载失败：' + (error && error.message || '请稍后重试'));
+    }
   }
 
   function formatDocument(holder) {
@@ -646,7 +705,10 @@
     await Promise.all(images.map(function (img) {
       var key = img.dataset.readerImageKey || '';
       if (!key) { failed += 1; return; }
-      return T.get('/v1/reader/entries/' + entry.id + '/images/' + key, { timeoutMs: 45000 })
+      var request = st.fullTextImages
+        ? T.post('/v1/reader/full-text/image', { token: st.fullTextImages.token, key: key })
+        : T.get('/v1/reader/entries/' + entry.id + '/images/' + key, { timeoutMs: 45000 });
+      return request
         .then(async function (data) {
           img.src = 'data:' + (data.content_type || 'image/jpeg') + ';base64,' + data.data;
           await img.decode();

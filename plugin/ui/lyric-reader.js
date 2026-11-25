@@ -479,17 +479,6 @@
   }
 
   function bindEntries() {
-    // 皮肤在播放栏注入的歌词按钮：捕获阶段先拦下，统一走阅读模式。
-    document.addEventListener('click', function (event) {
-      var node = event.target && event.target.closest ? event.target.closest('.hz-lyrics-button, #bar-lyrics-reader') : null;
-      if (!node) return;
-      node.title = '沉浸歌词';
-      node.setAttribute('aria-label', '打开沉浸歌词');
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      openReader();
-    }, true);
-
     document.addEventListener('click', function (event) {
       var node = event.target && event.target.closest ? event.target.closest('#home-immersive, #lr-open-entry') : null;
       if (!node) return;

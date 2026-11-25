@@ -9199,7 +9199,6 @@ function initNowPlayingModal() {
 
   np.close.onclick = closeNowPlaying;
   np.scrim.onclick = closeNowPlaying;
-  $('bar-player-expand').onclick = openNowPlaying;
   // 队列标签切页走 now-playing 的公开 API，不再模拟 np-queue 的 click。
   $('bar-queue').onclick = () => { openNowPlaying(); if (window.NowPlaying) window.NowPlaying.showQueue(true); };
 

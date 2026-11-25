@@ -321,7 +321,7 @@
     applyPreferences(false);
     refs.settingsNav = make('nav', 'hz-settings-nav', id('view-settings')); refs.settingsNav.setAttribute('role', 'tablist'); refs.settingsNav.setAttribute('aria-label', '设置分类');
     id('view-settings').querySelector('.col-head').after(refs.settingsNav);
-    var categories = [['appearance', '外观'], ['playback', '播放'], ['lyrics', '歌词'], ['connection', '连接'], ['tools', '工具']];
+    var categories = [['appearance', '外观'], ['playback', '播放'], ['lyrics', '歌词'], ['connection', '连接'], ['tools', '工具'], ['pro', '专业'], ['about', '关于']];
     // form:desktop
     if (window.hertzHost.desktopEnabled) categories.splice(3, 0, ['desktop', '桌面']);
     // form:end
@@ -331,7 +331,13 @@
     refs.settingsGroups = Array.from(id('view-settings').children).filter(function (group) { return group.classList.contains('set-group') && group.id !== 'desktop-lyrics-settings'; });
     refs.settingsGroups.forEach(function (group) {
       var title = group.querySelector('.set-title').textContent, originalHidden = group.hidden;
-      group.dataset.hzCategory = /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者|关于与更新/.test(title) ? 'tools' : 'appearance';
+      // 分组标题是唯一分类依据：专业收音效链路，关于收版本与更新。
+      group.dataset.hzCategory = /本机响度分析|导入校正 WAV|从目标频响生成校正|音效与均衡器/.test(title) ? 'pro'
+        : /关于与更新/.test(title) ? 'about'
+        : /AI|远程|在线音源/.test(title) ? 'connection'
+        : /歌词/.test(title) ? 'lyrics'
+        : /^播放$|在线缓存/.test(title) ? 'playback'
+        : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
       // form:desktop
       if (group.id === 'desktop-settings-group') group.dataset.hzCategory = 'desktop';
       // form:end
@@ -758,14 +764,19 @@
     var modes = make('div', 'hz-listening-modes', rail); make('p', 'hz-nav-caption', modes, '聆听方式');
     var group = make('div', 'hz-segmented', modes);
     var daily = button(group, 'is-active', '日常聆听', '', function () { navigate('home'); }); daily.textContent = '日常';
-    var immersive = button(group, '', '打开沉浸播放器', '', function () { window.Skins.request('open-player'); }); immersive.textContent = '沉浸';
+    // 沉浸 = 双栏歌词阅读页；播放栏歌词入口移除后，这里承接它的打开职责。
+    var immersive = button(group, '', '打开沉浸歌词', '', function () {
+      if (window.LyricReader) window.LyricReader.open();
+      else window.Skins.request('open-player');
+    }); immersive.textContent = '沉浸';
     var tools = make('div', 'hz-top-tools', topbar); tools.setAttribute('role', 'group'); tools.setAttribute('aria-label', '界面工具');
     var switcher = make('div', 'hz-segmented hz-view-switch', tools); switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', '浏览模式');
-    refs.listMode = button(switcher, 'is-active', '列表模式', 'queue', function () { if (window.HertzCoverWall) window.HertzCoverWall.close(); }); make('span', '', refs.listMode, '列表');
-    refs.coverMode = button(switcher, '', '封面模式', 'grid', function () {
+    // 浏览模式收成纯图标入口：文字留在 title / aria-label，视觉与播放栏工具钮同款。
+    refs.listMode = button(switcher, 'hz-view-mode is-active', '列表模式', 'queue', function () { if (window.HertzCoverWall) window.HertzCoverWall.close(); });
+    refs.coverMode = button(switcher, 'hz-view-mode', '封面模式', 'grid', function () {
       if (['home', 'settings', 'room', 'reader', 'podcasts'].includes(window.HertzShell.activeView())) navigate('library');
       if (window.HertzCoverWall) window.HertzCoverWall.open();
-    }); make('span', '', refs.coverMode, '封面');
+    });
     refs.themeToggle = button(tools, 'hz-icon hz-theme-toggle', '切换浅色外观', 'sun', function () { var theme = window.Theme.current(); window.Theme.apply(isDark(theme.tokens['--bg']) ? 'hertz-light' : 'hertz-dark'); });
     refs.queueToggle = button(tools, 'hz-icon hz-queue-toggle', '播放队列', 'queue', function (event) { setQueue(!queueOpen, event.currentTarget); }); refs.queueToggle.setAttribute('aria-controls', 'hz-queue-pane');
     layout.move(topbar.querySelector('.top-right'), tools);
@@ -781,8 +792,6 @@
     var transport = make('div', 'hz-bar-center', id('playback-bar'));
     layout.move(document.querySelector('.bar-controls'), transport); layout.move(document.querySelector('.bar-progress'), transport);
     layout.move(id('mode'), document.querySelector('.bar-controls'), id('prev'));
-    var lyricButton = button(document.querySelector('.bar-right'), 'ctrl hz-lyrics-button', '打开歌词', 'lyrics', function () { window.Skins.request('open-player'); id('np-tab-lyrics').click(); });
-    document.querySelector('.bar-right').prepend(lyricButton);
     // 队列抽屉拦截展示入口，原队列页面仍可管理所有曲目。
     listen(id('bar-queue'), 'click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); setQueue(!queueOpen, event.currentTarget); }, true);
     mountHome(); mountLibrary(); mountPreferences(); mountQueue(app); mountMobile(); mountSidebar(rail, topbar); mountScrollActivity();

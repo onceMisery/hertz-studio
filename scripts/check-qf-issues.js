@@ -111,6 +111,34 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
   const tabs = await page.evaluate(() => {
     const sels = ['.hz-view-switch button', '.hz-library-tabs button', '.hz-settings-nav button', '#daily-modes .chip'];
     const out = [];
+    // color-mix() 计算出来是 color(srgb ...)，半透明底色还要和祖先底色叠完才是真实背景。
+    function parse(c) {
+      const s = String(c).trim();
+      const srgb = s.match(/^color\(srgb\s+([^)]+)\)$/);
+      if (srgb) {
+        const p = srgb[1].split(/[\s/]+/).filter(Boolean).map(Number);
+        if (p.length >= 3 && p.every(Number.isFinite)) return [p[0] * 255, p[1] * 255, p[2] * 255, p.length > 3 ? p[3] : 1];
+      }
+      const m = s.match(/rgba?\(([^)]+)\)/);
+      if (!m) return null;
+      const p = m[1].split(',').map(x => parseFloat(x.trim()));
+      return p.length >= 3 && p.every(Number.isFinite) ? [p[0], p[1], p[2], p.length > 3 ? p[3] : 1] : null;
+    }
+    function effectiveBg(node) {
+      const stack = [];
+      for (let n = node; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor);
+        if (c && c[3] > 0) stack.push(c);
+        if (c && c[3] >= 1) break;
+      }
+      if (!stack.length) return 'rgb(0,0,0)';
+      let base = stack.shift();
+      while (stack.length) {
+        const top = stack.shift();
+        base = [0, 1, 2].map(i => top[i] * top[3] + base[i] * (1 - top[3])).concat([1]);
+      }
+      return 'rgb(' + base.slice(0, 3).map(Math.round).join(',') + ')';
+    }
     sels.forEach((s) => {
       document.querySelectorAll(s).forEach((e) => {
         const on = e.classList.contains('active') || e.classList.contains('is-active') || e.getAttribute('aria-pressed') === 'true'
@@ -120,7 +148,7 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
         const b = e.getBoundingClientRect();
         if (b.width === 0 || b.height === 0 || cs.visibility === 'hidden') return;
         out.push({ sel: s, text: (e.textContent || '').trim().slice(0, 12),
-          color: cs.color, bg: cs.backgroundColor, opacity: cs.opacity,
+          color: cs.color, rawBg: cs.backgroundColor, bg: effectiveBg(e), opacity: cs.opacity,
           w: Math.round(b.width), h: Math.round(b.height) });
       });
     });
@@ -132,7 +160,15 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
 
   // 对比度：把 color 解析成 rgb 再算与 bg 的差距
   function lum(c) {
-    const m = String(c).match(/rgba?\(([^)]+)\)/);
+    const s = String(c).trim();
+    const srgb = s.match(/^color\(srgb\s+([^)]+)\)$/);
+    if (srgb) {
+      const p = srgb[1].split(/[\s/]+/).filter(Boolean).map(Number);
+      if (p.length < 3 || !p.every(Number.isFinite)) return null;
+      if (p.length > 3 && p[3] === 0) return null;
+      return 255 * (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]);
+    }
+    const m = s.match(/rgba?\(([^)]+)\)/);
     if (!m) return null;
     const p = m[1].split(',').map((x) => parseFloat(x.trim()));
     if (p.length >= 4 && p[3] === 0) return null; // 全透明 = 看父级

@@ -267,7 +267,6 @@ html[data-skin="hertz"] .bar-time { font-size: 10px; order: 2; }
 html[data-skin="hertz"] .progress-wrap { flex: 1; }
 html[data-skin="hertz"] #progress { height: 3px; }
 html[data-skin="hertz"] .bar-right { grid-column: 3; grid-row: 1; justify-self: end; gap: 11px; }
-html[data-skin="hertz"] #bar-player-expand { display: none; }
 /* 收起播放栏：一个小到不抢视线的图标钮。收起后由 .bar-restore 接回。
    图标本身 aria-hidden，可访问名沿用按钮上的 aria-label / title。 */
 html[data-skin="hertz"] .bar-right #bar-pin-toggle {
@@ -896,21 +895,10 @@ html[data-skin="hertz"] .rail-item[data-view="favorites"] .rail-badge {
 }
 html[data-skin="hertz"] .rail-item .rail-badge[hidden] { display: none; }
 
-/* 播放栏：标题加粗、子行压低，播放栏里的歌词入口点亮。 */
+/* 播放栏：标题加粗、子行压低。 */
 html[data-skin="hertz"] #bar-title { font-size: 14px; font-weight: 600; letter-spacing: -0.1px; }
 html[data-skin="hertz"] #bar-sub { color: var(--muted); }
 html[data-skin="hertz"] .bar-summary #bar-track { cursor: pointer; }
-html[data-skin="hertz"] .hz-lyrics-button {
-  color: var(--text);
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
-}
-html[data-skin="hertz"] .hz-lyrics-button:hover {
-  background: color-mix(in srgb, var(--text) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 20%, transparent);
-}
-html[data-skin="hertz"] .hz-lyrics-button svg { width: 19px; height: 19px; }
-
 /* 顶栏搜索与主内容留白：更接近原型的一档。 */
 html[data-skin="hertz"] .topsearch { max-width: 500px; }
 
@@ -955,25 +943,11 @@ html[data-skin="hertz"] #playback-bar .bar-vol-icon use { fill: none; stroke: cu
 
 html[data-skin="hertz"] #playback-bar .bar-right { gap: 4px; }
 html[data-skin="hertz"] #playback-bar .bar-right > * { position: relative; }
-html[data-skin="hertz"] #playback-bar #bar-player-expand { display: grid; order: 1; }
 html[data-skin="hertz"] #playback-bar #bar-queue { order: 2; }
-html[data-skin="hertz"] #playback-bar .hz-lyrics-button { order: 3; }
 html[data-skin="hertz"] #playback-bar #bar-desktop-settings { order: 5; }
 html[data-skin="hertz"] #playback-bar #sleep-timer { order: 4; }
 html[data-skin="hertz"] #playback-bar #bar-pin-toggle { order: 6; opacity: 0.45; }
 html[data-skin="hertz"] #playback-bar #bar-pin-toggle:hover { opacity: 1; }
-
-/* 歌词入口改为与原型一致的普通工具图标。 */
-html[data-skin="hertz"] #playback-bar .hz-lyrics-button {
-  color: var(--muted);
-  background: none;
-  box-shadow: none;
-}
-html[data-skin="hertz"] #playback-bar .hz-lyrics-button:hover {
-  color: var(--text);
-  background: var(--hover);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
 
 html[data-skin="hertz"] .bar-queue-count {
   position: absolute; top: 1px; right: 1px;
@@ -1328,6 +1302,30 @@ html[data-skin="hertz"] body.hz-queue-open .app {
     -webkit-backdrop-filter: blur(24px);
     backdrop-filter: blur(24px);
   }
+}
+
+/* 浏览模式收成纯图标入口：与播放栏工具钮同一套「安静底色 + 悬停点亮」。 */
+html[data-skin="hertz"] .hz-view-switch {
+  padding: 0;
+  gap: 2px;
+  background: none;
+}
+html[data-skin="hertz"] .hz-view-switch .hz-view-mode {
+  min-width: 34px;
+  padding: 7px;
+  color: var(--muted);
+  background: none;
+  box-shadow: none;
+}
+html[data-skin="hertz"] .hz-view-switch .hz-view-mode:hover {
+  color: var(--text);
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+html[data-skin="hertz"] .hz-view-switch .hz-view-mode:is(.is-active, [aria-pressed="true"]) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 16%, transparent);
 }
 
 

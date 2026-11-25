@@ -17,7 +17,7 @@ async function main(){
     await page.goto(uiUrl(fixture.base));
     await page.waitForFunction(id=>Stage.presentation().mediaTrackId===id,track.id);
     async function tools(){
-      if(!await page.locator('#np-modal').isVisible())await page.locator('#bar-player-expand').click();
+      if(!await page.locator('#np-modal').isVisible())await page.locator('#bar-track').click();
       if(!await page.locator('#np-tools').isVisible())await page.locator('#np-more').click();
     }
     await tools();

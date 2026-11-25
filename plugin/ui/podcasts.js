@@ -9,6 +9,8 @@
   var subscriptionsRequest = 0;
   var subscriptionRevisions = new Map();
   var PAGE = 50;
+  var DEFAULT_QUERY = '故事FM';
+  var defaultSearchDone = false;
   var COUNTRY_KEY = 'hertz.podcasts.country';
   var activeEpisode = null, progressWrite = Promise.resolve();
   var pendingResume = null, observedTrackId = null;
@@ -389,5 +391,17 @@
     });
     renderShows();
   }
-  window.Podcasts = { bind: bind, onViewEnter: function () { return refreshSubscriptions(); } };
+  window.Podcasts = {
+    bind: bind,
+    onViewEnter: function () {
+      var refreshing = refreshSubscriptions();
+      // 首次进入播客页直接展示默认搜索结果；用户改过词或切过页就不再抢他的输入。
+      if (!defaultSearchDone && st.tab === 'discover' && !st.show
+        && el('podcast-query') && el('podcast-query').value.trim() === DEFAULT_QUERY) {
+        defaultSearchDone = true;
+        search(DEFAULT_QUERY);
+      }
+      return refreshing;
+    },
+  };
 })();
