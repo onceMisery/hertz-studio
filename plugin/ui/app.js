@@ -4161,11 +4161,45 @@ async function resolveQueueMissingMeta() {
   if (missingQueueIds().length) scheduleQueueMetaResolve(5000);
 }
 
+// 队列 id 与快照 track_id 的对应：在线曲的队列项是 `online:<source>:<id>`
+// 这样的虚拟 id，而快照有时只给平台裸 id。两边直接相等比较会让「正在播放」
+// 那一行点不亮、也拿不到封面；这里按后缀补一次匹配。
+function queueIdFor(trackId) {
+  const id = String(trackId || '');
+  if (id && state.queue.indexOf(id) >= 0) return id;
+  // 快照里的 track_id 未必是队列里的那一串（在线曲是虚拟 id，平台还有自己的
+  // 裸 id）：state.current 记的是队列身份，它命中就以它为准。
+  const live = state.current && state.current.id ? String(state.current.id) : '';
+  if (live && state.queue.indexOf(live) >= 0) return live;
+  if (!id) return live;
+  for (let i = 0; i < state.queue.length; i += 1) {
+    const candidate = String(state.queue[i]);
+    if (candidate === id || candidate.endsWith(':' + id)) return candidate;
+  }
+  return id;
+}
+
+// 队列行与「正在播放」卡的封面：本地曲走 coverUrl，在线曲优先用在线元数据。
+// 当前曲目常常只有快照、没有完整元数据（byId 里是一条占位），所以再回落到
+// state.current.cover —— 否则正在播放那一行/那一张卡永远没有封面。
+function queueCover(id, track) {
+  const live = state.current && state.current.id === id ? state.current : null;
+  if ((track && track.has_cover) || (live && live.has_cover)) {
+    const local = transport.coverUrl(id);
+    if (local) return local;
+  }
+  const meta = id.startsWith('online:') && window.Online ? window.Online.getMeta(id) : null;
+  const url = (live && live.cover) || (meta && meta.cover) || (track && track.cover) || '';
+  if (!url) return null;
+  return window.Online ? window.Online.safeCoverUrl(url) : url;
+}
+
 function renderQueue() {
   if (window.HertzCapsuleOnly) return;
   if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
   pushStageQueue();
   const list = state.queue;
+  const playingId = queueIdFor(state.snapshot.track_id);
   ui.queueCount.textContent = `${list.length} 首`;
   ui.queueBadge.textContent = String(list.length);
   ui.queueBadge.hidden = list.length === 0;
@@ -4187,7 +4221,7 @@ function renderQueue() {
     const track = state.byId.get(id) || window.Online.getMeta(id)
       || { id, title: '未知曲目', artist: '', duration_ms: null };
     const row = document.createElement('div');
-    row.className = 'q-row' + (id === state.snapshot.track_id ? ' playing' : '');
+    row.className = 'q-row' + (id === playingId ? ' playing' : '');
     row.draggable = true;
     row.dataset.index = String(index);
     row.dataset.trackId = id;
@@ -4207,7 +4241,7 @@ function renderQueue() {
     // 本地曲有 has_cover 才给 URL；在线曲的元数据自带远程封面地址；
     // 都没有就画占位。行列表的轨道按无封面排的，.q-art 默认由 style.css
     // 隐藏；Hertz 队列抽屉另使用同一封面快照。
-    paintArt(row, track.has_cover ? transport.coverUrl(track.id) : (track.cover || null));
+    paintArt(row, queueCover(id, track));
     if (id.startsWith('online:') && window.Online) {
       // 与歌单详情同一套平台徽标：混合队列里一眼分清本地与在线。
       // 重启后内存快照没了（行退化为「未知曲目」），源仍能从虚拟 id 里解析出来。
@@ -4219,7 +4253,7 @@ function renderQueue() {
     row.addEventListener('click', (e) => {
       if (e.target.closest('[data-act="remove"]')) {
         // 正在播放的这首不允许移出，否则会打断播放。
-        if (id === state.snapshot.track_id) { toast('正在播放的曲目不能移出队列', 'error'); return; }
+        if (id === playingId) { toast('正在播放的曲目不能移出队列', 'error'); return; }
         applyQueue(list.filter((x) => x !== id), true);
         return;
       }
@@ -4258,9 +4292,10 @@ function renderQueue() {
 function syncQueuePlaying(snap, locate) {
   const rows = ui.queueList.querySelectorAll('.q-row');
   if (!rows.length) return;
+  const playingId = queueIdFor(snap.track_id);
   let current = null;
   for (const row of rows) {
-    const active = row.dataset.trackId === snap.track_id;
+    const active = row.dataset.trackId === playingId;
     row.classList.toggle('playing', active);
     if (active) current = row;
   }
@@ -7860,20 +7895,14 @@ async function playLibrarySelection(shuffle) {
 // 与 renderQueue 走同一套回落，拿不到就显示占位而不是整项消失。
 function queueSnapshot() {
   const list = state.queue || [];
+  const playingId = queueIdFor(state.snapshot.track_id);
   return list.map((id, index) => {
     const track = state.byId.get(id) || (window.Online && window.Online.getMeta(id))
       || { id, title: '未知曲目', artist: '' };
-    const current = id === state.snapshot.track_id;
+    const current = id === playingId;
     // 正在播放这首的封面走 applyCoverImg 那套已解析好的地址（state.current），
     // 其余按曲库元数据拼 —— 与 renderQueue 里的行 artwork 同源。
-    let cover = null;
-    if (current && state.current) {
-      cover = transport.coverUrl(id) || null;
-    } else if (track.has_cover) {
-      cover = transport.coverUrl(id);
-    } else if (id.startsWith('online:') && window.Online) {
-      cover = window.Online.safeCoverUrl(track.cover || null);
-    }
+    const cover = queueCover(id, track);
     // 正在播放这首的时长以快照为准（快照里才有真实解码时长），其余取元数据。
     const duration = current
       ? playbackDuration(state.snapshot)

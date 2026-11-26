@@ -1246,7 +1246,14 @@
           <fieldset id="audio-preview-sides" class="quality-preview-sides" disabled><legend>重播参考片段</legend><label for="audio-preview-enhanced"><input id="audio-preview-enhanced" type="radio" name="quality_preview_side" value="enhanced" checked> 增强草稿</label><label for="audio-preview-bypass"><input id="audio-preview-bypass" type="radio" name="quality_preview_side" value="bypass"> 旁路</label></fieldset>
           <p class="hint" id="audio-preview-status" role="status" aria-live="polite" aria-atomic="true">保存前可试听当前草稿。未完成匹配时会明确显示普通旁路。</p>
         </fieldset>
-        <div class="set-row"><span>均衡器</span><label><input id="dsp-eq-enabled" name="eq_enabled" type="checkbox"> 启用六段参数 EQ</label></div>
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>均衡器</h3>
+            <p>六段参数 EQ；关闭时保留曲线。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row"><label for="dsp-eq-enabled">启用六段参数 EQ</label><input id="dsp-eq-enabled" name="eq_enabled" type="checkbox"></div>
+          </div>
         <details class="quality-advanced"><summary>编辑六段频率、Q 与增益</summary>
           <p class="hint">关闭时保留曲线。低频与高 Q 的组合受历史预算限制；保存前会检查，未通过时继续当前声音。</p>
           <div class="quality-bands">
@@ -1282,36 +1289,42 @@
             </fieldset>
           </div>
         </details>
-        <div class="set-row"><label for="dsp-headroom">自动余量</label><select id="dsp-headroom" name="headroom"><option value="off">关闭，保持原增益</option><option value="auto">自动预留 EQ、混音与保护余量</option></select></div>
-        <p class="hint" id="dsp-headroom-status"></p>
-        <div class="set-row"><label for="dsp-limiter">峰值保护</label><select id="dsp-limiter" name="limiter"><option value="soft">兼容软限幅</option><option value="true_peak">真峰值保护（本机，增加约 6 ms 延迟）</option></select><p class="hint">处理策略改变会在下一次定位或载入后采用；不会自动提高歌曲响度。</p></div>
-        <div class="set-row">
-          <label for="dsp-preamp">增益补偿 (dB)</label>
-          <input id="dsp-preamp" name="preamp" required type="number" min="-24" max="12" step="0.5" value="0">
-        </div>
-        <div class="set-row"><label for="dsp-loudness-source">响度来源</label><select id="dsp-loudness-source" name="loudness_source"><option value="file_tags">文件 ReplayGain 标签</option><option value="r128">本机 R128 测量</option></select></div>
-        <div class="set-row"><label for="dsp-target-lufs">本机测量目标 (LUFS)</label><input id="dsp-target-lufs" name="target_lufs" type="number" required min="-24" max="-12" step="0.5" value="-18"><p class="hint">只选择一种响度来源。未分析或内容未核验时以 0 dB 播放；测量完成不自动改变当前歌曲增益。</p></div>
-        <div class="set-row">
-          <label for="dsp-loudness">响度归一化</label>
-          <select id="dsp-loudness" name="loudness">
-            <option value="off">关闭</option>
-            <option value="track">按曲目</option>
-            <option value="album">按专辑</option>
-          </select>
-          <span class="hint">按曲目=各曲音量拉平；按专辑=保留专辑内动态（缺专辑标签时回落曲目）；增益为正时按峰值防削波</span>
-        </div>
-        <div class="set-row">
-          <label for="dsp-crossfade">歌曲衔接 (ms，0 = 无重叠衔接)</label>
-          <input id="dsp-crossfade" name="crossfade" required type="number" min="0" max="8000" step="100" value="0">
-          <p class="hint">下一首准备就绪时自动衔接；0 不重叠，其他值为交叉淡化时长。不满足条件时正常切歌，暂停与停止仍为短淡变。</p>
-        </div>
-        <div class="set-row">
-          <span></span>
-          <span class="set-actions">
-            <button type="submit" id="dsp-save" class="btn primary">保存音效</button>
-            <button type="button" id="dsp-reset" class="btn">重置均衡草稿</button>
-            <button type="button" id="dsp-rebase" class="btn">保留草稿，读取最新版本</button>
-          </span>
+        </section>
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>响度、保护与衔接</h3>
+            <p>只影响本机播放，不修改文件本身。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row"><label for="dsp-headroom">自动余量</label><select id="dsp-headroom" name="headroom"><option value="off">关闭，保持原增益</option><option value="auto">自动预留 EQ、混音与保护余量</option></select></div>
+            <p class="hint" id="dsp-headroom-status"></p>
+            <div class="set-row"><label for="dsp-limiter">峰值保护</label><select id="dsp-limiter" name="limiter"><option value="soft">兼容软限幅</option><option value="true_peak">真峰值保护（本机，增加约 6 ms 延迟）</option></select><p class="hint">处理策略改变会在下一次定位或载入后采用；不会自动提高歌曲响度。</p></div>
+            <div class="set-row">
+              <label for="dsp-preamp">增益补偿 (dB)</label>
+              <input id="dsp-preamp" name="preamp" required type="number" min="-24" max="12" step="0.5" value="0">
+            </div>
+            <div class="set-row"><label for="dsp-loudness-source">响度来源</label><select id="dsp-loudness-source" name="loudness_source"><option value="file_tags">文件 ReplayGain 标签</option><option value="r128">本机 R128 测量</option></select></div>
+            <div class="set-row"><label for="dsp-target-lufs">本机测量目标 (LUFS)</label><input id="dsp-target-lufs" name="target_lufs" type="number" required min="-24" max="-12" step="0.5" value="-18"><p class="hint">只选择一种响度来源。未分析或内容未核验时以 0 dB 播放；测量完成不自动改变当前歌曲增益。</p></div>
+            <div class="set-row">
+              <label for="dsp-loudness">响度归一化</label>
+              <select id="dsp-loudness" name="loudness">
+                <option value="off">关闭</option>
+                <option value="track">按曲目</option>
+                <option value="album">按专辑</option>
+              </select>
+              <span class="hint">按曲目=各曲音量拉平；按专辑=保留专辑内动态（缺专辑标签时回落曲目）；增益为正时按峰值防削波</span>
+            </div>
+            <div class="set-row">
+              <label for="dsp-crossfade">歌曲衔接 (ms，0 = 无重叠衔接)</label>
+              <input id="dsp-crossfade" name="crossfade" required type="number" min="0" max="8000" step="100" value="0">
+              <p class="hint">下一首准备就绪时自动衔接；0 不重叠，其他值为交叉淡化时长。不满足条件时正常切歌，暂停与停止仍为短淡变。</p>
+            </div>
+          </div>
+        </section>
+        <div class="set-block-actions">
+          <button type="submit" id="dsp-save" class="btn primary">保存音效</button>
+          <button type="button" id="dsp-reset" class="btn">重置均衡草稿</button>
+          <button type="button" id="dsp-rebase" class="btn">保留草稿，读取最新版本</button>
         </div>
         <details class="quality-advanced"><summary>耳机与音色（默认关闭）</summary>
           <div class="set-row"><label for="dsp-crossfeed">耳机交叉馈送</label><input id="dsp-crossfeed" name="crossfeed" type="checkbox"><p class="hint">700 Hz 低通串音与直达声补偿，仅适用于双声道。</p></div>
@@ -1327,32 +1340,58 @@
       </form>
       <form class="set-group" id="audio-analysis-settings" aria-labelledby="audio-analysis-title" action="/v1/player/loudness" method="post">
         <h2 class="set-title" id="audio-analysis-title">本机响度分析</h2>
-        <p class="hint">分析当前曲目或完整专辑，不下载远程音频。准备和内容核验完成后，显式应用会通过原播放流程重新载入并接续位置。</p>
-        <button class="btn" type="submit" name="scope" value="track">分析当前曲目</button>
-        <button class="btn" type="submit" name="scope" value="album">分析当前完整专辑</button>
-        <button class="btn" type="button" id="loudness-apply">应用到当前曲目</button>
-        <p class="hint" id="loudness-state" role="status" aria-live="polite"></p>
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>分析当前播放</h3>
+            <p>分析当前曲目或完整专辑，不下载远程音频。准备和内容核验完成后，显式应用会通过原播放流程重新载入并接续位置。</p>
+          </header>
+          <div class="set-block-actions">
+            <button class="btn" type="submit" name="scope" value="track">分析当前曲目</button>
+            <button class="btn" type="submit" name="scope" value="album">分析当前完整专辑</button>
+            <button class="btn" type="button" id="loudness-apply">应用到当前曲目</button>
+          </div>
+          <p class="hint" id="loudness-state" role="status" aria-live="polite"></p>
+        </section>
       </form>
       <form class="set-group" id="audio-impulse-import" aria-labelledby="audio-impulse-title" action="/v1/player/impulses" method="post">
         <h2 class="set-title" id="audio-impulse-title">导入校正 WAV</h2>
-        <div class="set-row"><label for="impulse-path">本机 WAV 文件路径</label><input id="impulse-path" name="path" type="text" required maxlength="4096"></div>
-        <div class="set-row"><label for="impulse-device">适用设备型号</label><input id="impulse-device" name="device_model" type="text" required maxlength="1024"></div>
-        <div class="set-row"><label for="impulse-source">测量数据来源</label><input id="impulse-source" name="source" type="text" required maxlength="1024"></div>
-        <div class="set-row"><label for="impulse-target">目标曲线与测量条件</label><input id="impulse-target" name="target_curve" type="text" required maxlength="1024"></div>
-        <button class="btn" type="submit">复制并准备校正资源</button>
-        <button class="btn" type="button" id="impulse-cancel">取消校正准备</button>
-        <p class="hint" id="impulse-state" role="status" aria-live="polite">最多 8 MiB；首批仅支持 44.1/48 kHz、转换后 257 taps 的对称线性相位核。超预算或相位未知的核会明确拒绝。</p>
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>测量与来源</h3>
+            <p>最多 8 MiB；首批仅支持 44.1/48 kHz、转换后 257 taps 的对称线性相位核。超预算或相位未知的核会明确拒绝。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row"><label for="impulse-path">本机 WAV 文件路径</label><input id="impulse-path" name="path" type="text" required maxlength="4096"></div>
+            <div class="set-row"><label for="impulse-device">适用设备型号</label><input id="impulse-device" name="device_model" type="text" required maxlength="1024"></div>
+            <div class="set-row"><label for="impulse-source">测量数据来源</label><input id="impulse-source" name="source" type="text" required maxlength="1024"></div>
+            <div class="set-row"><label for="impulse-target">目标曲线与测量条件</label><input id="impulse-target" name="target_curve" type="text" required maxlength="1024"></div>
+          </div>
+          <div class="set-block-actions">
+            <button class="btn primary" type="submit">复制并准备校正资源</button>
+            <button class="btn" type="button" id="impulse-cancel">取消校正准备</button>
+          </div>
+          <p class="hint" id="impulse-state" role="status" aria-live="polite"></p>
+        </section>
       </form>
       <form class="set-group" id="audio-impulse-generate" aria-labelledby="audio-fir-title" action="/v1/player/impulses/generate" method="post">
         <h2 class="set-title" id="audio-fir-title">从目标频响生成校正</h2>
-        <p class="hint">输入有来源的目标校正增益，左右声道共用；不会自动反转原始测量数据。每行填写频率 Hz 和增益 dB，以逗号分隔，频率递增；2–64 个点，增益 −24 至 +12 dB。点间按对数频率平滑连接，两端保持端点增益。短 FIR 不能准确表达所有窄峰和低频曲线，生成结果会报告误差。</p>
-        <div class="set-row"><label for="fir-points">频率与校正增益</label><textarea id="fir-points" name="points" rows="5" required maxlength="8192" placeholder="20, 0&#10;20000, 0" spellcheck="false" aria-describedby="fir-state"></textarea></div>
-        <div class="set-row"><label for="fir-device">适用设备型号</label><input id="fir-device" name="device_model" type="text" required maxlength="1024"></div>
-        <div class="set-row"><label for="fir-source">测量数据来源</label><input id="fir-source" name="source" type="text" required maxlength="1024"></div>
-        <div class="set-row"><label for="fir-target">目标曲线与测量条件</label><input id="fir-target" name="target_curve" type="text" required maxlength="1024"></div>
-        <button class="btn" type="submit">生成并检查校正曲线</button>
-        <button class="btn" type="button" id="fir-cancel">取消曲线生成</button>
-        <p class="hint" id="fir-state" role="status" aria-live="polite">仅支持 44.1/48 kHz；生成后仅填入音效草稿，检查误差、延迟和衰减，再保存音效。不会自动应用。</p>
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>目标曲线</h3>
+            <p>输入有来源的目标校正增益，左右声道共用；不会自动反转原始测量数据。每行填写频率 Hz 和增益 dB，以逗号分隔，频率递增；2–64 个点，增益 −24 至 +12 dB。点间按对数频率平滑连接，两端保持端点增益。短 FIR 不能准确表达所有窄峰和低频曲线，生成结果会报告误差。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row"><label for="fir-points">频率与校正增益</label><textarea id="fir-points" name="points" rows="5" required maxlength="8192" placeholder="20, 0&#10;20000, 0" spellcheck="false" aria-describedby="fir-state"></textarea></div>
+            <div class="set-row"><label for="fir-device">适用设备型号</label><input id="fir-device" name="device_model" type="text" required maxlength="1024"></div>
+            <div class="set-row"><label for="fir-source">测量数据来源</label><input id="fir-source" name="source" type="text" required maxlength="1024"></div>
+            <div class="set-row"><label for="fir-target">目标曲线与测量条件</label><input id="fir-target" name="target_curve" type="text" required maxlength="1024"></div>
+          </div>
+          <div class="set-block-actions">
+            <button class="btn primary" type="submit">生成并检查校正曲线</button>
+            <button class="btn" type="button" id="fir-cancel">取消曲线生成</button>
+          </div>
+          <p class="hint" id="fir-state" role="status" aria-live="polite">仅支持 44.1/48 kHz；生成后仅填入音效草稿，检查误差、延迟和衰减，再保存音效。不会自动应用。</p>
+        </section>
       </form>
       <form class="set-group" id="audio-output-settings" aria-labelledby="audio-output-title" action="/v1/player/output" method="post">
         <h2 class="set-title" id="audio-output-title">音频输出</h2>
@@ -1906,98 +1945,140 @@
         </section>
       </div>
 
-      <div class="set-group">
+      <div class="set-group hz-advanced" id="hz-advanced">
         <h2 class="set-title">高级外观与设备</h2>
-        <div class="set-row">
-          <label for="set-theme">主题色</label>
-          <select id="set-theme"></select>
-        </div>
-        <div class="theme-swatches" id="theme-swatches" role="group" aria-label="主题色快选"></div>
-        <div class="set-row">
-          <label for="set-cover-follow">封面氛围光</label>
-          <input id="set-cover-follow" type="checkbox" role="switch" aria-describedby="set-cover-follow-note">
-          <span class="hint" id="set-cover-follow-note">从封面提取背景与舞台高亮色，即时生效并自动保存。</span>
-        </div>
-        <div class="set-row">
-          <label for="set-device">输出设备</label>
-          <select id="set-device"></select>
-        </div>
-        <div class="set-row">
-          <label for="set-density">列表密度</label>
-          <select id="set-density">
-            <option value="comfortable">标准</option>
-            <option value="compact">紧凑</option>
-          </select>
-        </div>
-        <!-- 首页名言：封面左置之后，右列整块空着，正好放一句每日名言。
-             抓一次就存本地，之后「换一条」只在本地缓存里转 —— 一言网限 QPS
-             且会屏蔽大流量站点，不能每次点击都打网络。取不到时用内置兜底，
-             界面上会如实标成兜底（data-fallback），不留空白。 -->
-        <div class="set-row">
-          <label for="set-home-quote">首页显示每日名言</label>
-          <input id="set-home-quote" type="checkbox" role="switch" checked aria-describedby="set-home-quote-note">
-          <span class="hint" id="set-home-quote-note">在首页「正在播放」卡片右侧显示一句名言；关闭后整块不显示，卡片恢复原样</span>
-        </div>
-        <div class="set-row">
-          <label for="set-home-quote-cat">名言分类</label>
-          <select id="set-home-quote-cat">
-            <option value="poem">诗词</option>
-            <option value="literature">文学</option>
-            <option value="philosophy">哲学</option>
-            <option value="film">影视台词</option>
-          </select>
-        </div>
-        <div class="set-row">
-          <label for="set-home-quote-click">点击名言可换一条</label>
-          <input id="set-home-quote-click" type="checkbox" role="switch" checked>
-        </div>
-        <div class="set-row">
-          <label for="set-motion">减少动效</label>
-          <input id="set-motion" type="checkbox" role="switch">
-          <span class="hint">全局压掉所有动效；只要某一面不舒服时，用下面的分面开关更合适</span>
-        </div>
-        <!-- 动效分面降级（folia 的 reduce_motion_surfaces）：body[data-rm] 上是
-             面名列表，各面的 CSS 在自己文件里认领 token。canvas 舞台不归 CSS 管，
-             仍由上面的全局开关与「渲染模式」管。 -->
-        <div class="set-row">
-          <label for="set-rm-bg">分面：背景纹理动画</label>
-          <input id="set-rm-bg" type="checkbox" role="switch">
-        </div>
-        <div class="set-row">
-          <label for="set-rm-lyrics">分面：歌词排版动效</label>
-          <input id="set-rm-lyrics" type="checkbox" role="switch">
-        </div>
-        <div class="set-row">
-          <label for="set-rm-ui">分面：界面微动效</label>
-          <input id="set-rm-ui" type="checkbox" role="switch">
-        </div>
-        <div class="set-row">
-          <label for="set-rm-wall">分面：海报墙动效</label>
-          <input id="set-rm-wall" type="checkbox" role="switch">
-        </div>
-        <!-- 空闲隐藏是纯布局开关：判据（有没有曲目 / 是否已按停止）在 app.js 的
-             stageIdle() 里，CSS 只认 body[data-stage-idle] 这一个标记，不参与判定。
-             暂停不收起——曲目还在，收起会让歌词和进度凭空消失。 -->
-        <div class="set-row">
-          <label for="set-stage-idle-hide">空闲时隐藏正在播放</label>
-          <input id="set-stage-idle-hide" type="checkbox" role="switch">
-          <span class="hint">没有曲目在播或已按停止时收起右侧舞台，列表占满宽度；开始播放自动恢复</span>
-        </div>
-        <!-- 渲染模式：默认标准渲染。选「增强」不会立刻保存，先把下面的警示块
-             摊开让用户读完，再由块里的确认按钮落库——直接 onchange 就写库的话，
-             误操作的用户会在下一帧才开始读提示。 -->
-        <div class="set-row">
-          <label for="set-render-mode">渲染模式</label>
-          <select id="set-render-mode">
-            <option value="standard">标准渲染</option>
-            <option value="enhanced">WebGL 增强渲染</option>
-          </select>
-        </div>
-        <div class="render-warn" id="render-warn" hidden></div>
-        <div class="set-row">
-          <label for="set-backend">服务端</label>
-          <span class="hint" id="set-backend">—</span>
-        </div>
+        <p class="set-group-lead">配色、首页内容、动效与输出。改动即时生效并自动保存。</p>
+
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>主题与色彩</h3>
+            <p>跟随封面取色，或从列表里手动指定一套主题。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row">
+              <label for="set-theme">主题色</label>
+              <select id="set-theme"></select>
+            </div>
+            <div class="set-row">
+              <span>快速切换</span>
+              <div class="theme-swatches" id="theme-swatches" role="group" aria-label="主题色快选"></div>
+            </div>
+            <!-- 这两行挂在这里但会被 skin 移进上方「外观」分组：与亮度、强度这类
+                 即时的外观开关放在一起更顺手。 -->
+            <div class="set-row">
+              <label for="set-cover-follow">封面氛围光</label>
+              <input id="set-cover-follow" type="checkbox" role="switch" aria-describedby="set-cover-follow-note">
+              <span class="hint" id="set-cover-follow-note">从封面提取背景与舞台高亮色，即时生效并自动保存。</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>首页与列表</h3>
+            <p>首页「正在播放」卡片右侧的名言，以及曲库列表的行高。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row">
+              <label for="set-density">列表密度</label>
+              <select id="set-density">
+                <option value="comfortable">标准</option>
+                <option value="compact">紧凑</option>
+              </select>
+            </div>
+            <!-- 首页名言：封面左置之后，右列整块空着，正好放一句每日名言。
+                 抓一次就存本地，之后「换一条」只在本地缓存里转 —— 一言网限 QPS
+                 且会屏蔽大流量站点，不能每次点击都打网络。取不到时用内置兜底，
+                 界面上会如实标成兜底（data-fallback），不留空白。 -->
+            <div class="set-row">
+              <label for="set-home-quote">首页显示每日名言</label>
+              <input id="set-home-quote" type="checkbox" role="switch" checked aria-describedby="set-home-quote-note">
+              <span class="hint" id="set-home-quote-note">在首页「正在播放」卡片右侧显示一句名言；关闭后整块不显示，卡片恢复原样</span>
+            </div>
+            <div class="set-row">
+              <label for="set-home-quote-cat">名言分类</label>
+              <select id="set-home-quote-cat">
+                <option value="poem">诗词</option>
+                <option value="literature">文学</option>
+                <option value="philosophy">哲学</option>
+                <option value="film">影视台词</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <label for="set-home-quote-click">点击名言可换一条</label>
+              <input id="set-home-quote-click" type="checkbox" role="switch" checked>
+            </div>
+            <!-- 空闲隐藏是纯布局开关：判据（有没有曲目 / 是否已按停止）在 app.js 的
+                 stageIdle() 里，CSS 只认 body[data-stage-idle] 这一个标记，不参与判定。
+                 暂停不收起——曲目还在，收起会让歌词和进度凭空消失。 -->
+            <div class="set-row">
+              <label for="set-stage-idle-hide">空闲时隐藏正在播放</label>
+              <input id="set-stage-idle-hide" type="checkbox" role="switch">
+              <span class="hint">没有曲目在播或已按停止时收起右侧舞台，列表占满宽度；开始播放自动恢复</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>动效细节</h3>
+            <p>全局「减少动效」在上方外观分组；这里只关掉某一面的动画。</p>
+          </header>
+          <!-- 动效分面降级（folia 的 reduce_motion_surfaces）：body[data-rm] 上是
+               面名列表，各面的 CSS 在自己文件里认领 token。canvas 舞台不归 CSS 管，
+               仍由上面的全局开关与「渲染模式」管。 -->
+          <div class="set-block-body">
+            <div class="set-row">
+              <label for="set-motion">减少动效</label>
+              <input id="set-motion" type="checkbox" role="switch">
+              <span class="hint">全局压掉所有动效；只要某一面不舒服时，用下面的分面开关更合适</span>
+            </div>
+            <div class="set-row">
+              <label for="set-rm-bg">背景纹理动画</label>
+              <input id="set-rm-bg" type="checkbox" role="switch">
+            </div>
+            <div class="set-row">
+              <label for="set-rm-lyrics">歌词排版动效</label>
+              <input id="set-rm-lyrics" type="checkbox" role="switch">
+            </div>
+            <div class="set-row">
+              <label for="set-rm-ui">界面微动效</label>
+              <input id="set-rm-ui" type="checkbox" role="switch">
+            </div>
+            <div class="set-row">
+              <label for="set-rm-wall">海报墙动效</label>
+              <input id="set-rm-wall" type="checkbox" role="switch">
+            </div>
+          </div>
+        </section>
+
+        <section class="set-block">
+          <header class="set-block-head">
+            <h3>输出与性能</h3>
+            <p>输出设备、渲染后端与当前服务端信息。</p>
+          </header>
+          <div class="set-block-body">
+            <div class="set-row">
+              <label for="set-device">输出设备</label>
+              <select id="set-device"></select>
+            </div>
+            <!-- 渲染模式：默认标准渲染。选「增强」不会立刻保存，先把下面的警示块
+                 摊开让用户读完，再由块里的确认按钮落库——直接 onchange 就写库的话，
+                 误操作的用户会在下一帧才开始读提示。 -->
+            <div class="set-row">
+              <label for="set-render-mode">渲染模式</label>
+              <select id="set-render-mode">
+                <option value="standard">标准渲染</option>
+                <option value="enhanced">WebGL 增强渲染</option>
+              </select>
+            </div>
+            <div class="render-warn" id="render-warn" hidden></div>
+            <div class="set-row">
+              <label for="set-backend">服务端</label>
+              <span class="hint" id="set-backend">—</span>
+            </div>
+          </div>
+        </section>
       </div>
 
       <!-- 主题与壁纸：壁纸背景、二次元主题、自定义配色。
@@ -2783,7 +2864,8 @@
 
 <div id="np-scrim" class="np-scrim" hidden></div>
 <div id="np-modal" class="np-modal" role="dialog" aria-modal="true" aria-label="正在播放" hidden>
-  <div class="np-ambient" aria-hidden="true"></div>
+  <!-- 氛围背景与沉浸歌词同源：封面模糊铺满 + 两团主题色光斑，切歌时淡入。 -->
+  <div class="np-ambient" aria-hidden="true"><div class="np-ambient-art" id="np-ambient-art"></div><i class="np-orb-a"></i><i class="np-orb-b"></i></div>
   <div class="np-card">
     <header class="np-head">
       <div class="np-head-text">
@@ -2795,6 +2877,15 @@
         <button type="button" id="np-tab-lyrics" aria-pressed="false">歌词</button>
       </div>
       <div class="np-head-actions">
+      <!-- 与沉浸歌词页同一套两颗切换：封套/黑胶、双语注释。窄屏只留图标。 -->
+      <button type="button" id="np-vinyl" class="np-pill np-toggle" aria-pressed="false" title="切换封套与黑胶">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg>
+        <span id="np-vinyl-label">艺术封套</span>
+      </button>
+      <button type="button" id="np-translate" class="np-pill np-toggle" aria-pressed="true" title="显示或隐藏歌词翻译">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg>
+        <span>双语注释</span>
+      </button>
       <!-- 这颗不切换浏览器全屏：播放页要「更大」的时候，用户要的是沉浸声场本身。
            全屏播放页收在下面「更多操作」的工具面板里，入口没丢。 -->
       <button type="button" id="np-stage" class="np-ctrl" title="沉浸声场" aria-label="进入沉浸声场">
@@ -2811,14 +2902,28 @@
 
     <div class="np-body">
     <div class="np-now" id="np-cover-pane">
-      <div class="np-art" id="np-art"><svg class="np-art-note" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg></div>
+      <!-- 封面本体也是切换入口：点一下在封套与黑胶之间切换。 -->
+      <div class="np-art-wrap" id="np-art-wrap" role="button" tabindex="0" aria-label="艺术封套，点击切换黑胶唱盘" title="切换为黑胶唱盘">
+        <div class="np-art" id="np-art"><svg class="np-art-note" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg></div>
+        <div class="np-vinyl-disc" id="np-vinyl-disc" aria-hidden="true" hidden>
+          <span class="np-grooves"></span>
+          <span class="np-vinyl-label" id="np-vinyl-art"></span>
+          <span class="np-vinyl-hole"></span>
+        </div>
+      </div>
       <div class="np-meta">
-        <div class="np-name" id="np-name">未在播放</div>
+        <div class="np-title-row">
+          <div class="np-name" id="np-name">未在播放</div>
+          <button type="button" id="np-favorite" class="np-ctrl" title="收藏歌曲" aria-label="收藏歌曲" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart-outline"/></svg></button>
+        </div>
         <div class="np-artist" id="np-artist">从曲库中挑选一首</div>
         <!-- 曲源接力后的出处说明：用户点的是那一家、现在由这一家供音。没换过家
              就整行不出现（不占位、不吓人）。 -->
         <div class="np-origin" id="np-origin" hidden></div>
-        <button type="button" id="np-favorite" class="np-ctrl" title="收藏歌曲" aria-label="收藏歌曲" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart-outline"/></svg></button>
+        <div class="np-chips">
+          <span class="np-chip" id="np-quality" hidden></span>
+          <span class="np-chip" id="np-format" hidden></span>
+        </div>
       </div>
     </div>
     <section class="np-reading" id="np-reading" aria-label="歌词">

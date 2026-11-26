@@ -4,7 +4,60 @@
   'use strict';
   var el = {}, actions, opened = false, trigger, background = [], moves = [], eqMoves = [], overlayBackground = [];
   var linesRef, rows = [], active = -2, browsing = false, resize, queueKey = '', queueLimit = 60, lyricStatus = 'empty', view = 'cover';
+  // 与沉浸歌词页同名的两项呈现偏好：封套/黑胶、双语注释。分开存键，
+  // 两处各自记住自己的选择（播放页默认封套，阅读页也默认封套）。
+  var VINYL_KEY = 'vmusic.np.vinyl', TRANS_KEY = 'vmusic.np.translation';
+  var vinyl = false, translate = true, hasTranslation = false, artKey = '', chipsKey = '';
   function time(ms) { var s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+  function readStore(key, fallback) {
+    try { var v = window.localStorage.getItem(key); return v === null ? fallback : v === '1'; } catch (_) { return fallback; }
+  }
+  function writeStore(key, value) {
+    try { window.localStorage.setItem(key, value ? '1' : '0'); } catch (_) { /* 隐私模式 */ }
+  }
+  // 封面/黑胶/双语三项共用一次比对：背景图只在真的换歌时重写，
+  // 每帧都写 backgroundImage 会让浏览器反复解码同一张图。
+  function paintMedia(data) {
+    var bg = el.art && el.art.style.backgroundImage || '';
+    if (bg !== artKey) {
+      artKey = bg;
+      var none = !bg || bg === 'none';
+      [el.ambientArt, el.vinylArt].forEach(function (node) { if (node) node.style.backgroundImage = none ? '' : bg; });
+      el.modal.classList.toggle('has-cover', !none);
+    }
+    var track = data && data.track;
+    var quality = [], format = track && track.format ? String(track.format).toUpperCase() : '';
+    if (track && track.sample_rate) quality.push((track.sample_rate / 1000).toFixed(1) + ' kHz');
+    if (track && track.bitrate) quality.push(track.bitrate + ' kbps');
+    var key = quality.join('|') + '#' + format;
+    if (key !== chipsKey) {
+      chipsKey = key;
+      el.quality.textContent = quality.join(' · ');
+      el.quality.hidden = !quality.length;
+      el.format.textContent = format;
+      el.format.hidden = !format;
+    }
+    el.vinylDisc.classList.toggle('is-spinning', vinyl && !!(data && data.playing));
+  }
+  function syncToggles() {
+    if (!el.vinylBtn) return;
+    el.vinylBtn.setAttribute('aria-pressed', String(vinyl));
+    el.vinylLabel.textContent = vinyl ? '黑胶唱盘' : '艺术封套';
+    el.artWrap.classList.toggle('is-vinyl', vinyl);
+    el.vinylDisc.hidden = !vinyl;
+    el.artWrap.setAttribute('aria-label', vinyl ? '当前为黑胶唱盘，点击切换为艺术封套' : '当前为艺术封套，点击切换为黑胶唱盘');
+    el.artWrap.title = vinyl ? '切换为艺术封套' : '切换为黑胶唱盘';
+    el.translateBtn.setAttribute('aria-pressed', String(translate && hasTranslation));
+    el.translateBtn.disabled = !hasTranslation;
+    el.translateBtn.classList.toggle('is-off', !translate || !hasTranslation);
+    el.modal.dataset.translate = translate ? 'on' : 'off';
+  }
+  function toggleVinyl() {
+    vinyl = !vinyl;
+    writeStore(VINYL_KEY, vinyl);
+    syncToggles();
+    paintMedia(Stage.presentation());
+  }
   function move(node, parent, records) {
     if (!node) return;
     var anchor = document.createComment('ordinary-player');
@@ -58,7 +111,7 @@
   function buildLyrics() {
     var doc = Stage.lyrics(), lines = doc && doc.lines;
     if (lines === linesRef) return;
-    linesRef = lines; rows = []; active = -2; browsing = false;
+    linesRef = lines; rows = []; active = -2; browsing = false; hasTranslation = false;
     el.lines.replaceChildren(); el.follow.hidden = true;
     (lines || []).forEach(function (line, index) {
       var button = document.createElement('button'); button.type = 'button'; button.className = 'np-line';
@@ -72,11 +125,11 @@
       });
       if (cursor < source.length) button.appendChild(document.createTextNode(source.slice(cursor)));
       var translated = Stage.lyricTranslation(index);
-      if (translated) { var tr = document.createElement('span'); tr.className = 'np-translation'; tr.textContent = translated; button.appendChild(tr); }
+      if (translated) { var tr = document.createElement('span'); tr.className = 'np-translation'; tr.textContent = translated; button.appendChild(tr); hasTranslation = true; }
       button.onclick = function () { actions.seek(line.start_ms); resume(); };
       el.lines.appendChild(button); rows.push({ button: button, tokens: tokens, nodes: nodes });
     });
-    el.empty.hidden = !!rows.length; emptyState();
+    el.empty.hidden = !!rows.length; emptyState(); syncToggles();
   }
   function emptyState() {
     if (!opened) return;
@@ -138,6 +191,7 @@
     var mode = actions.modeState(); el.mode.title = mode.label; el.mode.setAttribute('aria-label', mode.label);
     el.mode.querySelector('use').setAttribute('href', mode.icon);
     emptyState();
+    paintMedia(data);
   }
   function fullscreenState() {
     var on = document.fullscreenElement === el.modal;
@@ -169,8 +223,20 @@
   }
   function init(hostActions) {
     actions = hostActions;
-    var ids = { modal: 'np-modal', scroll: 'np-lyric-scroll', lines: 'np-lyric-lines', empty: 'np-empty', reading: 'np-reading', follow: 'np-follow', coverTab: 'np-tab-cover', lyricsTab: 'np-tab-lyrics', queue: 'np-queue', queuePane: 'np-queue-pane', queueScrim: 'np-queue-scrim', queueList: 'np-queue-list', queueClose: 'np-queue-close', queueCount: 'np-queue-count', more: 'np-more', tools: 'np-tools', toolsClose: 'np-tools-close', stage: 'np-stage', fullscreen: 'np-fullscreen', elapsed: 'np-elapsed', duration: 'np-duration', favorite: 'np-favorite', mode: 'np-mode', eqPane: 'np-eq-pane' };
+    var ids = { modal: 'np-modal', scroll: 'np-lyric-scroll', lines: 'np-lyric-lines', empty: 'np-empty', reading: 'np-reading', follow: 'np-follow', coverTab: 'np-tab-cover', lyricsTab: 'np-tab-lyrics', queue: 'np-queue', queuePane: 'np-queue-pane', queueScrim: 'np-queue-scrim', queueList: 'np-queue-list', queueClose: 'np-queue-close', queueCount: 'np-queue-count', more: 'np-more', tools: 'np-tools', toolsClose: 'np-tools-close', stage: 'np-stage', fullscreen: 'np-fullscreen', elapsed: 'np-elapsed', duration: 'np-duration', favorite: 'np-favorite', mode: 'np-mode', eqPane: 'np-eq-pane',
+      art: 'np-art', artWrap: 'np-art-wrap', vinylBtn: 'np-vinyl', vinylLabel: 'np-vinyl-label', vinylDisc: 'np-vinyl-disc', vinylArt: 'np-vinyl-art', translateBtn: 'np-translate', ambientArt: 'np-ambient-art', quality: 'np-quality', format: 'np-format' };
     Object.keys(ids).forEach(function (key) { el[key] = document.getElementById(ids[key]); });
+    vinyl = readStore(VINYL_KEY, false); translate = readStore(TRANS_KEY, true);
+    el.vinylBtn.onclick = toggleVinyl;
+    el.artWrap.onclick = toggleVinyl;
+    el.artWrap.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault(); toggleVinyl();
+    });
+    el.translateBtn.onclick = function () {
+      if (el.translateBtn.disabled) return;
+      translate = !translate; writeStore(TRANS_KEY, translate); syncToggles();
+    };
     el.coverTab.onclick = function () { selectView('cover'); }; el.lyricsTab.onclick = function () { selectView('lyrics'); };
     el.queue.onclick = function () { showQueue(el.queuePane.hidden); }; el.queueClose.onclick = function () { showQueue(false); };
     el.queueScrim.onclick = function () { showQueue(false); };
@@ -205,7 +271,7 @@
     move(document.getElementById('ctx-menu'), el.modal, moves);
     background = Array.from(document.querySelectorAll('.topbar,.app,.bar,#capsule,.qf-lattice'));
     background = background.map(function (n) { var old = n.inert; n.inert = true; return { node: n, inert: old }; });
-    selectView(view); tick(); resize = new ResizeObserver(positionLine); resize.observe(el.scroll); resize.observe(el.lines);
+    selectView(view); syncToggles(); tick(); resize = new ResizeObserver(positionLine); resize.observe(el.scroll); resize.observe(el.lines);
     document.getElementById('np-close').focus({ preventScroll: true });
   }
   function close(options) {

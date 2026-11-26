@@ -7,6 +7,7 @@
   var featuredAlbums = [], featuredIndex = 0;
   var queueOpen = false, queueTrigger, lastView = '', pendingFrame = 0, menuKey = '', queueBackground = [];
   var queueTab = 'upnext', historyCache = null, historyFailed = false, historyEpoch = 0;
+  var heroCover = null, decorateTimer = 0, heroTimer = 0;
   var sidebarOpen = false, sidebarCollapsed = false, sidebarBackground = [], sidebarGesture = null;
   var sidebarKey = 'vmusic.hertz.sidebar.v1';
   var libraryTab = 'songs', libraryEpoch = 0, libraryController, libraryOffset = 0, libraryTotal = 0, libraryBusy = false;
@@ -58,21 +59,52 @@
       b.onclick = function () { refreshHome(true); }; parent.appendChild(b);
     }
   }
+  // 首页每一条横滑列表的节点缓存：换曲或补拉数据后整条重画会把每张封面
+  // 重新插入一遍，图片从 opacity:0 淡入，看起来就是「封面闪一下」。按
+  // 「来源 + id + 封面地址」复用节点，只重排顺序，封面就不再闪。
+  var stripCache = new WeakMap();
   function renderTracks(parent, items, empty, failed) {
-    parent.replaceChildren();
-    if (!items.length) { notice(parent, failed ? '内容暂时无法读取' : empty, failed); return; }
+    if (!items.length) {
+      stripCache.delete(parent);
+      parent.replaceChildren();
+      notice(parent, failed ? '内容暂时无法读取' : empty, failed);
+      return;
+    }
+    var cache = stripCache.get(parent);
+    if (!cache) { cache = new Map(); stripCache.set(parent, cache); }
+    var seen = Object.create(null), nodes = [];
     items.forEach(function (item) {
-      var tile = document.createElement('button'); tile.type = 'button'; tile.className = 'hz-music-tile';
-      tile.title = '播放 ' + item.title + (item.artist ? ' · ' + item.artist : '');
-      var cover = art(tile, item.cover, 'hz-tile-art');
-      var play = text('span', 'hz-tile-play', '', cover); play.innerHTML = icon('play');
-      text('strong', '', item.title, tile); text('small', '', item.artist || '未知歌手', tile);
-      tile.onclick = function () {
-        if (item.source === 'local') window.Skins.request('play-local', { id: item.id, list: items });
-        else window.Skins.request('play-online', { track: item.raw, list: items });
-      };
-      parent.appendChild(tile);
+      var key = (item.source || '') + ':' + item.id + '|' + (item.cover || '');
+      seen[key] = true;
+      var node = cache.get(key);
+      if (!node) {
+        node = document.createElement('button'); node.type = 'button'; node.className = 'hz-music-tile';
+        var cover = art(node, item.cover, 'hz-tile-art');
+        var play = text('span', 'hz-tile-play', '', cover); play.innerHTML = icon('play');
+        text('strong', '', item.title, node); text('small', '', item.artist || '未知歌手', node);
+        node.onclick = function () {
+          var it = this._item, list = this._items;
+          if (it.source === 'local') window.Skins.request('play-local', { id: it.id, list: list });
+          else window.Skins.request('play-online', { track: it.raw, list: list });
+        };
+        cache.set(key, node);
+      }
+      node._item = item; node._items = items;
+      node.title = '播放 ' + item.title + (item.artist ? ' · ' + item.artist : '');
+      nodes.push(node);
     });
+    cache.forEach(function (node, key) { if (!seen[key]) { node.remove(); cache.delete(key); } });
+    // 骨架格、上一次的提示条都不在 nodes 里：先摘掉，再按顺序排。
+    Array.prototype.slice.call(parent.children).forEach(function (child) { if (nodes.indexOf(child) < 0) child.remove(); });
+    var current = Array.prototype.slice.call(parent.children);
+    var same = current.length === nodes.length && current.every(function (node, index) { return node === nodes[index]; });
+    if (!same) {
+      var fragment = document.createDocumentFragment();
+      nodes.forEach(function (node) { fragment.appendChild(node); });
+      parent.appendChild(fragment);
+    }
+    var stale = parent.querySelector('.hz-empty-note');
+    if (stale) stale.remove();
     if (failed) notice(parent, '部分内容未能读取', true);
   }
   function refreshHome(force) {
@@ -416,7 +448,7 @@
     refs.queueTabUp.setAttribute('aria-pressed', String(queueTab === 'upnext'));
     refs.queueTabHistory.classList.toggle('is-active', queueTab === 'history');
     refs.queueTabHistory.setAttribute('aria-pressed', String(queueTab === 'history'));
-    paintQueueNow(queue.find(function (item) { return item.current; }));
+    paintQueueNow(queueCoverOf(queue));
     refs.queueFootCount.textContent = queue.length ? '共 ' + queue.length + ' 首' : '队列为空';
     if (queueTab === 'history') { paintQueueHistory(nextFocus); return; }
 
@@ -462,6 +494,16 @@
       var target = rows[Math.min(Math.max(0, at || 0), rows.length - 1)];
       if (target) target.focus({ preventScroll: !Number.isInteger(nextFocus) });
     }
+  }
+
+  // 正在播放卡：队列快照里的封面来自已解析元数据，在线曲有时只有快照、
+  // 没有封面地址；Stage 的呈现层已经把当前封面解析好了，缺的时候借它。
+  function queueCoverOf(queue) {
+    var current = queue.find(function (item) { return item.current; });
+    if (!current || current.cover) return current;
+    var pres = window.Stage && typeof window.Stage.presentation === 'function' ? window.Stage.presentation() : null;
+    if (pres && pres.cover) current.cover = pres.cover;
+    return current;
   }
 
   function paintQueueNow(current) {
@@ -514,6 +556,118 @@
       historyFailed = true; queueKey = '';
       if (queueOpen && queueTab === 'history') paintQueue();
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 播放队列页：顶部「正在播放」卡 + 行装饰
+  //
+  // 队列页的行由 app.js 的 renderQueue 生成（拖拽、点击都在那边），皮肤只做
+  // 「看得见的补充」：顶部一张正在播放卡；当前行的序号换成跳动的电平条；
+  // 封面本就在 DOM 里（.q-art），只是基础样式默认隐藏，这里放开并给出行高。
+  // 每次重建行都会重放一遍装饰，所以用微任务合并同一次重排里的多次通知。
+  // ---------------------------------------------------------------------------
+
+  function paintQueueHero() {
+    var hero = refs.queueHero;
+    if (!hero) return;
+    var p = window.Stage && typeof window.Stage.presentation === 'function' ? window.Stage.presentation() : null;
+    var track = p && p.track;
+    if (!track) { hero.hidden = true; heroCover = null; return; }
+    hero.hidden = false;
+    if (refs.queueHeroTitle.textContent !== (track.title || '未知曲目')) refs.queueHeroTitle.textContent = track.title || '未知曲目';
+    var sub = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
+    if (refs.queueHeroSub.textContent !== sub) refs.queueHeroSub.textContent = sub;
+    var ratio = p.duration > 0 ? Math.max(0, Math.min(1, p.position / p.duration)) : 0;
+    refs.queueHeroBar.style.width = (ratio * 100).toFixed(2) + '%';
+    refs.queueHeroPlay.classList.toggle('is-playing', !!p.playing);
+    refs.queueHeroPlay.setAttribute('aria-label', p.playing ? '暂停' : '播放');
+    refs.queueHeroPlay.title = p.playing ? '暂停' : '播放';
+    if (p.cover !== heroCover) {
+      heroCover = p.cover;
+      var holder = refs.queueHeroArt;
+      holder.replaceChildren();
+      holder.innerHTML = icon('disc');
+      if (p.cover) {
+        var img = document.createElement('img'); img.alt = ''; img.loading = 'lazy';
+        window.SkinShared.applyImg(img, p.cover);
+        holder.appendChild(img);
+      }
+    }
+  }
+
+  function decorateQueueRows() {
+    var list = id('queue-list');
+    if (!list) return;
+    var p = window.Stage && typeof window.Stage.presentation === 'function' ? window.Stage.presentation() : null;
+    var playing = !!(p && p.playing);
+    // app.js 的高亮只在渲染那一刻按快照算；这里再按当前曲目 id 兜一层，
+    // 换曲/接力之后队列页也能立刻指出「就是这首」。
+    var currentId = p && p.track ? p.track.id : '';
+    Array.prototype.forEach.call(list.querySelectorAll('.q-row'), function (row) {
+      var num = row.querySelector('.q-num');
+      if (!num) return;
+      var isCurrent = row.classList.contains('playing') || (!!currentId && row.dataset.trackId === currentId);
+      row.classList.toggle('hz-q-current', isCurrent);
+      var eq = num.querySelector('.hz-queue-eq');
+      if (isCurrent && !eq) {
+        num.textContent = '';
+        var bars = make('span', 'hz-queue-eq', num);
+        for (var i = 0; i < 3; i += 1) make('i', 'hz-queue-eq-bar' + (playing ? ' is-playing' : ''), bars);
+      } else if (!isCurrent && eq) {
+        num.textContent = String(Number(row.dataset.index || 0) + 1);
+      } else if (eq) {
+        Array.prototype.forEach.call(eq.children, function (bar) { bar.classList.toggle('is-playing', playing); });
+      }
+    });
+  }
+
+  function mountQueuePage() {
+    var view = id('view-queue'), list = id('queue-list');
+    if (!view || !list) return;
+    var tools = view.querySelector('.col-tools');
+    if (tools) {
+      var shuffle = button(tools, 'btn hz-queue-shuffle', '随机播放队列', 'shuffle', function () { window.Skins.request('queue-shuffle'); });
+      tools.insertBefore(shuffle, tools.firstChild);
+      cleanup.push(function () { shuffle.remove(); });
+    }
+    var hero = make('section', 'hz-queue-hero', view);
+    view.insertBefore(hero, list);
+    hero.setAttribute('aria-label', '正在播放');
+    refs.queueHero = hero;
+    refs.queueHeroArt = art(hero, '', 'hz-queue-hero-art');
+    var copy = make('div', 'hz-queue-hero-copy', hero);
+    text('span', 'hz-queue-hero-label', '正在播放', copy);
+    refs.queueHeroTitle = make('strong', 'hz-queue-hero-title', copy);
+    refs.queueHeroSub = make('small', 'hz-queue-hero-sub', copy);
+    var progress = make('div', 'hz-queue-hero-progress', copy);
+    refs.queueHeroBar = make('i', '', progress);
+    var actions = make('div', 'hz-queue-hero-actions', hero);
+    button(actions, 'hz-queue-hero-btn', '上一首', 'prev', function () { if (window.HertzPlayback) window.HertzPlayback.previous(); });
+    refs.queueHeroPlay = button(actions, 'hz-queue-hero-btn is-primary', '播放 / 暂停', '', function () { if (window.HertzPlayback) window.HertzPlayback.toggle(); });
+    refs.queueHeroPlay.innerHTML = '<svg class="hz-qh-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"></use></svg><svg class="hz-qh-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"></use></svg>';
+    button(actions, 'hz-queue-hero-btn', '下一首', 'next', function () { if (window.HertzPlayback) window.HertzPlayback.next(); });
+    cleanup.push(function () {
+      hero.remove(); clearTimeout(decorateTimer); window.clearInterval(heroTimer);
+    });
+    listen(document, 'queue:changed', function () { scheduleDecorate(); paintQueueHero(); });
+    listen(document, 'playback:track', function () { scheduleDecorate(); paintQueueHero(); });
+    listen(document, 'stage:playing-changed', function () { scheduleDecorate(); paintQueueHero(); });
+    // app.js 会在切视图时整体重画行，且不一定派发 queue:changed；观察列表本身
+    // 最稳：行一换，装饰跟着补一遍。
+    var listObserver = new MutationObserver(function () { scheduleDecorate(); });
+    listObserver.observe(list, { childList: true });
+    cleanup.push(function () { listObserver.disconnect(); });
+    heroTimer = window.setInterval(function () {
+      if (!mounted || !window.HertzShell || window.HertzShell.activeView() !== 'queue') return;
+      paintQueueHero();
+      decorateQueueRows();
+    }, 1000);
+    paintQueueHero();
+    scheduleDecorate();
+    function scheduleDecorate() {
+      if (decorateTimer) return;
+      decorateTimer = window.setTimeout(function () { decorateTimer = 0; decorateQueueRows(); }, 0);
+    }
   }
 
   function mountQueue(app) {
@@ -794,7 +948,7 @@
     layout.move(id('mode'), document.querySelector('.bar-controls'), id('prev'));
     // 队列抽屉拦截展示入口，原队列页面仍可管理所有曲目。
     listen(id('bar-queue'), 'click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); setQueue(!queueOpen, event.currentTarget); }, true);
-    mountHome(); mountLibrary(); mountPreferences(); mountQueue(app); mountMobile(); mountSidebar(rail, topbar); mountScrollActivity();
+    mountHome(); mountLibrary(); mountPreferences(); mountQueue(app); mountQueuePage(); mountMobile(); mountSidebar(rail, topbar); mountScrollActivity();
     refs.playlistTabs = make('nav', 'hz-library-tabs', id('view-playlists')); refs.playlistTabs.setAttribute('aria-label', '曲库分类');
     id('view-playlists').querySelector('.col-head').after(refs.playlistTabs);
     [['songs', '歌曲'], ['album', '专辑'], ['artist', '歌手'], ['playlist', '歌单']].forEach(function (entry) {
