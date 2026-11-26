@@ -139,7 +139,8 @@ fn rss_blog_fixture_keeps_articles_and_skips_audio() {
 
 #[test]
 fn full_text_extracts_outer_article_with_nested_sections() {
-    let page = "<html><body><nav>导航</nav><article class='daily'><header>报头</header><h2>日报</h2>\
+    let page =
+        "<html><body><nav>导航</nav><article class='daily'><header>报头</header><h2>日报</h2>\
                 <header><h2>栏目标题</h2></header><p>第一段</p>\
                 <article><h3>子栏目</h3><p>第二段</p></article><aside>看点</aside></article>\
                 <footer>页脚</footer></body></html>";
@@ -152,7 +153,10 @@ fn full_text_extracts_outer_article_with_nested_sections() {
         usize::MAX,
     );
     assert!(!fragment.contains("报头") && !fragment.contains("看点"));
-    assert!(fragment.contains("<header><h2>栏目标题</h2></header>"), "chapter heading stays");
+    assert!(
+        fragment.contains("<header><h2>栏目标题</h2></header>"),
+        "chapter heading stays"
+    );
     assert!(fragment.starts_with("<article"));
     assert!(fragment.ends_with("</article>"));
     assert!(

@@ -491,7 +491,7 @@ fn extract_article_fragment(html: &str) -> &str {
                 let next_open = lower[search..].find(&open_tag).map(|i| search + i);
                 let next_close = lower[search..].find(&close_tag).map(|i| search + i);
                 if let Some(close) = next_close {
-                    if next_open.map_or(true, |opening| opening > close) {
+                    if next_open.is_none_or(|opening| opening > close) {
                         depth -= 1;
                         let close_end = lower[close..]
                             .find('>')
@@ -558,7 +558,7 @@ fn strip_blocks(html: &str, tag: &str, limit: usize) -> String {
             let next_open = lower[search..].find(&open_tag).map(|i| search + i);
             let next_close = lower[search..].find(&close_tag).map(|i| search + i);
             if let Some(close) = next_close {
-                if next_open.map_or(true, |opening| opening > close) {
+                if next_open.is_none_or(|opening| opening > close) {
                     depth -= 1;
                     let close_end = lower[close..]
                         .find('>')
@@ -595,11 +595,12 @@ fn strip_blocks(html: &str, tag: &str, limit: usize) -> String {
 }
 
 /// 全文抓取的图片登记表只在内存里短期留存：不写订阅库，也不污染条目的图片键。
-static FULL_TEXT_IMAGES: OnceLock<Mutex<HashMap<String, (Instant, HashMap<String, String>)>>> =
-    OnceLock::new();
+type FullTextImageCache = Mutex<HashMap<String, (Instant, HashMap<String, String>)>>;
+
+static FULL_TEXT_IMAGES: OnceLock<FullTextImageCache> = OnceLock::new();
 static FULL_TEXT_TOKEN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn full_text_image_cache() -> &'static Mutex<HashMap<String, (Instant, HashMap<String, String>)>> {
+fn full_text_image_cache() -> &'static FullTextImageCache {
     FULL_TEXT_IMAGES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
