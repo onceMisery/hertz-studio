@@ -30,13 +30,16 @@ Windows 桌面版面向 **Windows 11 64 位**。如果启动时提示缺少微�
 
 音乐库、歌单和设置保存在本机，本地音乐可以离线播放。也可以连接自己的远程音乐目录。
 
-![曲库：歌曲列表、专辑封面与播放队列](docs/images/readme/library.png)
+ <img width="1921" height="1200" alt="main" src="https://github.com/user-attachments/assets/be3d0cdd-08ba-474c-8466-a68b778ebfde" />
+
 
 ## 看见音乐
 
 **歌词舞台**把歌词、封面与音乐律动融入同一个画面。可以选择流光、字形、心象、商籁、凝彩等视觉风格，调整排版、背景与动态强度。
 
-![歌词舞台：歌词、封面与沉浸画面](docs/images/readme/lyrics-stage.png)
+
+<img width="1925" height="1247" alt="stage3d" src="https://github.com/user-attachments/assets/5fd2fb97-4cd8-4ae2-a51a-943c49211573" />
+
 
 **三维空间**提供海岸公路、星座、粒子反应堆、凤凰、封面星球等场景。拖动旋转、滚轮推拉，切换歌词或队列，找到适合这首歌的视角。
 
@@ -56,6 +59,8 @@ Windows 桌面版面向 **Windows 11 64 位**。如果启动时提示缺少微�
 ## 在线音乐、播客与阅读
 
 **在线音乐**提供音源选择、歌曲搜索、歌单浏览、歌词和音质选择。Full 版包含网易云音乐、QQ 音乐、酷狗、酷我、汽水、咪咕，并支持 Jamendo 与 ccMixter。账号功能与可播放音质取决于各音源的支持情况和你的账号权限。
+<img width="1921" height="1200" alt="login" src="https://github.com/user-attachments/assets/f585953d-1392-477a-a771-8ccafe4b62d8" />
+
 
 **播客**可以搜索节目、订阅公开播客、查看单集简介，并记住上次收听的位置。
 
